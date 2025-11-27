@@ -7,49 +7,30 @@
 [![JupyterLab 4](https://img.shields.io/badge/JupyterLab-4-orange.svg)](https://jupyterlab.readthedocs.io/en/stable/)
 [![Brought To You By KOLOMOLO](https://img.shields.io/badge/Brought%20To%20You%20By-KOLOMOLO-00ffff?style=flat)](https://kolomolo.com)
 
-Export markdown files to PDF, DOCX and HTML with embedded images directly from JupyterLab.
+Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No external dependencies required - just `pip install` and go.
+
+![Export Markdown As menu](.resources/screenshot.png)
+
 
 ## Features
 
-- **Export to PDF** - Convert markdown to publication-ready PDF documents
-- **Export to DOCX** - Generate Microsoft Word documents from markdown
-- **Export to HTML** - Create standalone HTML files with embedded images
-- **Embedded images** - Images are automatically embedded in exported documents
-- **Server-side conversion** - Uses pandoc for reliable document conversion
+- **PDF Export** - Full Unicode and emoji support via weasyprint
+- **DOCX Export** - Microsoft Word documents with proper formatting
+- **HTML Export** - Standalone files with embedded images
+- **Embedded Images** - Local images automatically converted to base64
+- **File Menu Integration** - "Export Markdown As" submenu appears when markdown is active
+- **Command Palette** - All export commands available via Ctrl+Shift+C
+- **Pure Python** - No pandoc, no LaTeX, no system dependencies
 
 ## Requirements
 
 - JupyterLab >= 4.0.0
-- Pandoc (system package)
-- For PDF export: XeLaTeX with DejaVu fonts
+- Python >= 3.9
 
-### Installing Pandoc
-
-**Ubuntu/Debian:**
+For PDF emoji support, install a color emoji font:
 ```bash
-sudo apt-get install pandoc
-```
-
-**macOS:**
-```bash
-brew install pandoc
-```
-
-**Windows:**
-```bash
-choco install pandoc
-```
-
-### Installing XeLaTeX for PDF Export
-
-**Ubuntu/Debian:**
-```bash
-sudo apt-get install texlive-xetex texlive-fonts-recommended fonts-dejavu
-```
-
-**macOS:**
-```bash
-brew install --cask mactex
+# Ubuntu/Debian
+sudo apt-get install fonts-noto-color-emoji
 ```
 
 ## Install
@@ -58,8 +39,28 @@ brew install --cask mactex
 pip install jupyterlab_export_markdown_extension
 ```
 
+That's it. No really, that's actually it. We spent considerable effort making sure you don't have to install pandoc, LaTeX, or sacrifice a goat to get this working.
+
+## Usage
+
+1. Open a markdown file in JupyterLab
+2. Use **File -> Export Markdown As** submenu, or
+3. Open command palette (Ctrl+Shift+C) and search "Export Markdown"
+
+## Export Formats
+
+| Format | Library | Notes |
+|--------|---------|-------|
+| PDF | weasyprint | Unicode, emojis, compact styling |
+| DOCX | python-docx + htmldocx | Banded tables, 0.5" margins |
+| HTML | markdown | Standalone with embedded images |
+
 ## Uninstall
 
 ```bash
 pip uninstall jupyterlab_export_markdown_extension
 ```
+
+## License
+
+BSD 3-Clause License

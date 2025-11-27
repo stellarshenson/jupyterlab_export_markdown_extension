@@ -2,7 +2,7 @@ import {
   JupyterFrontEnd,
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
-import { showErrorMessage } from '@jupyterlab/apputils';
+import { ICommandPalette, showErrorMessage } from '@jupyterlab/apputils';
 import { IMainMenu } from '@jupyterlab/mainmenu';
 import { Menu } from '@lumino/widgets';
 import { requestBlobAPI } from './request';
@@ -90,8 +90,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
   description:
     'JupyterLab extension to export markdown files as PDF, DOCX and HTML with embedded images',
   autoStart: true,
-  requires: [IMainMenu],
-  activate: (app: JupyterFrontEnd, mainMenu: IMainMenu) => {
+  requires: [IMainMenu, ICommandPalette],
+  activate: (app: JupyterFrontEnd, mainMenu: IMainMenu, palette: ICommandPalette) => {
     console.log(
       'JupyterLab extension jupyterlab_export_markdown_extension is activated!'
     );
@@ -148,24 +148,42 @@ const plugin: JupyterFrontEndPlugin<void> = {
 
     // Register export commands
     commands.addCommand(CommandIDs.exportPdf, {
-      label: 'PDF',
+      label: (args) => args.isPalette ? 'Export Markdown to PDF' : 'PDF',
       caption: 'Export markdown to PDF',
       isEnabled: isMarkdownOpen,
       execute: createExportExecutor('pdf')
     });
 
     commands.addCommand(CommandIDs.exportDocx, {
-      label: 'Microsoft Word (.docx)',
+      label: (args) => args.isPalette ? 'Export Markdown to Word (.docx)' : 'Microsoft Word (.docx)',
       caption: 'Export markdown to DOCX',
       isEnabled: isMarkdownOpen,
       execute: createExportExecutor('docx')
     });
 
     commands.addCommand(CommandIDs.exportHtml, {
-      label: 'HTML',
+      label: (args) => args.isPalette ? 'Export Markdown to HTML' : 'HTML',
       caption: 'Export markdown to HTML with embedded images',
       isEnabled: isMarkdownOpen,
       execute: createExportExecutor('html')
+    });
+
+    // Add commands to command palette
+    const category = 'Export Markdown';
+    palette.addItem({
+      command: CommandIDs.exportPdf,
+      category,
+      args: { isPalette: true }
+    });
+    palette.addItem({
+      command: CommandIDs.exportDocx,
+      category,
+      args: { isPalette: true }
+    });
+    palette.addItem({
+      command: CommandIDs.exportHtml,
+      category,
+      args: { isPalette: true }
     });
 
     // Create the "Export Markdown As" submenu

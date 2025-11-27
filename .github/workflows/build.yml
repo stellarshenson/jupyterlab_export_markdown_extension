@@ -33,6 +33,7 @@ jobs:
     - name: Test the extension
       run: |
         set -eux
+        jlpm run build
         jlpm run test
 
     - name: Build the extension
@@ -161,3 +162,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: jupyterlab/maintainer-tools/.github/actions/base-setup@v1
       - uses: jupyterlab/maintainer-tools/.github/actions/check-links@v1
+        with:
+          ignore_links: "https://www.npmjs.com/package/jupyterlab_export_markdown_extension https://pepy.tech/project/jupyterlab-export-markdown-extension https://static.pepy.tech/badge/jupyterlab-export-markdown-extension"
