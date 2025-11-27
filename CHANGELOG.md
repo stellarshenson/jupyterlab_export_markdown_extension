@@ -2,4 +2,38 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.0.2
+
+- Add export commands to command palette under "Export Markdown" category
+- Dynamic labels: full text in palette, short in menu
+- Update README with screenshot and modus primaris documentation style
+- Update GitHub workflow with ignore_links for badge URLs
+
+## 0.6.23
+
+- Switch PDF export from xhtml2pdf to weasyprint for proper Unicode and emoji support
+- Add Noto Color Emoji font support for PDF rendering
+- Create compact PDF stylesheet with tighter spacing
+
+## 0.6.19 (STABLE_BASIC_PDF)
+
+- Switch PDF export from fpdf2 to xhtml2pdf for HTML-to-PDF conversion
+- Resolve fpdf2 write_html() incompatibility with complex markdown-generated HTML
+
+## 0.6.17 (STABLE_DOCX)
+
+- Implement pure Python markdown export (no pandoc/LaTeX dependencies)
+- Add "Export Markdown As" submenu to File menu with visibility toggle
+- PDF export via fpdf2 with DejaVu fonts for Unicode support
+- DOCX export via python-docx with htmldocx parser
+- HTML export with embedded base64 images
+- DOCX formatting: 0.5" margins, banded tables (Light List Accent 1), no first column emphasis
+- Menu visibility controlled by shell.currentChanged signal
+
+## 0.1.0
+
+- Initial JupyterLab extension scaffolding
+- Frontend (TypeScript) and server (Python) components
+- GitHub workflows configured
+
 <!-- <END NEW CHANGELOG ENTRY> -->
