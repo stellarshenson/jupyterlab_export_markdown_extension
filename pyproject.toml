@@ -23,7 +23,10 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "jupyter_server>=2.4.0,<3"
+    "markdown>=3.4",
+    "fpdf2>=2.7",
+    "python-docx>=1.0",
+    "htmldocx>=0.0.6"
 ]
 dynamic = ["version", "description", "authors", "urls", "keywords"]
 

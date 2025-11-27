@@ -20,6 +20,37 @@ Export markdown files to PDF, DOCX and HTML with embedded images directly from J
 ## Requirements
 
 - JupyterLab >= 4.0.0
+- Pandoc (system package)
+- For PDF export: XeLaTeX with DejaVu fonts
+
+### Installing Pandoc
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install pandoc
+```
+
+**macOS:**
+```bash
+brew install pandoc
+```
+
+**Windows:**
+```bash
+choco install pandoc
+```
+
+### Installing XeLaTeX for PDF Export
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install texlive-xetex texlive-fonts-recommended fonts-dejavu
+```
+
+**macOS:**
+```bash
+brew install --cask mactex
+```
 
 ## Install
 

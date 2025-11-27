@@ -1,9 +1,13 @@
 import { URLExt } from '@jupyterlab/coreutils';
-
 import { ServerConnection } from '@jupyterlab/services';
 
 /**
- * Call the server extension
+ * API namespace for the extension
+ */
+const API_NAMESPACE = 'jupyterlab-export-markdown-extension';
+
+/**
+ * Call the server extension API
  *
  * @param endPoint API REST end point for the extension
  * @param init Initial values for the request
@@ -13,13 +17,8 @@ export async function requestAPI<T>(
   endPoint = '',
   init: RequestInit = {}
 ): Promise<T> {
-  // Make request to Jupyter API
   const settings = ServerConnection.makeSettings();
-  const requestUrl = URLExt.join(
-    settings.baseUrl,
-    'jupyterlab-export-markdown-extension', // our server extension's API namespace
-    endPoint
-  );
+  const requestUrl = URLExt.join(settings.baseUrl, API_NAMESPACE, endPoint);
 
   let response: Response;
   try {
@@ -43,4 +42,39 @@ export async function requestAPI<T>(
   }
 
   return data;
+}
+
+/**
+ * Call the server extension API and return a blob (for file downloads)
+ *
+ * @param endPoint API REST end point for the extension
+ * @param init Initial values for the request
+ * @returns The response body as a Blob
+ */
+export async function requestBlobAPI(
+  endPoint = '',
+  init: RequestInit = {}
+): Promise<Blob> {
+  const settings = ServerConnection.makeSettings();
+  const requestUrl = URLExt.join(settings.baseUrl, API_NAMESPACE, endPoint);
+
+  let response: Response;
+  try {
+    response = await ServerConnection.makeRequest(requestUrl, init, settings);
+  } catch (error) {
+    throw new ServerConnection.NetworkError(error as any);
+  }
+
+  if (!response.ok) {
+    let errorMessage: string;
+    try {
+      const errorData = await response.json();
+      errorMessage = errorData.message || errorData.error || response.statusText;
+    } catch {
+      errorMessage = response.statusText;
+    }
+    throw new ServerConnection.ResponseError(response, errorMessage);
+  }
+
+  return await response.blob();
 }
