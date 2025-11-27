@@ -1,5 +1,4 @@
 import json
-import pytest
 
 
 async def test_export_pdf_no_path(jp_fetch):
@@ -9,6 +8,7 @@ async def test_export_pdf_no_path(jp_fetch):
         "export/pdf",
         method="POST",
         body=json.dumps({}),
+        raise_error=False,
     )
     assert response.code == 400
     payload = json.loads(response.body)
@@ -23,6 +23,7 @@ async def test_export_docx_no_path(jp_fetch):
         "export/docx",
         method="POST",
         body=json.dumps({}),
+        raise_error=False,
     )
     assert response.code == 400
     payload = json.loads(response.body)
@@ -37,6 +38,7 @@ async def test_export_html_no_path(jp_fetch):
         "export/html",
         method="POST",
         body=json.dumps({}),
+        raise_error=False,
     )
     assert response.code == 400
     payload = json.loads(response.body)
@@ -51,6 +53,7 @@ async def test_export_pdf_file_not_found(jp_fetch):
         "export/pdf",
         method="POST",
         body=json.dumps({"path": "nonexistent.md"}),
+        raise_error=False,
     )
     assert response.code == 404
     payload = json.loads(response.body)
