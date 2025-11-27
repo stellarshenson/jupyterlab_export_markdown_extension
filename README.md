@@ -26,11 +26,11 @@ Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No extern
 - JupyterLab >= 4.0.0
 - Python >= 3.9
 
-For PDF emoji support, install a color emoji font:
+For PDF export, install required system libraries and emoji font:
 
 ```bash
 # Ubuntu/Debian
-sudo apt-get install fonts-noto-color-emoji
+sudo apt-get install libpango-1.0-0 libpangoft2-1.0-0 fonts-noto-color-emoji
 ```
 
 ## Install

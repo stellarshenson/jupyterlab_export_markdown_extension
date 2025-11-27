@@ -95,8 +95,12 @@ class ExportHandlerBase(APIHandler):
         if compact:
             # PDF-optimized stylesheet with tighter spacing
             style = '''
+        @page {
+            size: A4;
+            margin: 0.5in;
+        }
         body {
-            font-family: Helvetica, Arial, "Noto Color Emoji", sans-serif;
+            font-family: Calibri, "Noto Color Emoji", sans-serif;
             font-size: 11pt;
             line-height: 1.4;
             margin: 0;
@@ -104,7 +108,7 @@ class ExportHandlerBase(APIHandler):
             color: #333;
         }
         p {
-            margin: 0.4em 0;
+            margin: 0.1em 0 0.4em 0;
         }
         pre {
             background: #f4f4f4;
@@ -126,41 +130,58 @@ class ExportHandlerBase(APIHandler):
             border-collapse: collapse;
             width: 100%;
             margin: 0.5em 0;
-            font-size: 10pt;
+            font-size: 9pt;
+            table-layout: fixed;
+            word-wrap: break-word;
         }
         th, td {
             border: 1px solid #ddd;
-            padding: 4px 6px;
+            padding: 3px 5px;
             text-align: left;
+            overflow: hidden;
         }
         th {
-            background: #f4f4f4;
+            background: #dbe5f1;
+            color: #365F91;
+            font-weight: bold;
         }
         img {
             max-width: 100%;
             height: auto;
         }
         blockquote {
-            border-left: 3px solid #ddd;
+            border-left: 3px solid #4F81BD;
             margin: 0.5em 0;
             padding-left: 10px;
             color: #666;
         }
+        h1, h2, h3, h4, h5, h6 {
+            font-family: Calibri, "Noto Color Emoji", sans-serif;
+        }
         h1 {
             font-size: 18pt;
-            margin: 0.6em 0 0.3em 0;
+            margin: 0.6em 0 0.15em 0;
+            color: #365F91;
         }
         h2 {
             font-size: 14pt;
-            margin: 0.5em 0 0.2em 0;
+            margin: 0.5em 0 0.1em 0;
+            color: #4F81BD;
         }
         h3 {
             font-size: 12pt;
-            margin: 0.4em 0 0.2em 0;
+            margin: 0.4em 0 0.1em 0;
+            color: #4F81BD;
         }
-        h4, h5, h6 {
+        h4 {
             font-size: 11pt;
-            margin: 0.3em 0 0.2em 0;
+            margin: 0.3em 0 0.1em 0;
+            color: #4F81BD;
+        }
+        h5, h6 {
+            font-size: 11pt;
+            margin: 0.3em 0 0.1em 0;
+            color: #243F60;
         }
         ul, ol {
             margin: 0.3em 0;
@@ -168,6 +189,11 @@ class ExportHandlerBase(APIHandler):
         }
         li {
             margin: 0.1em 0;
+        }
+        a {
+            color: #0563C1;
+            text-decoration: underline;
+            text-underline-offset: 2px;
         }'''
         else:
             # Standard HTML stylesheet
