@@ -173,60 +173,20 @@ class ExportPdfHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            content = self.embed_images_as_base64(content, file_path.parent)
+            html = self.markdown_to_html(content, file_path.stem)
 
-            from fpdf import FPDF
+            from xhtml2pdf import pisa
 
-            pdf = FPDF(orientation='P', unit='mm', format='A4')
-            pdf.set_margins(15, 15, 15)
-            pdf.set_auto_page_break(auto=True, margin=15)
+            pdf_buffer = io.BytesIO()
+            pisa_status = pisa.CreatePDF(html, dest=pdf_buffer)
 
-            # Add Unicode font (DejaVu) for proper character support
-            font_dir = '/usr/share/fonts/truetype/dejavu'
-            font_name = 'Helvetica'
-            if os.path.exists(f'{font_dir}/DejaVuSans.ttf'):
-                pdf.add_font('DejaVu', '', f'{font_dir}/DejaVuSans.ttf')
-                pdf.add_font('DejaVu', 'B', f'{font_dir}/DejaVuSans-Bold.ttf')
-                pdf.add_font('DejaVu', 'I', f'{font_dir}/DejaVuSans-Oblique.ttf')
-                pdf.add_font('DejaVu', 'BI', f'{font_dir}/DejaVuSans-BoldOblique.ttf')
-                font_name = 'DejaVu'
+            if pisa_status.err:
+                self.set_status(500)
+                self.finish(json.dumps({'error': 'PDF generation failed'}))
+                return
 
-            pdf.add_page()
-            pdf.set_font(font_name, size=11)
-
-            # Calculate effective width (page width minus margins)
-            effective_width = pdf.w - pdf.l_margin - pdf.r_margin
-
-            # Render markdown with basic formatting
-            for line in content.split('\n'):
-                # Reset X position to left margin for each line
-                pdf.set_x(pdf.l_margin)
-
-                if line.startswith('# '):
-                    pdf.set_font(font_name, 'B', 18)
-                    pdf.multi_cell(effective_width, 10, line[2:])
-                    pdf.ln(2)
-                elif line.startswith('## '):
-                    pdf.set_font(font_name, 'B', 15)
-                    pdf.multi_cell(effective_width, 8, line[3:])
-                    pdf.ln(2)
-                elif line.startswith('### '):
-                    pdf.set_font(font_name, 'B', 13)
-                    pdf.multi_cell(effective_width, 7, line[4:])
-                    pdf.ln(1)
-                elif line.startswith('#### '):
-                    pdf.set_font(font_name, 'B', 11)
-                    pdf.multi_cell(effective_width, 6, line[5:])
-                    pdf.ln(1)
-                elif line.startswith('- ') or line.startswith('* '):
-                    pdf.set_font(font_name, size=11)
-                    pdf.multi_cell(effective_width, 6, f'  • {line[2:]}')
-                elif line.strip() == '':
-                    pdf.ln(3)
-                else:
-                    pdf.set_font(font_name, size=11)
-                    pdf.multi_cell(effective_width, 6, line)
-
-            pdf_content = pdf.output()
+            pdf_content = pdf_buffer.getvalue()
 
             self.set_header('Content-Type', 'application/pdf')
             self.set_header('Content-Disposition',
@@ -236,7 +196,7 @@ class ExportPdfHandler(ExportHandlerBase):
         except ImportError as e:
             self.set_status(500)
             self.finish(json.dumps({
-                'error': f'Missing dependency: {e}. Install with: pip install fpdf2 markdown'
+                'error': f'Missing dependency: {e}. Install with: pip install xhtml2pdf markdown'
             }))
         except Exception as e:
             self.set_status(500)
