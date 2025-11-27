@@ -11,7 +11,6 @@ Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No extern
 
 ![Export Markdown As menu](.resources/screenshot.png)
 
-
 ## Features
 
 - **PDF Export** - Full Unicode and emoji support via weasyprint
@@ -28,6 +27,7 @@ Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No extern
 - Python >= 3.9
 
 For PDF emoji support, install a color emoji font:
+
 ```bash
 # Ubuntu/Debian
 sudo apt-get install fonts-noto-color-emoji
@@ -49,11 +49,11 @@ That's it. No really, that's actually it. We spent considerable effort making su
 
 ## Export Formats
 
-| Format | Library | Notes |
-|--------|---------|-------|
-| PDF | weasyprint | Unicode, emojis, compact styling |
-| DOCX | python-docx + htmldocx | Banded tables, 0.5" margins |
-| HTML | markdown | Standalone with embedded images |
+| Format | Library                | Notes                            |
+| ------ | ---------------------- | -------------------------------- |
+| PDF    | weasyprint             | Unicode, emojis, compact styling |
+| DOCX   | python-docx + htmldocx | Banded tables, 0.5" margins      |
+| HTML   | markdown               | Standalone with embedded images  |
 
 ## Uninstall
 

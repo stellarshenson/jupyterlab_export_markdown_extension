@@ -91,7 +91,11 @@ const plugin: JupyterFrontEndPlugin<void> = {
     'JupyterLab extension to export markdown files as PDF, DOCX and HTML with embedded images',
   autoStart: true,
   requires: [IMainMenu, ICommandPalette],
-  activate: (app: JupyterFrontEnd, mainMenu: IMainMenu, palette: ICommandPalette) => {
+  activate: (
+    app: JupyterFrontEnd,
+    mainMenu: IMainMenu,
+    palette: ICommandPalette
+  ) => {
     console.log(
       'JupyterLab extension jupyterlab_export_markdown_extension is activated!'
     );
@@ -136,7 +140,10 @@ const plugin: JupyterFrontEndPlugin<void> = {
           try {
             await exportMarkdown(path, format);
           } catch (error) {
-            console.error(`Failed to export to ${format.toUpperCase()}:`, error);
+            console.error(
+              `Failed to export to ${format.toUpperCase()}:`,
+              error
+            );
             showErrorMessage(
               `Export to ${format.toUpperCase()} Failed`,
               error instanceof Error ? error.message : String(error)
@@ -148,21 +155,24 @@ const plugin: JupyterFrontEndPlugin<void> = {
 
     // Register export commands
     commands.addCommand(CommandIDs.exportPdf, {
-      label: (args) => args.isPalette ? 'Export Markdown to PDF' : 'PDF',
+      label: args => (args.isPalette ? 'Export Markdown to PDF' : 'PDF'),
       caption: 'Export markdown to PDF',
       isEnabled: isMarkdownOpen,
       execute: createExportExecutor('pdf')
     });
 
     commands.addCommand(CommandIDs.exportDocx, {
-      label: (args) => args.isPalette ? 'Export Markdown to Word (.docx)' : 'Microsoft Word (.docx)',
+      label: args =>
+        args.isPalette
+          ? 'Export Markdown to Word (.docx)'
+          : 'Microsoft Word (.docx)',
       caption: 'Export markdown to DOCX',
       isEnabled: isMarkdownOpen,
       execute: createExportExecutor('docx')
     });
 
     commands.addCommand(CommandIDs.exportHtml, {
-      label: (args) => args.isPalette ? 'Export Markdown to HTML' : 'HTML',
+      label: args => (args.isPalette ? 'Export Markdown to HTML' : 'HTML'),
       caption: 'Export markdown to HTML with embedded images',
       isEnabled: isMarkdownOpen,
       execute: createExportExecutor('html')
@@ -194,10 +204,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
     exportMenu.addItem({ command: CommandIDs.exportHtml });
 
     // Add submenu to File menu (rank 5 = near Save/Export section)
-    mainMenu.fileMenu.addGroup(
-      [{ type: 'submenu', submenu: exportMenu }],
-      5
-    );
+    mainMenu.fileMenu.addGroup([{ type: 'submenu', submenu: exportMenu }], 5);
 
     // Update submenu visibility when current widget changes
     const updateMenuVisibility = () => {

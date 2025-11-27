@@ -69,7 +69,8 @@ export async function requestBlobAPI(
     let errorMessage: string;
     try {
       const errorData = await response.json();
-      errorMessage = errorData.message || errorData.error || response.statusText;
+      errorMessage =
+        errorData.message || errorData.error || response.statusText;
     } catch {
       errorMessage = response.statusText;
     }
