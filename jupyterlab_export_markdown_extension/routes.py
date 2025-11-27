@@ -72,8 +72,15 @@ class ExportHandlerBase(APIHandler):
 
         return re.sub(img_pattern, replace_image, content)
 
-    def markdown_to_html(self, content: str, title: str = 'Exported Document') -> str:
-        """Convert markdown to standalone HTML."""
+    def markdown_to_html(self, content: str, title: str = 'Exported Document',
+                         compact: bool = False) -> str:
+        """Convert markdown to standalone HTML.
+
+        Args:
+            content: Markdown content to convert
+            title: Document title
+            compact: If True, use tighter spacing (for PDF)
+        """
         import markdown
 
         md = markdown.Markdown(extensions=[
@@ -85,63 +92,144 @@ class ExportHandlerBase(APIHandler):
         ])
         body = md.convert(content)
 
-        html = f'''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>{title}</title>
-    <style>
-        body {{
+        if compact:
+            # PDF-optimized stylesheet with tighter spacing
+            style = '''
+        body {
+            font-family: Helvetica, Arial, "Noto Color Emoji", sans-serif;
+            font-size: 11pt;
+            line-height: 1.4;
+            margin: 0;
+            padding: 0;
+            color: #333;
+        }
+        p {
+            margin: 0.4em 0;
+        }
+        pre {
+            background: #f4f4f4;
+            padding: 8px;
+            margin: 0.5em 0;
+            font-size: 9pt;
+        }
+        code {
+            background: #f4f4f4;
+            padding: 1px 3px;
+            font-family: Courier, monospace;
+            font-size: 9pt;
+        }
+        pre code {
+            background: none;
+            padding: 0;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 0.5em 0;
+            font-size: 10pt;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 4px 6px;
+            text-align: left;
+        }
+        th {
+            background: #f4f4f4;
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+        }
+        blockquote {
+            border-left: 3px solid #ddd;
+            margin: 0.5em 0;
+            padding-left: 10px;
+            color: #666;
+        }
+        h1 {
+            font-size: 18pt;
+            margin: 0.6em 0 0.3em 0;
+        }
+        h2 {
+            font-size: 14pt;
+            margin: 0.5em 0 0.2em 0;
+        }
+        h3 {
+            font-size: 12pt;
+            margin: 0.4em 0 0.2em 0;
+        }
+        h4, h5, h6 {
+            font-size: 11pt;
+            margin: 0.3em 0 0.2em 0;
+        }
+        ul, ol {
+            margin: 0.3em 0;
+            padding-left: 1.5em;
+        }
+        li {
+            margin: 0.1em 0;
+        }'''
+        else:
+            # Standard HTML stylesheet
+            style = '''
+        body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             line-height: 1.6;
             max-width: 800px;
             margin: 0 auto;
             padding: 20px;
             color: #333;
-        }}
-        pre {{
+        }
+        pre {
             background: #f4f4f4;
             padding: 10px;
             border-radius: 4px;
             overflow-x: auto;
-        }}
-        code {{
+        }
+        code {
             background: #f4f4f4;
             padding: 2px 4px;
             border-radius: 2px;
             font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-        }}
-        pre code {{
+        }
+        pre code {
             background: none;
             padding: 0;
-        }}
-        table {{
+        }
+        table {
             border-collapse: collapse;
             width: 100%;
             margin: 1em 0;
-        }}
-        th, td {{
+        }
+        th, td {
             border: 1px solid #ddd;
             padding: 8px;
             text-align: left;
-        }}
-        th {{
+        }
+        th {
             background: #f4f4f4;
-        }}
-        img {{
+        }
+        img {
             max-width: 100%;
             height: auto;
-        }}
-        blockquote {{
+        }
+        blockquote {
             border-left: 4px solid #ddd;
             margin: 0;
             padding-left: 16px;
             color: #666;
-        }}
-        h1, h2, h3, h4, h5, h6 {{
+        }
+        h1, h2, h3, h4, h5, h6 {
             margin-top: 1.5em;
             margin-bottom: 0.5em;
-        }}
+        }'''
+
+        html = f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{title}</title>
+    <style>{style}
     </style>
 </head>
 <body>
@@ -174,19 +262,11 @@ class ExportPdfHandler(ExportHandlerBase):
 
             content = self.read_markdown_file(file_path)
             content = self.embed_images_as_base64(content, file_path.parent)
-            html = self.markdown_to_html(content, file_path.stem)
+            html = self.markdown_to_html(content, file_path.stem, compact=True)
 
-            from xhtml2pdf import pisa
+            from weasyprint import HTML
 
-            pdf_buffer = io.BytesIO()
-            pisa_status = pisa.CreatePDF(html, dest=pdf_buffer)
-
-            if pisa_status.err:
-                self.set_status(500)
-                self.finish(json.dumps({'error': 'PDF generation failed'}))
-                return
-
-            pdf_content = pdf_buffer.getvalue()
+            pdf_content = HTML(string=html).write_pdf()
 
             self.set_header('Content-Type', 'application/pdf')
             self.set_header('Content-Disposition',
@@ -196,7 +276,7 @@ class ExportPdfHandler(ExportHandlerBase):
         except ImportError as e:
             self.set_status(500)
             self.finish(json.dumps({
-                'error': f'Missing dependency: {e}. Install with: pip install xhtml2pdf markdown'
+                'error': f'Missing dependency: {e}. Install with: pip install weasyprint markdown'
             }))
         except Exception as e:
             self.set_status(500)
