@@ -14,12 +14,14 @@ Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No extern
 ## Features
 
 - **PDF Export** - Full Unicode and emoji support via weasyprint
-- **DOCX Export** - Microsoft Word documents with proper formatting
+- **DOCX Export** - Microsoft Word documents with smart image sizing (fit-to-page for large images)
 - **HTML Export** - Standalone files with embedded images
-- **Mermaid Diagrams** - Automatically rendered to images (requires mermaid-cli)
+- **Mermaid Diagrams** - Client-side rendering with calibrated DPI scaling (configurable, default 150 DPI)
 - **Embedded Images** - Local images automatically converted to base64
+- **Export Spinner** - Modal dialog shows progress during export operations
 - **File Menu Integration** - "Export Markdown As" submenu appears when markdown is active
 - **Command Palette** - All export commands available via Ctrl+Shift+C
+- **Settings** - Configure diagram DPI via JupyterLab Settings Editor
 - **Pure Python** - No pandoc, no LaTeX, no system dependencies
 
 ## Requirements
@@ -31,14 +33,10 @@ For PDF export, install required system libraries and emoji font:
 
 ```bash
 # Ubuntu/Debian
-sudo apt-get install libpango-1.0-0 libpangoft2-1.0-0 fonts-noto-color-emoji
+sudo apt-get install libcairo2 libpango-1.0-0 libpangoft2-1.0-0 fonts-noto-color-emoji
 ```
 
-For Mermaid diagram rendering (optional), install mermaid-cli:
-
-```bash
-npm install -g @mermaid-js/mermaid-cli
-```
+Mermaid diagrams are rendered client-side using JupyterLab's built-in Mermaid support - no additional installation required.
 
 ## Install
 
@@ -56,11 +54,17 @@ That's it. No really, that's actually it. We spent considerable effort making su
 
 ## Export Formats
 
-| Format | Library                | Notes                            |
-| ------ | ---------------------- | -------------------------------- |
-| PDF    | weasyprint             | Unicode, emojis, compact styling |
-| DOCX   | python-docx + htmldocx | Banded tables, 0.5" margins      |
-| HTML   | markdown               | Standalone with embedded images  |
+| Format | Library                | Notes                                           |
+| ------ | ---------------------- | ----------------------------------------------- |
+| PDF    | weasyprint             | Unicode, emojis, compact styling                |
+| DOCX   | python-docx + htmldocx | Smart image sizing, banded tables, 0.5" margins |
+| HTML   | markdown               | Standalone with embedded images                 |
+
+## Settings
+
+Configure the extension via **Settings -> Settings Editor -> Export Markdown Extension**:
+
+- **Diagram DPI** - Resolution for Mermaid diagrams (default: 150, range: 72-600)
 
 ## Uninstall
 

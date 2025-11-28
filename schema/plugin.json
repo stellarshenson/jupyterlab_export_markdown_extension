@@ -7,9 +7,9 @@
   "properties": {
     "diagramDPI": {
       "title": "Diagram DPI",
-      "description": "Resolution for Mermaid diagram images in exports (dots per inch). Uses calibrated scaling matching jupyterlab_mmd_to_png_extension. Standard values: 150 (draft), 300 (standard print quality).",
+      "description": "Resolution for Mermaid diagram images in exports (dots per inch). Uses calibrated scaling matching jupyterlab_mmd_to_png_extension. Standard values: 150 (standard), 300 (high quality print).",
       "type": "number",
-      "default": 300,
+      "default": 150,
       "minimum": 72,
       "maximum": 600
     }

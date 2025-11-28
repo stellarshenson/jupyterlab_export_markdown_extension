@@ -2,6 +2,20 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.1.4
+
+- Client-side Mermaid diagram capture with calibrated DPI scaling (no server-side mmdc required)
+- Configurable diagram DPI via Settings Editor (default 150, range 72-600)
+- Smart DOCX image sizing: preserve small images, fit large ones to page dimensions
+- Modal dialog spinner during export operations
+- Fix "File name too long" error in DOCX export
+
+## 1.0.3
+
+- Add Mermaid diagram rendering to exports via mermaid-cli
+- Refine PDF export styling for MS Word compatibility
+- Add export commands to command palette under "Export Markdown" category
+
 ## 1.0.2
 
 - Add export commands to command palette under "Export Markdown" category

@@ -2,10 +2,14 @@ import {
   JupyterFrontEnd,
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
-import { ICommandPalette, showErrorMessage } from '@jupyterlab/apputils';
+import {
+  Dialog,
+  ICommandPalette,
+  showErrorMessage
+} from '@jupyterlab/apputils';
 import { IMainMenu } from '@jupyterlab/mainmenu';
 import { ISettingRegistry } from '@jupyterlab/settingregistry';
-import { Menu } from '@lumino/widgets';
+import { Menu, Widget } from '@lumino/widgets';
 import { requestBlobAPI } from './request';
 
 /**
@@ -82,6 +86,44 @@ namespace CommandIDs {
   export const exportPdf = 'export-markdown:pdf';
   export const exportDocx = 'export-markdown:docx';
   export const exportHtml = 'export-markdown:html';
+}
+
+/**
+ * Show loading dialog with spinner for export operations
+ */
+function showExportingDialog(format: string): Dialog<unknown> {
+  const content = document.createElement('div');
+  content.style.display = 'flex';
+  content.style.alignItems = 'center';
+  content.style.gap = '12px';
+  content.style.padding = '8px 0';
+  content.innerHTML = `
+    <div style="
+      width: 24px;
+      height: 24px;
+      border: 3px solid var(--jp-border-color2);
+      border-top-color: var(--jp-brand-color1);
+      border-radius: 50%;
+      animation: jp-export-spin 1s linear infinite;
+    "></div>
+    <span>Exporting to ${format.toUpperCase()}...</span>
+    <style>
+      @keyframes jp-export-spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
+  `;
+
+  const body = new Widget({ node: content });
+
+  const dialog = new Dialog({
+    title: 'Exporting',
+    body,
+    buttons: []
+  });
+
+  dialog.launch();
+  return dialog;
 }
 
 /**
@@ -265,7 +307,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
     );
 
     // Load settings
-    let diagramDPI = 300; // Default value
+    let diagramDPI = 150; // Default value
     if (settingRegistry) {
       try {
         const settings = await settingRegistry.load(plugin.id);
@@ -322,6 +364,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
       return async () => {
         const path = getCurrentMarkdownPath();
         if (path) {
+          const dialog = showExportingDialog(format);
+
           try {
             // Capture rendered Mermaid diagrams from the preview (includes PNG conversion at configured DPI)
             const mermaidDiagrams = captureMermaidDiagrams(shell, diagramDPI);
@@ -335,6 +379,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
               `Export to ${format.toUpperCase()} Failed`,
               error instanceof Error ? error.message : String(error)
             );
+          } finally {
+            dialog.dispose();
           }
         }
       };
