@@ -2,6 +2,10 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.1.5
+
+- Fix package-lock.json formatting for CI build
+
 ## 1.1.4
 
 - Client-side Mermaid diagram capture with calibrated DPI scaling (no server-side mmdc required)
