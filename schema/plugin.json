@@ -1,0 +1,18 @@
+{
+  "title": "Export Markdown Extension",
+  "description": "Settings for Markdown export to PDF, DOCX, and HTML",
+  "jupyter.lab.setting-icon": "ui-components:file",
+  "jupyter.lab.setting-icon-label": "Export Markdown",
+  "type": "object",
+  "properties": {
+    "diagramDPI": {
+      "title": "Diagram DPI",
+      "description": "Resolution for Mermaid diagram images in exports (dots per inch). Uses calibrated scaling matching jupyterlab_mmd_to_png_extension. Standard values: 150 (draft), 300 (standard print quality).",
+      "type": "number",
+      "default": 300,
+      "minimum": 72,
+      "maximum": 600
+    }
+  },
+  "additionalProperties": false
+}

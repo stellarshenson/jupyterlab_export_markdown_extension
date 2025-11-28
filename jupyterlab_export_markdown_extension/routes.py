@@ -7,12 +7,10 @@ using pure Python libraries (no system dependencies).
 
 import json
 import os
-import tempfile
 import base64
 import re
 import io
-import subprocess
-import shutil
+import tempfile
 from pathlib import Path
 
 from jupyter_server.base.handlers import APIHandler
@@ -33,76 +31,133 @@ class ExportHandlerBase(APIHandler):
         with open(path, 'r', encoding='utf-8') as f:
             return f.read()
 
-    def render_mermaid_diagrams(self, content: str, output_format: str = 'svg') -> str:
+    def replace_mermaid_with_images(self, content: str, mermaid_diagrams: list,
+                                      use_png: bool = False) -> str:
         """
-        Find and render mermaid code blocks to images.
+        Replace mermaid code blocks with pre-rendered images from the frontend.
 
         Args:
             content: Markdown content with mermaid code blocks
-            output_format: 'svg' or 'png'
+            mermaid_diagrams: List of dicts with 'index' and 'svg' (base64 data URI)
+            use_png: If True, convert SVG to PNG (for DOCX compatibility)
 
         Returns:
-            Markdown content with mermaid blocks replaced by base64 image references
+            Markdown content with mermaid blocks replaced by image references
         """
-        # Check if mmdc is available
-        mmdc_path = shutil.which('mmdc')
-        if not mmdc_path:
-            # mmdc not available, return content unchanged
+        if not mermaid_diagrams:
             return content
 
         # Pattern to match mermaid code blocks
         mermaid_pattern = r'```mermaid\s*\n(.*?)```'
 
-        def render_mermaid(match):
-            mermaid_code = match.group(1)
+        # Create lookup dicts by index for both SVG and PNG
+        diagrams_by_index = {}
+        for d in mermaid_diagrams:
+            diagrams_by_index[d['index']] = {
+                'svg': d.get('svg', ''),
+                'png': d.get('png', '')
+            }
 
+        current_index = [0]  # Use list to allow mutation in nested function
+
+        def replace_mermaid(match):
+            idx = current_index[0]
+            current_index[0] += 1
+
+            if idx in diagrams_by_index:
+                diagram = diagrams_by_index[idx]
+                svg_data_uri = diagram['svg']
+                png_data_uri = diagram['png']
+
+                if use_png:
+                    # Prefer PNG from frontend (client-side Canvas conversion)
+                    if png_data_uri:
+                        return f'![Mermaid Diagram]({png_data_uri})'
+                    # Fallback to server-side conversion
+                    try:
+                        converted_png = self.svg_to_png(svg_data_uri)
+                        return f'![Mermaid Diagram]({converted_png})'
+                    except Exception:
+                        # Last resort: use SVG
+                        return f'![Mermaid Diagram]({svg_data_uri})'
+                else:
+                    return f'![Mermaid Diagram]({svg_data_uri})'
+
+            # No pre-rendered diagram available, keep original
+            return match.group(0)
+
+        return re.sub(mermaid_pattern, replace_mermaid, content, flags=re.DOTALL)
+
+    def svg_to_png(self, svg_data_uri: str) -> str:
+        """
+        Convert SVG data URI to PNG data URI using cairosvg.
+
+        Args:
+            svg_data_uri: SVG as base64 data URI
+
+        Returns:
+            PNG as base64 data URI
+        """
+        import cairosvg
+
+        # Extract base64 data from URI
+        if svg_data_uri.startswith('data:image/svg+xml;base64,'):
+            svg_base64 = svg_data_uri.replace('data:image/svg+xml;base64,', '')
+            svg_bytes = base64.b64decode(svg_base64)
+        else:
+            raise ValueError('Invalid SVG data URI format')
+
+        # Convert SVG to PNG
+        png_bytes = cairosvg.svg2png(bytestring=svg_bytes)
+
+        # Encode as base64 data URI
+        png_base64 = base64.b64encode(png_bytes).decode('utf-8')
+        return f'data:image/png;base64,{png_base64}'
+
+    def extract_data_uri_images(self, html: str, temp_dir: str) -> str:
+        """
+        Extract data URI images to temp files for htmldocx compatibility.
+
+        Args:
+            html: HTML content with data URI images
+            temp_dir: Directory to store temp image files
+
+        Returns:
+            HTML with data URIs replaced by file paths
+        """
+        img_pattern = r'<img\s+[^>]*src=["\']data:image/([^;]+);base64,([^"\']+)["\'][^>]*>'
+
+        def replace_img(match):
+            img_type = match.group(1)
+            base64_data = match.group(2)
+
+            # Determine file extension
+            ext_map = {
+                'png': '.png',
+                'jpeg': '.jpg',
+                'jpg': '.jpg',
+                'gif': '.gif',
+                'svg+xml': '.svg'
+            }
+            ext = ext_map.get(img_type, '.png')
+
+            # Decode and save to temp file
             try:
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    input_file = Path(tmpdir) / 'diagram.mmd'
-                    output_file = Path(tmpdir) / f'diagram.{output_format}'
-                    puppeteer_config = Path(tmpdir) / 'puppeteer-config.json'
+                img_bytes = base64.b64decode(base64_data)
+                # Create unique filename
+                import hashlib
+                hash_id = hashlib.md5(img_bytes).hexdigest()[:8]
+                filename = f'img_{hash_id}{ext}'
+                filepath = os.path.join(temp_dir, filename)
 
-                    # Write mermaid code to temp file
-                    input_file.write_text(mermaid_code, encoding='utf-8')
+                with open(filepath, 'wb') as f:
+                    f.write(img_bytes)
 
-                    # Write puppeteer config for headless rendering
-                    puppeteer_config.write_text(
-                        '{"args": ["--no-sandbox", "--disable-setuid-sandbox"]}',
-                        encoding='utf-8'
-                    )
-
-                    # Run mmdc to generate image
-                    cmd = [
-                        mmdc_path,
-                        '-i', str(input_file),
-                        '-o', str(output_file),
-                        '-p', str(puppeteer_config),
-                        '-b', 'transparent'
-                    ]
-
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=30
-                    )
-
-                    if result.returncode != 0 or not output_file.exists():
-                        # Rendering failed, return original code block
-                        return match.group(0)
-
-                    # Read and encode the image
-                    with open(output_file, 'rb') as f:
-                        img_data = base64.b64encode(f.read()).decode('utf-8')
-
-                    mime_type = 'image/svg+xml' if output_format == 'svg' else 'image/png'
-                    return f'![Mermaid Diagram](data:{mime_type};base64,{img_data})'
-
+                return f'<img src="{filepath}">'
             except Exception:
-                # On any error, return original code block
                 return match.group(0)
 
-        return re.sub(mermaid_pattern, render_mermaid, content, flags=re.DOTALL)
+        return re.sub(img_pattern, replace_img, html)
 
     def embed_images_as_base64(self, content: str, markdown_dir: Path) -> str:
         """
@@ -346,6 +401,7 @@ class ExportPdfHandler(ExportHandlerBase):
         try:
             data = json.loads(self.request.body)
             relative_path = data.get('path')
+            mermaid_diagrams = data.get('mermaidDiagrams', [])
 
             if not relative_path:
                 self.set_status(400)
@@ -360,7 +416,8 @@ class ExportPdfHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
-            content = self.render_mermaid_diagrams(content, output_format='svg')
+            # Use PNG for diagrams (SVG fonts may not be available to weasyprint)
+            content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
             html = self.markdown_to_html(content, file_path.stem, compact=True)
 
@@ -391,6 +448,7 @@ class ExportDocxHandler(ExportHandlerBase):
         try:
             data = json.loads(self.request.body)
             relative_path = data.get('path')
+            mermaid_diagrams = data.get('mermaidDiagrams', [])
 
             if not relative_path:
                 self.set_status(400)
@@ -405,7 +463,8 @@ class ExportDocxHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
-            content = self.render_mermaid_diagrams(content, output_format='png')
+            # Use PNG for DOCX (better Word compatibility)
+            content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
             html = self.markdown_to_html(content, file_path.stem)
 
@@ -417,37 +476,66 @@ class ExportDocxHandler(ExportHandlerBase):
             body_match = re.search(r'<body>(.*?)</body>', html, re.DOTALL)
             body_html = body_match.group(1) if body_match else html
 
-            document = Document()
+            # Use temp directory for images (htmldocx can't handle data URIs)
+            with tempfile.TemporaryDirectory() as temp_dir:
+                body_html = self.extract_data_uri_images(body_html, temp_dir)
 
-            # Set document margins (0.5 inch)
-            for section in document.sections:
-                section.top_margin = Inches(0.5)
-                section.bottom_margin = Inches(0.5)
-                section.left_margin = Inches(0.5)
-                section.right_margin = Inches(0.5)
+                document = Document()
 
-            parser = HtmlToDocx()
-            parser.add_html_to_document(body_html, document)
+                # Set document margins (0.5 inch)
+                for section in document.sections:
+                    section.top_margin = Inches(0.5)
+                    section.bottom_margin = Inches(0.5)
+                    section.left_margin = Inches(0.5)
+                    section.right_margin = Inches(0.5)
 
-            # Style tables: banded rows (pale blue), no first column emphasis
-            for table in document.tables:
-                table.style = 'Light List Accent 1'
-                # Disable first column emphasis via XML properties
-                tblPr = table._tbl.tblPr
-                if tblPr is not None:
-                    from docx.oxml.ns import qn
-                    tblLook = tblPr.find(qn('w:tblLook'))
-                    if tblLook is not None:
-                        tblLook.set(qn('w:firstColumn'), '0')
+                parser = HtmlToDocx()
+                parser.add_html_to_document(body_html, document)
 
-            # Remove empty paragraphs at the beginning
-            while document.paragraphs and not document.paragraphs[0].text.strip():
-                p = document.paragraphs[0]._element
-                p.getparent().remove(p)
+                # Style tables: banded rows (pale blue), no first column emphasis
+                for table in document.tables:
+                    table.style = 'Light List Accent 1'
+                    # Disable first column emphasis via XML properties
+                    tblPr = table._tbl.tblPr
+                    if tblPr is not None:
+                        from docx.oxml.ns import qn
+                        tblLook = tblPr.find(qn('w:tblLook'))
+                        if tblLook is not None:
+                            tblLook.set(qn('w:firstColumn'), '0')
 
-            docx_buffer = io.BytesIO()
-            document.save(docx_buffer)
-            docx_content = docx_buffer.getvalue()
+                # Remove empty paragraphs at the beginning
+                while document.paragraphs and not document.paragraphs[0].text.strip():
+                    p = document.paragraphs[0]._element
+                    p.getparent().remove(p)
+
+                # Page dimensions (Letter/A4 width minus margins)
+                page_width = Inches(8.5) - Inches(1.0)  # 7.5 inches usable
+                page_height = Inches(11) - Inches(1.0)  # 10 inches usable
+
+                # Process images: preserve small ones, fit large ones to page
+                for shape in document.inline_shapes:
+                    orig_width = shape.width
+                    orig_height = shape.height
+
+                    # Only resize if larger than page dimensions
+                    needs_resize = False
+                    ratio = 1.0
+
+                    if orig_width > page_width:
+                        ratio = min(ratio, page_width / orig_width)
+                        needs_resize = True
+
+                    if orig_height > page_height:
+                        ratio = min(ratio, page_height / orig_height)
+                        needs_resize = True
+
+                    if needs_resize:
+                        shape.width = int(orig_width * ratio)
+                        shape.height = int(orig_height * ratio)
+
+                docx_buffer = io.BytesIO()
+                document.save(docx_buffer)
+                docx_content = docx_buffer.getvalue()
 
             self.set_header('Content-Type',
                           'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
@@ -473,6 +561,7 @@ class ExportHtmlHandler(ExportHandlerBase):
         try:
             data = json.loads(self.request.body)
             relative_path = data.get('path')
+            mermaid_diagrams = data.get('mermaidDiagrams', [])
 
             if not relative_path:
                 self.set_status(400)
@@ -487,7 +576,7 @@ class ExportHtmlHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
-            content = self.render_mermaid_diagrams(content, output_format='svg')
+            content = self.replace_mermaid_with_images(content, mermaid_diagrams)
             content = self.embed_images_as_base64(content, file_path.parent)
             html = self.markdown_to_html(content, file_path.stem)
 

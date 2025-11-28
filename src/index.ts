@@ -4,6 +4,7 @@ import {
 } from '@jupyterlab/application';
 import { ICommandPalette, showErrorMessage } from '@jupyterlab/apputils';
 import { IMainMenu } from '@jupyterlab/mainmenu';
+import { ISettingRegistry } from '@jupyterlab/settingregistry';
 import { Menu } from '@lumino/widgets';
 import { requestBlobAPI } from './request';
 
@@ -11,6 +12,68 @@ import { requestBlobAPI } from './request';
  * Export format types
  */
 type ExportFormat = 'pdf' | 'docx' | 'html';
+
+/**
+ * Mermaid diagram data captured from rendered markdown
+ */
+interface IMermaidDiagram {
+  index: number;
+  svg: string;
+  png: string;
+  width: number;
+  height: number;
+}
+
+/**
+ * Result of PNG conversion with dimensions
+ */
+interface IPngResult {
+  dataUri: string;
+  width: number;
+  height: number;
+}
+
+/**
+ * Convert an already-rendered IMG element directly to PNG data URI using Canvas.
+ * This preserves fonts because the browser has already rendered the SVG with fonts loaded.
+ * Uses calibrated DPI scaling matching jupyterlab_mmd_to_png_extension.
+ */
+function imgElementToPng(
+  imgElement: HTMLImageElement,
+  targetDPI: number = 300
+): IPngResult {
+  // Use natural dimensions (actual image size)
+  const width = imgElement.naturalWidth || imgElement.width || 800;
+  const height = imgElement.naturalHeight || imgElement.height || 600;
+
+  // SVG native resolution calibrated to match Adobe converter output
+  // Same formula as jupyterlab_mmd_to_png_extension
+  const sourceDPI = 11.5;
+  const scale = targetDPI / sourceDPI;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
+
+  const ctx = canvas.getContext('2d', { alpha: true });
+  if (!ctx) {
+    throw new Error('Failed to get canvas context');
+  }
+
+  // High quality rendering
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  // Draw the already-rendered image directly at scaled dimensions (preserves fonts)
+  ctx.drawImage(imgElement, 0, 0, canvas.width, canvas.height);
+
+  // Convert to PNG data URI
+  return {
+    dataUri: canvas.toDataURL('image/png'),
+    width: canvas.width,
+    height: canvas.height
+  };
+}
 
 /**
  * Command IDs for the extension
@@ -40,6 +103,104 @@ const FORMAT_MIME_TYPES: Record<ExportFormat, string> = {
 };
 
 /**
+ * Capture rendered Mermaid diagrams from the current markdown preview
+ * and convert them to PNG format using Canvas (preserves fonts).
+ */
+function captureMermaidDiagrams(
+  shell: JupyterFrontEnd.IShell,
+  targetDPI: number = 300
+): IMermaidDiagram[] {
+  const diagrams: IMermaidDiagram[] = [];
+  const currentWidget = shell.currentWidget;
+
+  if (!currentWidget) {
+    return diagrams;
+  }
+
+  // Find rendered markdown content within the widget
+  const widgetNode = currentWidget.node;
+  const renderedMarkdown = widgetNode.querySelector('.jp-RenderedMarkdown');
+
+  if (!renderedMarkdown) {
+    return diagrams;
+  }
+
+  let mermaidIndex = 0;
+
+  // Find all IMG elements with SVG data URIs (JupyterLab's Mermaid rendering)
+  const imgElements = renderedMarkdown.querySelectorAll('img');
+
+  imgElements.forEach(img => {
+    const src = img.getAttribute('src') || '';
+
+    // Check if this is a Mermaid diagram (SVG data URI)
+    if (src.startsWith('data:image/svg+xml')) {
+      // Extract base64 or URL-encoded SVG data for SVG fallback
+      let svgData = src;
+
+      if (src.startsWith('data:image/svg+xml,')) {
+        // URL-encoded SVG - convert to base64 for consistency
+        const encodedSvg = src.replace('data:image/svg+xml,', '');
+        const decodedSvg = decodeURIComponent(encodedSvg);
+        const base64Svg = btoa(unescape(encodeURIComponent(decodedSvg)));
+        svgData = `data:image/svg+xml;base64,${base64Svg}`;
+      }
+
+      // Convert the already-rendered IMG element directly to PNG
+      // This preserves fonts because the browser has already rendered them
+      let pngResult: IPngResult = { dataUri: '', width: 0, height: 0 };
+      try {
+        pngResult = imgElementToPng(img, targetDPI);
+      } catch (error) {
+        console.warn(
+          `Failed to convert Mermaid diagram ${mermaidIndex} to PNG:`,
+          error
+        );
+      }
+
+      diagrams.push({
+        index: mermaidIndex,
+        svg: svgData,
+        png: pngResult.dataUri,
+        width: pngResult.width,
+        height: pngResult.height
+      });
+      mermaidIndex++;
+    }
+  });
+
+  // Also check for inline SVG elements (alternative Mermaid rendering)
+  const svgElements = renderedMarkdown.querySelectorAll('svg');
+  svgElements.forEach(svg => {
+    // Check if it's a Mermaid diagram
+    const isMermaid =
+      svg.id?.includes('mermaid') ||
+      svg.getAttribute('aria-roledescription') === 'mermaid' ||
+      svg.classList.contains('mermaid');
+
+    if (isMermaid) {
+      const serializer = new XMLSerializer();
+      const svgString = serializer.serializeToString(svg);
+      const base64Svg = btoa(unescape(encodeURIComponent(svgString)));
+      const svgData = `data:image/svg+xml;base64,${base64Svg}`;
+
+      // For inline SVG, we return the SVG data URI (PNG conversion is more complex)
+      // The backend will handle conversion if needed
+      diagrams.push({
+        index: mermaidIndex,
+        svg: svgData,
+        png: '', // Backend will convert using cairosvg if available
+        width: 0,
+        height: 0
+      });
+      mermaidIndex++;
+    }
+  });
+
+  return diagrams;
+}
+
+/**
  * Download a file from a blob response
  */
 function downloadBlob(blob: Blob, filename: string): void {
@@ -66,14 +227,15 @@ function getOutputFilename(path: string, format: ExportFormat): string {
  */
 async function exportMarkdown(
   path: string,
-  format: ExportFormat
+  format: ExportFormat,
+  mermaidDiagrams: IMermaidDiagram[]
 ): Promise<void> {
   const blob = await requestBlobAPI(`export/${format}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ path })
+    body: JSON.stringify({ path, mermaidDiagrams })
   });
 
   // Ensure correct MIME type
@@ -91,14 +253,37 @@ const plugin: JupyterFrontEndPlugin<void> = {
     'JupyterLab extension to export markdown files as PDF, DOCX and HTML with embedded images',
   autoStart: true,
   requires: [IMainMenu, ICommandPalette],
-  activate: (
+  optional: [ISettingRegistry],
+  activate: async (
     app: JupyterFrontEnd,
     mainMenu: IMainMenu,
-    palette: ICommandPalette
+    palette: ICommandPalette,
+    settingRegistry: ISettingRegistry | null
   ) => {
     console.log(
       'JupyterLab extension jupyterlab_export_markdown_extension is activated!'
     );
+
+    // Load settings
+    let diagramDPI = 300; // Default value
+    if (settingRegistry) {
+      try {
+        const settings = await settingRegistry.load(plugin.id);
+        diagramDPI = settings.get('diagramDPI').composite as number;
+        console.log(
+          'Export Markdown: Loaded diagram DPI from settings:',
+          diagramDPI
+        );
+
+        // Listen for settings changes
+        settings.changed.connect(() => {
+          diagramDPI = settings.get('diagramDPI').composite as number;
+          console.log('Export Markdown: Diagram DPI changed to:', diagramDPI);
+        });
+      } catch (error) {
+        console.error('Export Markdown: Failed to load settings:', error);
+      }
+    }
 
     const { commands, shell } = app;
 
@@ -138,7 +323,9 @@ const plugin: JupyterFrontEndPlugin<void> = {
         const path = getCurrentMarkdownPath();
         if (path) {
           try {
-            await exportMarkdown(path, format);
+            // Capture rendered Mermaid diagrams from the preview (includes PNG conversion at configured DPI)
+            const mermaidDiagrams = captureMermaidDiagrams(shell, diagramDPI);
+            await exportMarkdown(path, format, mermaidDiagrams);
           } catch (error) {
             console.error(
               `Failed to export to ${format.toUpperCase()}:`,

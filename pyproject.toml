@@ -26,7 +26,8 @@ dependencies = [
     "markdown>=3.4",
     "weasyprint>=60.0",
     "python-docx>=1.0",
-    "htmldocx>=0.0.6"
+    "htmldocx>=0.0.6",
+    "cairosvg>=2.7"
 ]
 dynamic = ["version", "description", "authors", "urls", "keywords"]
 
