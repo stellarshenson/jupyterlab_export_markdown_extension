@@ -11,6 +11,8 @@ import tempfile
 import base64
 import re
 import io
+import subprocess
+import shutil
 from pathlib import Path
 
 from jupyter_server.base.handlers import APIHandler
@@ -30,6 +32,77 @@ class ExportHandlerBase(APIHandler):
         """Read and return the contents of a markdown file."""
         with open(path, 'r', encoding='utf-8') as f:
             return f.read()
+
+    def render_mermaid_diagrams(self, content: str, output_format: str = 'svg') -> str:
+        """
+        Find and render mermaid code blocks to images.
+
+        Args:
+            content: Markdown content with mermaid code blocks
+            output_format: 'svg' or 'png'
+
+        Returns:
+            Markdown content with mermaid blocks replaced by base64 image references
+        """
+        # Check if mmdc is available
+        mmdc_path = shutil.which('mmdc')
+        if not mmdc_path:
+            # mmdc not available, return content unchanged
+            return content
+
+        # Pattern to match mermaid code blocks
+        mermaid_pattern = r'```mermaid\s*\n(.*?)```'
+
+        def render_mermaid(match):
+            mermaid_code = match.group(1)
+
+            try:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    input_file = Path(tmpdir) / 'diagram.mmd'
+                    output_file = Path(tmpdir) / f'diagram.{output_format}'
+                    puppeteer_config = Path(tmpdir) / 'puppeteer-config.json'
+
+                    # Write mermaid code to temp file
+                    input_file.write_text(mermaid_code, encoding='utf-8')
+
+                    # Write puppeteer config for headless rendering
+                    puppeteer_config.write_text(
+                        '{"args": ["--no-sandbox", "--disable-setuid-sandbox"]}',
+                        encoding='utf-8'
+                    )
+
+                    # Run mmdc to generate image
+                    cmd = [
+                        mmdc_path,
+                        '-i', str(input_file),
+                        '-o', str(output_file),
+                        '-p', str(puppeteer_config),
+                        '-b', 'transparent'
+                    ]
+
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+
+                    if result.returncode != 0 or not output_file.exists():
+                        # Rendering failed, return original code block
+                        return match.group(0)
+
+                    # Read and encode the image
+                    with open(output_file, 'rb') as f:
+                        img_data = base64.b64encode(f.read()).decode('utf-8')
+
+                    mime_type = 'image/svg+xml' if output_format == 'svg' else 'image/png'
+                    return f'![Mermaid Diagram](data:{mime_type};base64,{img_data})'
+
+            except Exception:
+                # On any error, return original code block
+                return match.group(0)
+
+        return re.sub(mermaid_pattern, render_mermaid, content, flags=re.DOTALL)
 
     def embed_images_as_base64(self, content: str, markdown_dir: Path) -> str:
         """
@@ -287,6 +360,7 @@ class ExportPdfHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            content = self.render_mermaid_diagrams(content, output_format='svg')
             content = self.embed_images_as_base64(content, file_path.parent)
             html = self.markdown_to_html(content, file_path.stem, compact=True)
 
@@ -331,6 +405,7 @@ class ExportDocxHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            content = self.render_mermaid_diagrams(content, output_format='png')
             content = self.embed_images_as_base64(content, file_path.parent)
             html = self.markdown_to_html(content, file_path.stem)
 
@@ -412,6 +487,7 @@ class ExportHtmlHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            content = self.render_mermaid_diagrams(content, output_format='svg')
             content = self.embed_images_as_base64(content, file_path.parent)
             html = self.markdown_to_html(content, file_path.stem)
 

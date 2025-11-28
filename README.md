@@ -16,6 +16,7 @@ Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No extern
 - **PDF Export** - Full Unicode and emoji support via weasyprint
 - **DOCX Export** - Microsoft Word documents with proper formatting
 - **HTML Export** - Standalone files with embedded images
+- **Mermaid Diagrams** - Automatically rendered to images (requires mermaid-cli)
 - **Embedded Images** - Local images automatically converted to base64
 - **File Menu Integration** - "Export Markdown As" submenu appears when markdown is active
 - **Command Palette** - All export commands available via Ctrl+Shift+C
@@ -31,6 +32,12 @@ For PDF export, install required system libraries and emoji font:
 ```bash
 # Ubuntu/Debian
 sudo apt-get install libpango-1.0-0 libpangoft2-1.0-0 fonts-noto-color-emoji
+```
+
+For Mermaid diagram rendering (optional), install mermaid-cli:
+
+```bash
+npm install -g @mermaid-js/mermaid-cli
 ```
 
 ## Install

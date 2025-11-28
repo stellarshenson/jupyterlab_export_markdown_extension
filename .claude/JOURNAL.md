@@ -36,3 +36,6 @@ This journal tracks substantive work on documents, diagrams, and documentation c
 
 11. **Task - PDF styling refinements**: Iteratively refined PDF export CSS to match MS Word document styling<br>
     **Result**: Multiple styling adjustments based on user feedback: (1) Font changed from Helvetica to Calibri for body and headings, (2) Link underline offset set to 2px for better visual appearance (standard thickness), (3) Header bottom margins reduced (h1: 0.15em, h2-h6: 0.1em) to bring text closer to headers, (4) Paragraph top margin reduced to 0.1em (bottom 0.4em) to minimize space between headers and following text. Blue header colors retained from MS Word accent palette (#365F91 for h1, #4F81BD for h2-h4, #243F60 for h5-h6)
+
+12. **Task - Mermaid diagram rendering**: Added server-side rendering of mermaid code blocks to images in exported documents<br>
+    **Result**: Implemented `render_mermaid_diagrams()` method using mermaid-cli (mmdc) via subprocess. Detects ```mermaid code blocks with regex, writes to temp .mmd file, runs mmdc with puppeteer config for headless rendering, embeds output as base64 data URI. PDF/HTML use SVG format (vector, scales well), DOCX uses PNG (better htmldocx compatibility). Graceful fallback to original code block if mmdc unavailable or rendering fails. Updated README with mermaid-cli installation instructions
