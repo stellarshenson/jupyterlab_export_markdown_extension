@@ -28,6 +28,7 @@ jobs:
       run: |
         set -eux
         jlpm
+        jlpm prettier --write package-lock.json
         jlpm run lint:check
 
     - name: Test the extension
