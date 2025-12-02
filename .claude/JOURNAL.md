@@ -45,3 +45,9 @@ This journal tracks substantive work on documents, diagrams, and documentation c
 
 14. **Task - Smart image sizing for exports**: Added intelligent image sizing to preserve small images and fit large ones<br>
     **Result**: Added width/height fields to IMermaidDiagram interface for dimension tracking. DOCX handler implements smart sizing - images smaller than page dimensions (7.5" x 10" usable area) keep natural size, larger images scale proportionally to fit using minimum ratio of width/height constraints. PDF uses CSS `max-width: 100%` for automatic fitting
+
+15. **Task - Modal spinner and DPI default**: Added export progress indicator and changed default DPI to 150<br>
+    **Result**: Implemented modal dialog spinner using `Dialog` from `@jupyterlab/apputils` - shows during export operations and closes on completion or error. Changed default diagram DPI from 300 to 150 for faster exports with reasonable quality. Updated README with new features (modal spinner, settings, smart image sizing) and CHANGELOG for versions 1.1.4-1.1.6
+
+16. **Task - CI lint fix**: Fixed package-lock.json formatting issue in GitHub Actions<br>
+    **Result**: CI failed because `jlpm` modifies package-lock.json and subsequent `lint:check` fails. Fixed by adding `jlpm prettier --write package-lock.json` after `jlpm` in build.yml workflow. Published versions 1.1.5 and 1.1.6 with fixes

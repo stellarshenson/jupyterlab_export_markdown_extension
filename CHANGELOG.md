@@ -2,6 +2,10 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.1.6
+
+- Fix CI lint by formatting package-lock.json after jlpm in build workflow
+
 ## 1.1.5
 
 - Fix package-lock.json formatting for CI build
