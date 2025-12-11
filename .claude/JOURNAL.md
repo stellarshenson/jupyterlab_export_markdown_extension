@@ -51,3 +51,6 @@ This journal tracks substantive work on documents, diagrams, and documentation c
 
 16. **Task - CI lint fix**: Fixed package-lock.json formatting issue in GitHub Actions<br>
     **Result**: CI failed because `jlpm` modifies package-lock.json and subsequent `lint:check` fails. Fixed by adding `jlpm prettier --write package-lock.json` after `jlpm` in build.yml workflow. Published versions 1.1.5 and 1.1.6 with fixes
+
+17. **Task - URL-encoded image paths fix** (v1.1.7): Fixed images not embedding when paths contain URL-encoded characters<br>
+    **Result**: Markdown files with image paths like `@attachments/Pasted%20image%2020240924124702.png` (URL-encoded spaces) failed to embed because `embed_images_as_base64()` resolved paths without decoding. Added `from urllib.parse import unquote` and applied `unquote(img_path)` before resolving filesystem path. This fixes Obsidian-style markdown files that use `%20` for spaces in image paths

@@ -12,6 +12,7 @@ import re
 import io
 import tempfile
 from pathlib import Path
+from urllib.parse import unquote
 
 from jupyter_server.base.handlers import APIHandler
 from jupyter_server.utils import url_path_join
@@ -174,7 +175,9 @@ class ExportHandlerBase(APIHandler):
             if img_path.startswith(('http://', 'https://', 'data:')):
                 return match.group(0)
 
-            full_path = (markdown_dir / img_path).resolve()
+            # URL-decode the path (handles %20 for spaces, etc.)
+            img_path_decoded = unquote(img_path)
+            full_path = (markdown_dir / img_path_decoded).resolve()
 
             if not full_path.exists():
                 return match.group(0)

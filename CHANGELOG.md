@@ -2,6 +2,10 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.1.7
+
+- Fix URL-encoded image paths not embedding (e.g., `%20` for spaces in Obsidian-style markdown)
+
 ## 1.1.6
 
 - Fix CI lint by formatting package-lock.json after jlpm in build workflow
