@@ -60,3 +60,6 @@ This journal tracks substantive work on documents, diagrams, and documentation c
 
 19. **Task - PDF table positioning and styling** (v1.1.10): Fixed tables appearing at end of PDF and added bullet points<br>
     **Result**: Tables were appended at document end because `convert_docx_to_pdf()` had two separate loops - first processing all paragraphs, then all tables. Refactored to iterate through `doc.element.body` in document order, checking element tags (`w:p` for paragraphs, `w:tbl` for tables) and processing each in sequence. Also reduced font sizes (body 10pt, headings 11-14pt) to match DOCX rendering, added bullet character detection via paragraph style names and `numPr` element, and created dedicated `list_style` with proper indentation
+
+20. **Task - PDF table left alignment** (v1.1.11): Changed tables to be left-justified instead of centered<br>
+    **Result**: Added `hAlign='LEFT'` parameter to reportlab `Table()` constructor in `process_table()` function

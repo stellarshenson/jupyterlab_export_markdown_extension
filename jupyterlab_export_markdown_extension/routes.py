@@ -592,7 +592,7 @@ class ExportHandlerBase(APIHandler):
             if not table_data:
                 return []
 
-            t = Table(table_data)
+            t = Table(table_data, hAlign='LEFT')
             t.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dbe5f1')),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#365F91')),

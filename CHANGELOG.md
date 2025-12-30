@@ -2,6 +2,10 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.1.11
+
+- Left-align tables in PDF export instead of centered
+
 ## 1.1.10
 
 - Fix tables appearing at end of PDF instead of inline with content
