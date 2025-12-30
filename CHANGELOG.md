@@ -2,6 +2,12 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.1.9
+
+- Switch PDF export from weasyprint to reportlab via DOCX intermediate
+- Fixes bold text character spacing issue (e.g., dates rendered with spaces between characters)
+- Uses DejaVu Sans fonts with proper bold variants for reliable Unicode rendering
+
 ## 1.1.7
 
 - Fix URL-encoded image paths not embedding (e.g., `%20` for spaces in Obsidian-style markdown)

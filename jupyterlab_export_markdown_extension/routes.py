@@ -18,6 +18,21 @@ from jupyter_server.base.handlers import APIHandler
 from jupyter_server.utils import url_path_join
 import tornado.web
 
+# Reportlab imports for DOCX-to-PDF conversion
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+    )
+    from reportlab.lib import colors
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
 
 class ExportHandlerBase(APIHandler):
     """Base class for export handlers with common functionality."""
@@ -395,9 +410,184 @@ class ExportHandlerBase(APIHandler):
 </html>'''
         return html
 
+    def _register_unicode_fonts(self):
+        """Register Unicode-supporting fonts from system paths."""
+        font_candidates = [
+            # DejaVu fonts (most common, excellent Unicode support)
+            ('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 'UnicodeSans'),
+            ('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 'UnicodeSansBold'),
+            # Liberation fonts (alternative)
+            ('/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', 'UnicodeSans'),
+            ('/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf', 'UnicodeSansBold'),
+        ]
+
+        registered_fonts = set()
+        for font_path, font_name in font_candidates:
+            if os.path.exists(font_path) and font_name not in registered_fonts:
+                try:
+                    pdfmetrics.registerFont(TTFont(font_name, font_path))
+                    registered_fonts.add(font_name)
+                except Exception:
+                    pass
+
+    def convert_docx_to_pdf(self, docx_bytes: bytes) -> bytes:
+        """
+        Convert DOCX document to PDF using python-docx + reportlab.
+
+        Args:
+            docx_bytes: DOCX file content as bytes
+
+        Returns:
+            PDF file content as bytes
+        """
+        if not REPORTLAB_AVAILABLE:
+            raise ImportError("reportlab is required for PDF export")
+
+        from docx import Document
+
+        # Register Unicode fonts
+        self._register_unicode_fonts()
+
+        # Read the DOCX from bytes
+        doc = Document(io.BytesIO(docx_bytes))
+
+        # Determine which font to use
+        font_name = 'UnicodeSans' if 'UnicodeSans' in pdfmetrics.getRegisteredFontNames() else 'Helvetica'
+        font_name_bold = 'UnicodeSansBold' if 'UnicodeSansBold' in pdfmetrics.getRegisteredFontNames() else 'Helvetica-Bold'
+
+        # Create PDF in memory
+        pdf_buffer = io.BytesIO()
+        pdf_doc = SimpleDocTemplate(
+            pdf_buffer,
+            pagesize=letter,
+            rightMargin=36,
+            leftMargin=36,
+            topMargin=36,
+            bottomMargin=36
+        )
+
+        # Get default styles
+        styles = getSampleStyleSheet()
+
+        # Create custom styles
+        normal_style = ParagraphStyle(
+            'CustomNormal',
+            parent=styles['Normal'],
+            fontName=font_name,
+            fontSize=11,
+            leading=14,
+            spaceAfter=8
+        )
+
+        heading1_style = ParagraphStyle(
+            'CustomHeading1',
+            parent=styles['Heading1'],
+            fontName=font_name_bold,
+            fontSize=18,
+            leading=22,
+            spaceAfter=8,
+            spaceBefore=12,
+            textColor=colors.HexColor('#365F91')
+        )
+
+        heading2_style = ParagraphStyle(
+            'CustomHeading2',
+            parent=styles['Heading2'],
+            fontName=font_name_bold,
+            fontSize=14,
+            leading=18,
+            spaceAfter=6,
+            spaceBefore=10,
+            textColor=colors.HexColor('#4F81BD')
+        )
+
+        heading3_style = ParagraphStyle(
+            'CustomHeading3',
+            parent=styles['Heading3'],
+            fontName=font_name_bold,
+            fontSize=12,
+            leading=16,
+            spaceAfter=4,
+            spaceBefore=8,
+            textColor=colors.HexColor('#4F81BD')
+        )
+
+        # Build the story (content)
+        story = []
+
+        for paragraph in doc.paragraphs:
+            text = paragraph.text.strip()
+            if text:
+                # Escape XML special characters for reportlab
+                text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+                # Check for bold runs and wrap them
+                has_bold = any(run.bold for run in paragraph.runs if run.text.strip())
+                if has_bold:
+                    # Reconstruct text with bold tags
+                    formatted_parts = []
+                    for run in paragraph.runs:
+                        run_text = run.text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                        if run.bold and run_text.strip():
+                            formatted_parts.append(f'<b>{run_text}</b>')
+                        else:
+                            formatted_parts.append(run_text)
+                    text = ''.join(formatted_parts)
+
+                # Detect heading styles
+                style_name = paragraph.style.name if paragraph.style else ''
+                if style_name.startswith('Heading 1'):
+                    story.append(Paragraph(text, heading1_style))
+                elif style_name.startswith('Heading 2'):
+                    story.append(Paragraph(text, heading2_style))
+                elif style_name.startswith('Heading 3') or style_name.startswith('Heading'):
+                    story.append(Paragraph(text, heading3_style))
+                else:
+                    story.append(Paragraph(text, normal_style))
+            else:
+                story.append(Spacer(1, 0.1 * inch))
+
+        # Handle tables
+        for table in doc.tables:
+            table_data = []
+            for row in table.rows:
+                row_data = []
+                for cell in row.cells:
+                    cell_text = cell.text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    row_data.append(cell_text)
+                table_data.append(row_data)
+
+            if table_data:
+                t = Table(table_data)
+                t.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dbe5f1')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#365F91')),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, 0), font_name_bold),
+                    ('FONTNAME', (0, 1), (-1, -1), font_name),
+                    ('FONTSIZE', (0, 0), (-1, -1), 9),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                    ('TOPPADDING', (0, 0), (-1, -1), 4),
+                    ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc'))
+                ]))
+                story.append(t)
+                story.append(Spacer(1, 0.15 * inch))
+
+        # Build the PDF
+        if not story:
+            story.append(Paragraph("Document appears to be empty.", normal_style))
+
+        pdf_doc.build(story)
+
+        # Get the PDF bytes
+        pdf_bytes = pdf_buffer.getvalue()
+        pdf_buffer.close()
+
+        return pdf_bytes
+
 
 class ExportPdfHandler(ExportHandlerBase):
-    """Handler for exporting markdown to PDF."""
+    """Handler for exporting markdown to PDF via DOCX intermediate."""
 
     @tornado.web.authenticated
     async def post(self):
@@ -419,14 +609,51 @@ class ExportPdfHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
-            # Use PNG for diagrams (SVG fonts may not be available to weasyprint)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
-            html = self.markdown_to_html(content, file_path.stem, compact=True)
+            html = self.markdown_to_html(content, file_path.stem)
 
-            from weasyprint import HTML
+            # Step 1: Create DOCX in memory (same logic as DOCX export)
+            from htmldocx import HtmlToDocx
+            from docx import Document
+            from docx.shared import Inches
 
-            pdf_content = HTML(string=html).write_pdf()
+            body_match = re.search(r'<body>(.*?)</body>', html, re.DOTALL)
+            body_html = body_match.group(1) if body_match else html
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                body_html = self.extract_data_uri_images(body_html, temp_dir)
+
+                document = Document()
+
+                for section in document.sections:
+                    section.top_margin = Inches(0.5)
+                    section.bottom_margin = Inches(0.5)
+                    section.left_margin = Inches(0.5)
+                    section.right_margin = Inches(0.5)
+
+                parser = HtmlToDocx()
+                parser.add_html_to_document(body_html, document)
+
+                for table in document.tables:
+                    table.style = 'Light List Accent 1'
+                    tblPr = table._tbl.tblPr
+                    if tblPr is not None:
+                        from docx.oxml.ns import qn
+                        tblLook = tblPr.find(qn('w:tblLook'))
+                        if tblLook is not None:
+                            tblLook.set(qn('w:firstColumn'), '0')
+
+                while document.paragraphs and not document.paragraphs[0].text.strip():
+                    p = document.paragraphs[0]._element
+                    p.getparent().remove(p)
+
+                docx_buffer = io.BytesIO()
+                document.save(docx_buffer)
+                docx_bytes = docx_buffer.getvalue()
+
+            # Step 2: Convert DOCX to PDF using reportlab
+            pdf_content = self.convert_docx_to_pdf(docx_bytes)
 
             self.set_header('Content-Type', 'application/pdf')
             self.set_header('Content-Disposition',
@@ -436,7 +663,7 @@ class ExportPdfHandler(ExportHandlerBase):
         except ImportError as e:
             self.set_status(500)
             self.finish(json.dumps({
-                'error': f'Missing dependency: {e}. Install with: pip install weasyprint markdown'
+                'error': f'Missing dependency: {e}. Install with: pip install reportlab python-docx htmldocx markdown'
             }))
         except Exception as e:
             self.set_status(500)
