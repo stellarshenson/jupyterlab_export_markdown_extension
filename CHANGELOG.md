@@ -2,6 +2,12 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.1.10
+
+- Fix tables appearing at end of PDF instead of inline with content
+- Add bullet points to list items in PDF export
+- Reduce font sizes to match DOCX rendering (body 10pt, headings 11-14pt)
+
 ## 1.1.9
 
 - Switch PDF export from weasyprint to reportlab via DOCX intermediate

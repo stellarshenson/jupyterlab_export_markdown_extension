@@ -469,24 +469,35 @@ class ExportHandlerBase(APIHandler):
         # Get default styles
         styles = getSampleStyleSheet()
 
-        # Create custom styles
+        # Create custom styles (sizes matched to DOCX rendering)
         normal_style = ParagraphStyle(
             'CustomNormal',
             parent=styles['Normal'],
             fontName=font_name,
-            fontSize=11,
-            leading=14,
-            spaceAfter=8
+            fontSize=10,
+            leading=12,
+            spaceAfter=6
+        )
+
+        list_style = ParagraphStyle(
+            'CustomList',
+            parent=styles['Normal'],
+            fontName=font_name,
+            fontSize=10,
+            leading=12,
+            spaceAfter=3,
+            leftIndent=18,
+            bulletIndent=6
         )
 
         heading1_style = ParagraphStyle(
             'CustomHeading1',
             parent=styles['Heading1'],
             fontName=font_name_bold,
-            fontSize=18,
-            leading=22,
-            spaceAfter=8,
-            spaceBefore=12,
+            fontSize=14,
+            leading=18,
+            spaceAfter=6,
+            spaceBefore=10,
             textColor=colors.HexColor('#365F91')
         )
 
@@ -494,10 +505,10 @@ class ExportHandlerBase(APIHandler):
             'CustomHeading2',
             parent=styles['Heading2'],
             fontName=font_name_bold,
-            fontSize=14,
-            leading=18,
-            spaceAfter=6,
-            spaceBefore=10,
+            fontSize=12,
+            leading=15,
+            spaceAfter=4,
+            spaceBefore=8,
             textColor=colors.HexColor('#4F81BD')
         )
 
@@ -505,73 +516,104 @@ class ExportHandlerBase(APIHandler):
             'CustomHeading3',
             parent=styles['Heading3'],
             fontName=font_name_bold,
-            fontSize=12,
-            leading=16,
-            spaceAfter=4,
-            spaceBefore=8,
+            fontSize=11,
+            leading=14,
+            spaceAfter=3,
+            spaceBefore=6,
             textColor=colors.HexColor('#4F81BD')
         )
 
-        # Build the story (content)
+        # Build the story (content) - iterate body elements in document order
         story = []
 
-        for paragraph in doc.paragraphs:
-            text = paragraph.text.strip()
-            if text:
-                # Escape XML special characters for reportlab
-                text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        from docx.text.paragraph import Paragraph as DocxParagraph
+        from docx.table import Table as DocxTable
+        from docx.oxml.ns import qn
 
-                # Check for bold runs and wrap them
-                has_bold = any(run.bold for run in paragraph.runs if run.text.strip())
-                if has_bold:
-                    # Reconstruct text with bold tags
-                    formatted_parts = []
-                    for run in paragraph.runs:
-                        run_text = run.text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                        if run.bold and run_text.strip():
-                            formatted_parts.append(f'<b>{run_text}</b>')
-                        else:
-                            formatted_parts.append(run_text)
-                    text = ''.join(formatted_parts)
+        def is_list_paragraph(para):
+            """Check if paragraph is a list item."""
+            style_name = para.style.name if para.style else ''
+            if 'List' in style_name or 'Bullet' in style_name:
+                return True
+            try:
+                numPr = para._element.pPr.numPr if para._element.pPr is not None else None
+                if numPr is not None:
+                    return True
+            except AttributeError:
+                pass
+            return False
 
-                # Detect heading styles
-                style_name = paragraph.style.name if paragraph.style else ''
-                if style_name.startswith('Heading 1'):
-                    story.append(Paragraph(text, heading1_style))
-                elif style_name.startswith('Heading 2'):
-                    story.append(Paragraph(text, heading2_style))
-                elif style_name.startswith('Heading 3') or style_name.startswith('Heading'):
-                    story.append(Paragraph(text, heading3_style))
-                else:
-                    story.append(Paragraph(text, normal_style))
+        def process_paragraph(para):
+            """Process a single paragraph and return reportlab element."""
+            text = para.text.strip()
+            if not text:
+                return Spacer(1, 0.08 * inch)
+
+            is_list = is_list_paragraph(para)
+
+            # Escape XML special characters
+            text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+            # Check for bold runs and wrap them
+            has_bold = any(run.bold for run in para.runs if run.text.strip())
+            if has_bold:
+                formatted_parts = []
+                for run in para.runs:
+                    run_text = run.text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    if run.bold and run_text.strip():
+                        formatted_parts.append(f'<b>{run_text}</b>')
+                    else:
+                        formatted_parts.append(run_text)
+                text = ''.join(formatted_parts)
+
+            # Detect heading styles
+            style_name = para.style.name if para.style else ''
+            if style_name.startswith('Heading 1'):
+                return Paragraph(text, heading1_style)
+            elif style_name.startswith('Heading 2'):
+                return Paragraph(text, heading2_style)
+            elif style_name.startswith('Heading 3') or style_name.startswith('Heading'):
+                return Paragraph(text, heading3_style)
+            elif is_list:
+                return Paragraph(f'• {text}', list_style)
             else:
-                story.append(Spacer(1, 0.1 * inch))
+                return Paragraph(text, normal_style)
 
-        # Handle tables
-        for table in doc.tables:
+        def process_table(tbl):
+            """Process a single table and return reportlab elements."""
             table_data = []
-            for row in table.rows:
+            for row in tbl.rows:
                 row_data = []
                 for cell in row.cells:
                     cell_text = cell.text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
                     row_data.append(cell_text)
                 table_data.append(row_data)
 
-            if table_data:
-                t = Table(table_data)
-                t.setStyle(TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dbe5f1')),
-                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#365F91')),
-                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                    ('FONTNAME', (0, 0), (-1, 0), font_name_bold),
-                    ('FONTNAME', (0, 1), (-1, -1), font_name),
-                    ('FONTSIZE', (0, 0), (-1, -1), 9),
-                    ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-                    ('TOPPADDING', (0, 0), (-1, -1), 4),
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc'))
-                ]))
-                story.append(t)
-                story.append(Spacer(1, 0.15 * inch))
+            if not table_data:
+                return []
+
+            t = Table(table_data)
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dbe5f1')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#365F91')),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), font_name_bold),
+                ('FONTNAME', (0, 1), (-1, -1), font_name),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc'))
+            ]))
+            return [t, Spacer(1, 0.15 * inch)]
+
+        # Iterate through body elements in document order
+        for element in doc.element.body:
+            if element.tag == qn('w:p'):  # Paragraph
+                para = DocxParagraph(element, doc)
+                story.append(process_paragraph(para))
+            elif element.tag == qn('w:tbl'):  # Table
+                tbl = DocxTable(element, doc)
+                story.extend(process_table(tbl))
 
         # Build the PDF
         if not story:
