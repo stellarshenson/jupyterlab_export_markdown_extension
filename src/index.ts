@@ -122,7 +122,11 @@ function showExportingDialog(format: string): Dialog<unknown> {
     buttons: []
   });
 
-  dialog.launch();
+  // Launch dialog but ignore the promise - we'll dispose it manually
+  // The promise rejects with undefined when disposed, which is expected
+  dialog.launch().catch(() => {
+    // Ignore - dialog was disposed programmatically
+  });
   return dialog;
 }
 
@@ -152,30 +156,24 @@ function captureMermaidDiagrams(
   shell: JupyterFrontEnd.IShell,
   targetDPI: number = 300
 ): IMermaidDiagram[] {
-  console.log('[Mermaid Export] Starting capture, targetDPI:', targetDPI);
   const diagrams: IMermaidDiagram[] = [];
   const currentWidget = shell.currentWidget;
 
   if (!currentWidget) {
-    console.log('[Mermaid Export] No currentWidget found');
     return diagrams;
   }
-  console.log('[Mermaid Export] currentWidget:', currentWidget.id, currentWidget.title.label);
 
   // Find rendered markdown content - first try within the widget, then search entire document
   // This handles cases where preview is in a separate panel from the editor
   const widgetNode = currentWidget.node;
   let renderedMarkdown = widgetNode.querySelector('.jp-RenderedMarkdown');
-  console.log('[Mermaid Export] Found in widget:', !!renderedMarkdown);
 
   // If not found in current widget, search entire document for rendered markdown
   if (!renderedMarkdown) {
     renderedMarkdown = document.querySelector('.jp-RenderedMarkdown');
-    console.log('[Mermaid Export] Found in document:', !!renderedMarkdown);
   }
 
   if (!renderedMarkdown) {
-    console.log('[Mermaid Export] No .jp-RenderedMarkdown found anywhere');
     return diagrams;
   }
 
@@ -183,30 +181,18 @@ function captureMermaidDiagrams(
 
   // Find all IMG elements with SVG data URIs (JupyterLab's Mermaid rendering)
   const imgElements = renderedMarkdown.querySelectorAll('img');
-  console.log('[Mermaid Export] Found', imgElements.length, 'img elements');
 
-  imgElements.forEach((img, idx) => {
+  imgElements.forEach(img => {
     const src = img.getAttribute('src') || '';
-    console.log('[Mermaid Export] IMG', idx, 'src starts with:', src.substring(0, 50));
 
     // Check if this is an SVG data URI
     if (src.startsWith('data:image/svg+xml')) {
-      // Decode the SVG content to check if it's a mermaid diagram
-      let svgContent = '';
       let svgData = src;
 
-      if (src.startsWith('data:image/svg+xml;base64,')) {
-        // Base64 encoded SVG
-        try {
-          const base64Data = src.replace('data:image/svg+xml;base64,', '');
-          svgContent = atob(base64Data);
-        } catch {
-          console.log('[Mermaid Export] Failed to decode base64 SVG', idx);
-        }
-      } else if (src.startsWith('data:image/svg+xml,')) {
+      if (src.startsWith('data:image/svg+xml,')) {
         // URL-encoded SVG - convert to base64 for consistency
         const encodedSvg = src.replace('data:image/svg+xml,', '');
-        svgContent = decodeURIComponent(encodedSvg);
+        const svgContent = decodeURIComponent(encodedSvg);
         const base64Svg = btoa(unescape(encodeURIComponent(svgContent)));
         svgData = `data:image/svg+xml;base64,${base64Svg}`;
       }
@@ -215,15 +201,11 @@ function captureMermaidDiagrams(
       // Mermaid diagrams are typically > 100px, while icons are 16-32px
       const width = img.naturalWidth || img.width || 0;
       const height = img.naturalHeight || img.height || 0;
-      console.log('[Mermaid Export] IMG', idx, 'dimensions:', width, 'x', height);
 
       // Skip small images (icons) - mermaid diagrams are always larger
       if (width < 50 && height < 50) {
-        console.log('[Mermaid Export] IMG', idx, 'too small (icon), skipping');
         return;
       }
-
-      console.log('[Mermaid Export] Found mermaid diagram in IMG', idx);
 
       // Convert the already-rendered IMG element directly to PNG
       // This preserves fonts because the browser has already rendered them
@@ -276,7 +258,6 @@ function captureMermaidDiagrams(
     }
   });
 
-  console.log('[Mermaid Export] Total diagrams captured:', diagrams.length);
   return diagrams;
 }
 
