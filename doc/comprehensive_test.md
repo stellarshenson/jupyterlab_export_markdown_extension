@@ -14,13 +14,25 @@ Regular paragraph with **bold text** and _italic text_ and **_bold italic_**.
 
 This is a second paragraph to test spacing.
 
-## Emojis
+## Unicode Symbols (PDF supported)
 
-Common emojis: ✅ ❌ ⚠️ ℹ️ 🔴 🟢 🔵 ⭐ 📁 📄 🔗 💡
+Arrows: → ← ↑ ↓ ↔ ↕ ⇒ ⇐ ⇔
+
+Bullets: • ◦ ▪ ▫ ► ◄ ▲ ▼
+
+Stars: ★ ☆ ✦ ✧
+
+Math: ± × ÷ ≤ ≥ ≠ ≈ ∞ √ ∑ ∏
+
+Special: © ® ™ § ¶ † ‡ ° ′ ″
+
+## Color Emojis (HTML/DOCX only)
+
+Note: Color emojis require specialized font support not available in PDF export.
+
+Common: ✅ ❌ ⚠️ ℹ️ 🔴 🟢 🔵 ⭐ 📁 📄 🔗 💡
 
 Faces: 😀 😎 🤔 👍 👎 🎉 🚀 ✨
-
-Symbols: → ← ↑ ↓ ⇒ ⇐ • ◦ ▪ ▫ ★ ☆
 
 ## Bullet Lists
 
