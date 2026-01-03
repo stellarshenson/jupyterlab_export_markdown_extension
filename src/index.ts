@@ -159,9 +159,15 @@ function captureMermaidDiagrams(
     return diagrams;
   }
 
-  // Find rendered markdown content within the widget
+  // Find rendered markdown content - first try within the widget, then search entire document
+  // This handles cases where preview is in a separate panel from the editor
   const widgetNode = currentWidget.node;
-  const renderedMarkdown = widgetNode.querySelector('.jp-RenderedMarkdown');
+  let renderedMarkdown = widgetNode.querySelector('.jp-RenderedMarkdown');
+
+  // If not found in current widget, search entire document for rendered markdown
+  if (!renderedMarkdown) {
+    renderedMarkdown = document.querySelector('.jp-RenderedMarkdown');
+  }
 
   if (!renderedMarkdown) {
     return diagrams;

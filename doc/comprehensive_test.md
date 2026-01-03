@@ -14,6 +14,14 @@ Regular paragraph with **bold text** and _italic text_ and **_bold italic_**.
 
 This is a second paragraph to test spacing.
 
+## Emojis
+
+Common emojis: ✅ ❌ ⚠️ ℹ️ 🔴 🟢 🔵 ⭐ 📁 📄 🔗 💡
+
+Faces: 😀 😎 🤔 👍 👎 🎉 🚀 ✨
+
+Symbols: → ← ↑ ↓ ⇒ ⇐ • ◦ ▪ ▫ ★ ☆
+
 ## Bullet Lists
 
 - First bullet item
@@ -29,8 +37,13 @@ This is a second paragraph to test spacing.
 2. Second numbered item
    1. Nested number 2.1
    2. Nested number 2.2
+      1. Deep nested 2.2.1
+      2. Deep nested 2.2.2
+   3. Nested number 2.3
 3. Third numbered item
 4. Fourth numbered item
+   1. Nested 4.1
+   2. Nested 4.2
 
 ## Mixed Lists
 

@@ -734,11 +734,61 @@ class ExportHandlerBase(APIHandler):
             ]))
             return [t, Spacer(1, 0.15 * inch)]
 
+        def process_image(drawing_element, doc):
+            """Extract image from drawing element and return reportlab Image."""
+            try:
+                # Navigate to blip element containing image reference
+                blip = drawing_element.find('.//' + qn('a:blip'))
+                if blip is None:
+                    return None
+
+                # Get the relationship ID
+                rId = blip.get(qn('r:embed'))
+                if not rId:
+                    return None
+
+                # Get image data from document parts
+                image_part = doc.part.related_parts.get(rId)
+                if not image_part:
+                    return None
+
+                # Create reportlab Image from bytes
+                img_buffer = io.BytesIO(image_part.blob)
+                img = RLImage(img_buffer)
+
+                # Scale image to fit page width (max 7 inches)
+                max_width = 7 * inch
+                if img.drawWidth > max_width:
+                    scale = max_width / img.drawWidth
+                    img.drawWidth = max_width
+                    img.drawHeight = img.drawHeight * scale
+
+                # Left-align image
+                img.hAlign = 'LEFT'
+
+                return img
+            except Exception:
+                return None
+
         # Iterate through body elements in document order
         for element in doc.element.body:
             if element.tag == qn('w:p'):  # Paragraph
                 para = DocxParagraph(element, doc)
-                story.append(process_paragraph(para))
+
+                # Check for drawings (images) in paragraph
+                drawings = element.findall('.//' + qn('w:drawing'))
+                if drawings:
+                    # Process paragraph text first (if any)
+                    if para.text.strip():
+                        story.append(process_paragraph(para))
+                    # Then add images
+                    for drawing in drawings:
+                        img = process_image(drawing, doc)
+                        if img:
+                            story.append(img)
+                            story.append(Spacer(1, 0.1 * inch))
+                else:
+                    story.append(process_paragraph(para))
             elif element.tag == qn('w:tbl'):  # Table
                 tbl = DocxTable(element, doc)
                 story.extend(process_table(tbl))
