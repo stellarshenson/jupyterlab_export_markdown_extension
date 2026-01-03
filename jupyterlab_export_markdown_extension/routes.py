@@ -218,6 +218,33 @@ class ExportHandlerBase(APIHandler):
 
         return re.sub(img_pattern, replace_image, content)
 
+    def preprocess_github_alerts(self, content: str) -> str:
+        """Convert GitHub-style alerts to HTML divs.
+
+        Supports: NOTE, TIP, IMPORTANT, WARNING, CAUTION
+        """
+        alert_pattern = r'> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\n((?:> .*\n?)*)'
+
+        def replace_alert(match):
+            alert_type = match.group(1).lower()
+            # Remove '> ' prefix from each line and join
+            alert_lines = match.group(2).strip().split('\n')
+            alert_content = ' '.join(line.lstrip('> ').strip() for line in alert_lines if line.strip())
+
+            # Map alert types to colors
+            color_map = {
+                'note': '#0969da',      # Blue
+                'tip': '#1a7f37',       # Green
+                'important': '#8250df', # Purple
+                'warning': '#9a6700',   # Yellow/Orange
+                'caution': '#cf222e'    # Red
+            }
+            color = color_map.get(alert_type, '#0969da')
+
+            return f'**{alert_type.upper()}:** {alert_content}\n\n'
+
+        return re.sub(alert_pattern, replace_alert, content)
+
     def markdown_to_html(self, content: str, title: str = 'Exported Document',
                          compact: bool = False) -> str:
         """Convert markdown to standalone HTML.
@@ -479,8 +506,9 @@ class ExportHandlerBase(APIHandler):
             spaceAfter=6
         )
 
-        list_style = ParagraphStyle(
-            'CustomList',
+        # Level-specific list styles for bullets
+        list_bullet_style = ParagraphStyle(
+            'CustomListBullet',
             parent=styles['Normal'],
             fontName=font_name,
             fontSize=10,
@@ -488,6 +516,40 @@ class ExportHandlerBase(APIHandler):
             spaceAfter=3,
             leftIndent=18,
             bulletIndent=6
+        )
+
+        list_bullet_2_style = ParagraphStyle(
+            'CustomListBullet2',
+            parent=styles['Normal'],
+            fontName=font_name,
+            fontSize=10,
+            leading=12,
+            spaceAfter=3,
+            leftIndent=36,
+            bulletIndent=24
+        )
+
+        # Level-specific list styles for numbered lists
+        list_number_style = ParagraphStyle(
+            'CustomListNumber',
+            parent=styles['Normal'],
+            fontName=font_name,
+            fontSize=10,
+            leading=12,
+            spaceAfter=3,
+            leftIndent=18,
+            bulletIndent=6
+        )
+
+        list_number_2_style = ParagraphStyle(
+            'CustomListNumber2',
+            parent=styles['Normal'],
+            fontName=font_name,
+            fontSize=10,
+            leading=12,
+            spaceAfter=3,
+            leftIndent=36,
+            bulletIndent=24
         )
 
         heading1_style = ParagraphStyle(
@@ -530,26 +592,66 @@ class ExportHandlerBase(APIHandler):
         from docx.table import Table as DocxTable
         from docx.oxml.ns import qn
 
-        def is_list_paragraph(para):
-            """Check if paragraph is a list item."""
+        def get_list_info(para):
+            """Get list type and level from paragraph style and indentation.
+
+            Returns: (list_type, level) where list_type is 'number', 'bullet', or None
+            """
             style_name = para.style.name if para.style else ''
-            if 'List' in style_name or 'Bullet' in style_name:
-                return True
-            try:
-                numPr = para._element.pPr.numPr if para._element.pPr is not None else None
-                if numPr is not None:
-                    return True
-            except AttributeError:
-                pass
-            return False
+
+            # Determine list type from style name
+            list_type = None
+            if 'List Number' in style_name:
+                list_type = 'number'
+            elif 'List Bullet' in style_name:
+                list_type = 'bullet'
+            elif 'List' in style_name:
+                list_type = 'bullet'
+
+            if list_type is None:
+                # Check numPr for lists without explicit style
+                try:
+                    if para._element.pPr is not None and para._element.pPr.numPr is not None:
+                        list_type = 'bullet'
+                except AttributeError:
+                    pass
+
+            if list_type is None:
+                return (None, 0)
+
+            # Determine level from style name first (List Number 2, List Bullet 2)
+            if '2' in style_name or '3' in style_name:
+                level = 1
+            else:
+                # Check leftIndent for nesting level (720 = level 0, 1440+ = level 1+)
+                level = 0
+                try:
+                    pPr = para._element.pPr
+                    if pPr is not None:
+                        ind = pPr.find(qn('w:ind'))
+                        if ind is not None:
+                            left_val = ind.get(qn('w:left'))
+                            if left_val:
+                                left_indent = int(left_val)
+                                # 720 twips = level 0, 1440+ = level 1+
+                                if left_indent > 720:
+                                    level = 1
+                except (AttributeError, ValueError):
+                    pass
+
+            return (list_type, level)
+
+        # Track numbering for ordered lists
+        number_counters = {0: 0, 1: 0, 2: 0}
+        last_list_level = -1
 
         def process_paragraph(para):
             """Process a single paragraph and return reportlab element."""
+            nonlocal last_list_level
+
             text = para.text.strip()
             if not text:
                 return Spacer(1, 0.08 * inch)
-
-            is_list = is_list_paragraph(para)
 
             # Escape XML special characters
             text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -569,14 +671,40 @@ class ExportHandlerBase(APIHandler):
             # Detect heading styles
             style_name = para.style.name if para.style else ''
             if style_name.startswith('Heading 1'):
+                last_list_level = -1
                 return Paragraph(text, heading1_style)
             elif style_name.startswith('Heading 2'):
+                last_list_level = -1
                 return Paragraph(text, heading2_style)
             elif style_name.startswith('Heading 3') or style_name.startswith('Heading'):
+                last_list_level = -1
                 return Paragraph(text, heading3_style)
-            elif is_list:
-                return Paragraph(f'• {text}', list_style)
+
+            # Check for list items
+            list_type, level = get_list_info(para)
+
+            if list_type == 'number':
+                # Reset lower levels when moving up, increment current level
+                if level <= last_list_level:
+                    for l in range(level + 1, 3):
+                        number_counters[l] = 0
+                number_counters[level] += 1
+                last_list_level = level
+
+                prefix = f"{number_counters[level]}. "
+                style = list_number_2_style if level > 0 else list_number_style
+                return Paragraph(f'{prefix}{text}', style)
+
+            elif list_type == 'bullet':
+                last_list_level = level
+                style = list_bullet_2_style if level > 0 else list_bullet_style
+                return Paragraph(f'• {text}', style)
+
             else:
+                # Reset counters when not in list
+                last_list_level = -1
+                for l in number_counters:
+                    number_counters[l] = 0
                 return Paragraph(text, normal_style)
 
         def process_table(tbl):
@@ -651,6 +779,7 @@ class ExportPdfHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            content = self.preprocess_github_alerts(content)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
             html = self.markdown_to_html(content, file_path.stem)
@@ -735,6 +864,7 @@ class ExportDocxHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            content = self.preprocess_github_alerts(content)
             # Use PNG for DOCX (better Word compatibility)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
@@ -848,6 +978,7 @@ class ExportHtmlHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            content = self.preprocess_github_alerts(content)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams)
             content = self.embed_images_as_base64(content, file_path.parent)
             html = self.markdown_to_html(content, file_path.stem)

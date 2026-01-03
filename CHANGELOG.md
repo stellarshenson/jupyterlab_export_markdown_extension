@@ -2,6 +2,15 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.1.13
+
+- Add comprehensive markdown test file (`doc/comprehensive_test.md`)
+- Fix numbered lists rendering as bullet lists in PDF export
+- Add nested list indentation support using leftIndent detection from DOCX
+- Add level-specific list styles for bullets and numbered lists (level 0 and level 1)
+- Add GitHub-style alerts support (NOTE, TIP, IMPORTANT, WARNING, CAUTION)
+- Add test image and mermaid diagram sections to comprehensive test
+
 ## 1.1.11
 
 - Left-align tables in PDF export instead of centered
