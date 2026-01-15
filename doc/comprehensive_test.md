@@ -78,10 +78,42 @@ Faces: 😀 😎 🤔 👍 👎 🎉 🚀 ✨
 
 Inline `code snippet` in a paragraph.
 
+### Python
+
 ```python
 def hello_world():
+    """A simple greeting function."""
     print("Hello, World!")
     return True
+
+class Calculator:
+    def add(self, a, b):
+        return a + b
+```
+
+### INI Configuration
+
+```ini
+[database]
+host = localhost
+port = 5432
+name = myapp_db
+
+[logging]
+level = INFO
+format = %(asctime)s - %(name)s - %(levelname)s
+```
+
+### Bash Script
+
+```bash
+#!/bin/bash
+# Deploy script
+echo "Starting deployment..."
+for server in web1 web2 web3; do
+    ssh $server "cd /app && git pull && systemctl restart app"
+done
+echo "Deployment complete!"
 ```
 
 ## Blockquotes

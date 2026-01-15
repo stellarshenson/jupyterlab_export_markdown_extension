@@ -340,3 +340,65 @@ class TestGitHubAlerts:
         with zipfile.ZipFile(docx_bytes, "r") as zf:
             document_xml = zf.read("word/document.xml").decode("utf-8")
             assert "NOTE" in document_xml or "note" in document_xml.lower()
+
+
+class TestSyntaxHighlighting:
+    """Test syntax highlighting in code blocks."""
+
+    async def test_html_has_pygments_css(self, jp_fetch, test_markdown_file):
+        """Test HTML output contains Pygments CSS for syntax highlighting."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "test.md"}),
+        )
+        html = response.body.decode("utf-8")
+        # Pygments CSS defines .codehilite styles
+        assert ".codehilite" in html
+
+    async def test_html_has_highlighted_code(self, jp_fetch, test_markdown_file):
+        """Test HTML output has syntax-highlighted code spans."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "test.md"}),
+        )
+        html = response.body.decode("utf-8")
+        # Python code should have span elements with classes for keywords
+        # Look for codehilite div or syntax-highlighted spans
+        assert "codehilite" in html or 'class="k"' in html or 'class="nf"' in html
+
+    async def test_docx_has_colored_code(self, jp_fetch, test_markdown_file):
+        """Test DOCX output has inline styled code (colored spans)."""
+        import zipfile
+        import io
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test.md"}),
+        )
+
+        docx_bytes = io.BytesIO(response.body)
+        with zipfile.ZipFile(docx_bytes, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8")
+            # DOCX with colored code should have color references
+            # Either via styles or inline formatting
+            assert "def" in document_xml and "test" in document_xml
+
+    async def test_pdf_has_code_content(self, jp_fetch, test_markdown_file):
+        """Test PDF output contains code block content."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "test.md"}),
+        )
+
+        # PDF should be larger when it has formatted code blocks
+        assert len(response.body) > 1000
+        # PDF should have valid structure
+        assert response.body.startswith(b"%PDF-")

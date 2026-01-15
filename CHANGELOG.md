@@ -2,6 +2,15 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.2.0
+
+- Add syntax highlighting for code blocks using Pygments
+- HTML export: Add Pygments CSS styles for all token types
+- DOCX export: Convert Pygments output to inline colored spans
+- PDF export: Render code blocks with Pygments-based colored text using reportlab
+- Fix multiline code block preservation in PDF export (was flattening to single line)
+- Add syntax highlighting tests to export fidelity test suite
+
 ## 1.1.13
 
 - Add comprehensive markdown test file (`doc/comprehensive_test.md`)

@@ -24,7 +24,8 @@ try:
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import inch
     from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage,
+        Preformatted, XPreformatted
     )
     from reportlab.lib import colors
     from reportlab.pdfbase import pdfmetrics
@@ -218,6 +219,212 @@ class ExportHandlerBase(APIHandler):
 
         return re.sub(img_pattern, replace_image, content)
 
+    def get_pygments_css(self) -> str:
+        """Get Pygments CSS for syntax highlighting."""
+        try:
+            from pygments.formatters import HtmlFormatter
+            return HtmlFormatter(style='default').get_style_defs('.codehilite')
+        except ImportError:
+            return ''
+
+    def highlight_code_blocks(self, content: str, use_inline_styles: bool = False) -> str:
+        """Highlight code blocks using Pygments.
+
+        Args:
+            content: Markdown content with fenced code blocks
+            use_inline_styles: If True, use inline styles (for DOCX). If False, use CSS classes (for HTML).
+
+        Returns:
+            Content with code blocks replaced by highlighted HTML
+        """
+        try:
+            from pygments import highlight
+            from pygments.lexers import get_lexer_by_name, guess_lexer, TextLexer
+            from pygments.formatters import HtmlFormatter
+        except ImportError:
+            return content
+
+        # Pattern to match fenced code blocks with optional language
+        code_pattern = r'```(\w*)\n(.*?)```'
+
+        def highlight_match(match):
+            lang = match.group(1).strip().lower() or 'text'
+            code = match.group(2)
+
+            try:
+                lexer = get_lexer_by_name(lang)
+            except Exception:
+                try:
+                    lexer = guess_lexer(code)
+                except Exception:
+                    lexer = TextLexer()
+
+            formatter = HtmlFormatter(
+                noclasses=use_inline_styles,
+                nowrap=False,
+                cssclass='codehilite'
+            )
+            highlighted = highlight(code, lexer, formatter)
+
+            # Fix color format for htmldocx (needs # prefix, but only 6-char hex)
+            if use_inline_styles:
+                # Convert 3-char hex to 6-char hex (e.g., #BBB -> #BBBBBB, #00F -> #0000FF)
+                highlighted = re.sub(
+                    r'color:\s*#([0-9A-Fa-f])([0-9A-Fa-f])([0-9A-Fa-f])(?![0-9A-Fa-f])',
+                    lambda m: f'color: #{m.group(1)*2}{m.group(2)*2}{m.group(3)*2}',
+                    highlighted
+                )
+                highlighted = re.sub(
+                    r'background:\s*#([0-9A-Fa-f])([0-9A-Fa-f])([0-9A-Fa-f])(?![0-9A-Fa-f])',
+                    lambda m: f'background: #{m.group(1)*2}{m.group(2)*2}{m.group(3)*2}',
+                    highlighted
+                )
+
+            return highlighted
+
+        return re.sub(code_pattern, highlight_match, content, flags=re.DOTALL)
+
+    def extract_code_blocks(self, content: str) -> tuple:
+        """Extract code blocks from markdown for PDF rendering.
+
+        Returns:
+            Tuple of (modified_content, code_blocks_list)
+            code_blocks_list contains dicts with 'lang' and 'code' keys
+        """
+        code_blocks = []
+        code_pattern = r'```(\w*)\n(.*?)```'
+
+        def extract_match(match):
+            lang = match.group(1).strip().lower() or 'text'
+            code = match.group(2).rstrip('\n')
+            idx = len(code_blocks)
+            code_blocks.append({'lang': lang, 'code': code})
+            # Replace with placeholder
+            return f'[[CODE_BLOCK_{idx}]]'
+
+        modified = re.sub(code_pattern, extract_match, content, flags=re.DOTALL)
+        return modified, code_blocks
+
+    def highlight_code_for_pdf(self, code: str, lang: str) -> list:
+        """Highlight code for PDF using Pygments and return reportlab flowables.
+
+        Returns list of reportlab flowables (Preformatted paragraphs)
+        """
+        try:
+            from pygments import highlight
+            from pygments.lexers import get_lexer_by_name, guess_lexer, TextLexer
+            from pygments.formatters import get_formatter_by_name
+        except ImportError:
+            # Fallback: return plain preformatted text
+            if REPORTLAB_AVAILABLE:
+                from reportlab.lib.styles import getSampleStyleSheet
+                styles = getSampleStyleSheet()
+                code_style = ParagraphStyle(
+                    'CodeBlock',
+                    parent=styles['Code'],
+                    fontName='Courier',
+                    fontSize=8,
+                    leading=10,
+                    backColor=colors.HexColor('#f8f8f8'),
+                    leftIndent=6,
+                    rightIndent=6,
+                    spaceBefore=6,
+                    spaceAfter=6
+                )
+                return [Preformatted(code, code_style)]
+            return []
+
+        try:
+            lexer = get_lexer_by_name(lang)
+        except Exception:
+            try:
+                lexer = guess_lexer(code)
+            except Exception:
+                lexer = TextLexer()
+
+        # Use a monospace font for code
+        font_name = 'Courier'
+        if REPORTLAB_AVAILABLE and 'UnicodeSans' in pdfmetrics.getRegisteredFontNames():
+            # Check if we have a monospace Unicode font
+            pass  # Keep Courier for code
+
+        code_style = ParagraphStyle(
+            'CodeBlock',
+            fontName=font_name,
+            fontSize=8,
+            leading=10,
+            backColor=colors.HexColor('#f8f8f8'),
+            leftIndent=6,
+            rightIndent=6,
+            spaceBefore=6,
+            spaceAfter=6,
+            wordWrap='CJK'  # Allow wrapping on any character
+        )
+
+        # Convert Pygments tokens to reportlab XML markup
+        from pygments.token import Token, Keyword, Name, Comment, String, Number, Operator
+
+        # Color mapping for token types
+        token_colors = {
+            Token.Keyword: '#008000',
+            Token.Keyword.Constant: '#008000',
+            Token.Keyword.Declaration: '#008000',
+            Token.Keyword.Namespace: '#008000',
+            Token.Keyword.Type: '#B00040',
+            Token.Name.Function: '#0000FF',
+            Token.Name.Class: '#0000FF',
+            Token.Name.Decorator: '#AA22FF',
+            Token.Name.Builtin: '#008000',
+            Token.Name.Tag: '#008000',
+            Token.Comment: '#3D7B7B',
+            Token.Comment.Single: '#3D7B7B',
+            Token.Comment.Multiline: '#3D7B7B',
+            Token.String: '#BA2121',
+            Token.String.Doc: '#BA2121',
+            Token.String.Escape: '#AA5D1F',
+            Token.Number: '#666666',
+            Token.Number.Integer: '#666666',
+            Token.Number.Float: '#666666',
+            Token.Operator: '#666666',
+            Token.Operator.Word: '#AA22FF',
+        }
+
+        # Build XML-formatted code
+        formatted_lines = []
+        current_line = []
+
+        for ttype, value in lexer.get_tokens(code):
+            # Escape XML special characters
+            value = value.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+            # Find color for token type
+            color = None
+            for token_type, token_color in token_colors.items():
+                if ttype in token_type or ttype is token_type:
+                    color = token_color
+                    break
+
+            # Split by newlines to handle multiline tokens
+            parts = value.split('\n')
+            for i, part in enumerate(parts):
+                if part:
+                    if color:
+                        current_line.append(f'<font color="{color}">{part}</font>')
+                    else:
+                        current_line.append(part)
+                if i < len(parts) - 1:  # Not the last part, meaning there was a newline
+                    formatted_lines.append(''.join(current_line))
+                    current_line = []
+
+        # Add remaining content
+        if current_line:
+            formatted_lines.append(''.join(current_line))
+
+        # Join with newlines - XPreformatted preserves whitespace like Preformatted
+        formatted_code = '\n'.join(formatted_lines)
+
+        return [XPreformatted(formatted_code, code_style)]
+
     def preprocess_github_alerts(self, content: str) -> str:
         """Convert GitHub-style alerts to HTML divs.
 
@@ -369,59 +576,64 @@ class ExportHandlerBase(APIHandler):
             text-underline-offset: 2px;
         }'''
         else:
-            # Standard HTML stylesheet
-            style = '''
-        body {
+            # Standard HTML stylesheet with Pygments syntax highlighting
+            pygments_css = self.get_pygments_css()
+            style = f'''
+        body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             line-height: 1.6;
             max-width: 800px;
             margin: 0 auto;
             padding: 20px;
             color: #333;
-        }
-        pre {
-            background: #f4f4f4;
+        }}
+        pre {{
+            background: #f8f8f8;
             padding: 10px;
             border-radius: 4px;
             overflow-x: auto;
-        }
-        code {
-            background: #f4f4f4;
+            font-size: 0.85em;
+        }}
+        code {{
+            background: #f8f8f8;
             padding: 2px 4px;
             border-radius: 2px;
             font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-        }
-        pre code {
+            font-size: 0.85em;
+        }}
+        pre code {{
             background: none;
             padding: 0;
-        }
-        table {
+        }}
+        table {{
             border-collapse: collapse;
             width: 100%;
             margin: 1em 0;
-        }
-        th, td {
+        }}
+        th, td {{
             border: 1px solid #ddd;
             padding: 8px;
             text-align: left;
-        }
-        th {
+        }}
+        th {{
             background: #f4f4f4;
-        }
-        img {
+        }}
+        img {{
             max-width: 100%;
             height: auto;
-        }
-        blockquote {
+        }}
+        blockquote {{
             border-left: 4px solid #ddd;
             margin: 0;
             padding-left: 16px;
             color: #666;
-        }
-        h1, h2, h3, h4, h5, h6 {
+        }}
+        h1, h2, h3, h4, h5, h6 {{
             margin-top: 1.5em;
             margin-bottom: 0.5em;
-        }'''
+        }}
+        /* Pygments syntax highlighting */
+        {pygments_css}'''
 
         html = f'''<!DOCTYPE html>
 <html>
@@ -438,35 +650,88 @@ class ExportHandlerBase(APIHandler):
         return html
 
     def _register_unicode_fonts(self):
-        """Register Unicode-supporting fonts from system paths."""
-        font_candidates = [
+        """Register Unicode-supporting fonts from system paths with font family support."""
+        from reportlab.pdfbase.pdfmetrics import registerFontFamily
+
+        # Define font sets with normal, bold, italic, bolditalic variants
+        font_sets = [
             # DejaVu fonts (most common, excellent Unicode support)
-            ('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 'UnicodeSans'),
-            ('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 'UnicodeSansBold'),
+            {
+                'normal': '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+                'bold': '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+                'italic': '/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf',
+                'boldItalic': '/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf',
+            },
             # Liberation fonts (alternative)
-            ('/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', 'UnicodeSans'),
-            ('/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf', 'UnicodeSansBold'),
+            {
+                'normal': '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+                'bold': '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+                'italic': '/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf',
+                'boldItalic': '/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf',
+            },
+            # FreeSans (GNU FreeFont)
+            {
+                'normal': '/usr/share/fonts/truetype/freefont/FreeSans.ttf',
+                'bold': '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf',
+                'italic': '/usr/share/fonts/truetype/freefont/FreeSansOblique.ttf',
+                'boldItalic': '/usr/share/fonts/truetype/freefont/FreeSansBoldOblique.ttf',
+            },
         ]
 
-        registered_fonts = set()
-        for font_path, font_name in font_candidates:
-            if os.path.exists(font_path) and font_name not in registered_fonts:
-                try:
-                    pdfmetrics.registerFont(TTFont(font_name, font_path))
-                    registered_fonts.add(font_name)
-                except Exception:
-                    pass
+        font_names = {
+            'normal': 'UnicodeSans',
+            'bold': 'UnicodeSansBold',
+            'italic': 'UnicodeSansItalic',
+            'boldItalic': 'UnicodeSansBoldItalic',
+        }
 
-    def convert_docx_to_pdf(self, docx_bytes: bytes) -> bytes:
+        registered_fonts = set()
+
+        # Try each font set until we find one with at least normal and bold
+        for font_set in font_sets:
+            if 'UnicodeSans' in registered_fonts:
+                break
+
+            if font_set['normal'] and os.path.exists(font_set['normal']):
+                for variant, path in font_set.items():
+                    if path and os.path.exists(path):
+                        font_name = font_names[variant]
+                        if font_name not in registered_fonts:
+                            try:
+                                pdfmetrics.registerFont(TTFont(font_name, path))
+                                registered_fonts.add(font_name)
+                            except Exception:
+                                pass
+
+        # Register font family to enable <b> and <i> tags in Paragraph
+        if 'UnicodeSans' in registered_fonts:
+            try:
+                italic_font = 'UnicodeSansItalic' if 'UnicodeSansItalic' in registered_fonts else 'Helvetica-Oblique'
+                bold_italic_font = 'UnicodeSansBoldItalic' if 'UnicodeSansBoldItalic' in registered_fonts else 'Helvetica-BoldOblique'
+
+                registerFontFamily(
+                    'UnicodeSans',
+                    normal='UnicodeSans',
+                    bold='UnicodeSansBold' if 'UnicodeSansBold' in registered_fonts else 'UnicodeSans',
+                    italic=italic_font,
+                    boldItalic=bold_italic_font
+                )
+            except Exception:
+                pass
+
+    def convert_docx_to_pdf(self, docx_bytes: bytes, code_blocks: list = None) -> bytes:
         """
         Convert DOCX document to PDF using python-docx + reportlab.
 
         Args:
             docx_bytes: DOCX file content as bytes
+            code_blocks: Optional list of code blocks extracted from markdown
 
         Returns:
             PDF file content as bytes
         """
+        if code_blocks is None:
+            code_blocks = []
         if not REPORTLAB_AVAILABLE:
             raise ImportError("reportlab is required for PDF export")
 
@@ -645,27 +910,101 @@ class ExportHandlerBase(APIHandler):
         number_counters = {0: 0, 1: 0, 2: 0}
         last_list_level = -1
 
+        def is_horizontal_rule(para):
+            """Check if paragraph represents a horizontal divider line."""
+            try:
+                pPr = para._element.pPr
+                if pPr is not None:
+                    pBdr = pPr.find(qn('w:pBdr'))
+                    if pBdr is not None:
+                        bottom = pBdr.find(qn('w:bottom'))
+                        top = pBdr.find(qn('w:top'))
+                        if bottom is not None or top is not None:
+                            if not para.text.strip():
+                                return True
+            except (AttributeError, TypeError):
+                pass
+            return False
+
+        def format_run(run):
+            """Format a single run with all its styling."""
+            run_text = run.text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            if not run_text:
+                return run_text
+
+            # Convert newlines to HTML line breaks
+            run_text = run_text.replace('\n', '<br/>')
+            result = run_text
+
+            # Apply formatting tags (can be combined)
+            if run.bold:
+                result = f'<b>{result}</b>'
+            if run.italic:
+                result = f'<i>{result}</i>'
+            if run.underline:
+                result = f'<u>{result}</u>'
+            if run.font.strike:
+                result = f'<strike>{result}</strike>'
+            if run.font.subscript:
+                result = f'<sub>{result}</sub>'
+            if run.font.superscript:
+                result = f'<super>{result}</super>'
+
+            # Check for text color
+            try:
+                if run.font.color and run.font.color.rgb:
+                    color_hex = str(run.font.color.rgb)
+                    if color_hex and color_hex != 'None' and len(color_hex) == 6:
+                        result = f'<font color="#{color_hex}">{result}</font>'
+            except (AttributeError, TypeError):
+                pass
+
+            return result
+
         def process_paragraph(para):
-            """Process a single paragraph and return reportlab element."""
+            """Process a single paragraph and return reportlab element(s)."""
             nonlocal last_list_level
+
+            # Check for horizontal rule/divider first
+            if is_horizontal_rule(para):
+                from reportlab.platypus import HRFlowable
+                return [HRFlowable(width="100%", thickness=0.5, color=colors.grey, spaceBefore=3, spaceAfter=6)]
 
             text = para.text.strip()
             if not text:
-                return Spacer(1, 0.08 * inch)
+                # Empty paragraph - render as actual blank line (not invisible spacer)
+                return Paragraph("&nbsp;", normal_style)
 
-            # Escape XML special characters
+            # Check for code block placeholder [[CODE_BLOCK_N]]
+            code_match = re.match(r'\[\[CODE_BLOCK_(\d+)\]\]', text)
+            if code_match and code_blocks:
+                idx = int(code_match.group(1))
+                if idx < len(code_blocks):
+                    block = code_blocks[idx]
+                    return self.highlight_code_for_pdf(block['code'], block['lang'])
+                return Paragraph("&nbsp;", normal_style)
+
+            # Escape XML special characters for base text
             text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            text = text.replace('\n', '<br/>')
 
-            # Check for bold runs and wrap them
-            has_bold = any(run.bold for run in para.runs if run.text.strip())
-            if has_bold:
-                formatted_parts = []
-                for run in para.runs:
-                    run_text = run.text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                    if run.bold and run_text.strip():
-                        formatted_parts.append(f'<b>{run_text}</b>')
-                    else:
-                        formatted_parts.append(run_text)
+            # Check if any run has formatting that needs processing
+            has_formatting = False
+            for run in para.runs:
+                if run.text.strip():
+                    if (run.bold or run.italic or run.underline or
+                        run.font.strike or run.font.subscript or run.font.superscript):
+                        has_formatting = True
+                        break
+                    try:
+                        if run.font.color and run.font.color.rgb:
+                            has_formatting = True
+                            break
+                    except (AttributeError, TypeError):
+                        pass
+
+            if has_formatting:
+                formatted_parts = [format_run(run) for run in para.runs]
                 text = ''.join(formatted_parts)
 
             # Detect heading styles
@@ -770,6 +1109,13 @@ class ExportHandlerBase(APIHandler):
             except Exception:
                 return None
 
+        def add_to_story(result):
+            """Add paragraph result to story, handling lists or single elements."""
+            if isinstance(result, list):
+                story.extend(result)
+            else:
+                story.append(result)
+
         # Iterate through body elements in document order
         for element in doc.element.body:
             if element.tag == qn('w:p'):  # Paragraph
@@ -780,7 +1126,7 @@ class ExportHandlerBase(APIHandler):
                 if drawings:
                     # Process paragraph text first (if any)
                     if para.text.strip():
-                        story.append(process_paragraph(para))
+                        add_to_story(process_paragraph(para))
                     # Then add images
                     for drawing in drawings:
                         img = process_image(drawing, doc)
@@ -788,7 +1134,7 @@ class ExportHandlerBase(APIHandler):
                             story.append(img)
                             story.append(Spacer(1, 0.1 * inch))
                 else:
-                    story.append(process_paragraph(para))
+                    add_to_story(process_paragraph(para))
             elif element.tag == qn('w:tbl'):  # Table
                 tbl = DocxTable(element, doc)
                 story.extend(process_table(tbl))
@@ -832,6 +1178,10 @@ class ExportPdfHandler(ExportHandlerBase):
             content = self.preprocess_github_alerts(content)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
+
+            # Extract code blocks for PDF rendering (before DOCX conversion)
+            content, code_blocks = self.extract_code_blocks(content)
+
             html = self.markdown_to_html(content, file_path.stem)
 
             # Step 1: Create DOCX in memory (same logic as DOCX export)
@@ -873,8 +1223,8 @@ class ExportPdfHandler(ExportHandlerBase):
                 document.save(docx_buffer)
                 docx_bytes = docx_buffer.getvalue()
 
-            # Step 2: Convert DOCX to PDF using reportlab
-            pdf_content = self.convert_docx_to_pdf(docx_bytes)
+            # Step 2: Convert DOCX to PDF using reportlab (with code blocks)
+            pdf_content = self.convert_docx_to_pdf(docx_bytes, code_blocks)
 
             self.set_header('Content-Type', 'application/pdf')
             self.set_header('Content-Disposition',
@@ -918,6 +1268,8 @@ class ExportDocxHandler(ExportHandlerBase):
             # Use PNG for DOCX (better Word compatibility)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
+            # Highlight code blocks with inline styles for DOCX
+            content = self.highlight_code_blocks(content, use_inline_styles=True)
             html = self.markdown_to_html(content, file_path.stem)
 
             from htmldocx import HtmlToDocx
