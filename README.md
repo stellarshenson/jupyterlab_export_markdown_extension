@@ -7,6 +7,9 @@
 [![JupyterLab 4](https://img.shields.io/badge/JupyterLab-4-orange.svg)](https://jupyterlab.readthedocs.io/en/stable/)
 [![Brought To You By KOLOMOLO](https://img.shields.io/badge/Brought%20To%20You%20By-KOLOMOLO-00ffff?style=flat)](https://kolomolo.com)
 
+> [!TIP]
+> This extension is part of the [stellars_jupyterlab_extensions](https://github.com/stellarshenson/stellars_jupyterlab_extensions) metapackage. Install all Stellars extensions at once: `pip install stellars_jupyterlab_extensions`
+
 Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No external dependencies required - just `pip install` and go.
 
 ![Export Markdown As menu](.resources/screenshot.png)
