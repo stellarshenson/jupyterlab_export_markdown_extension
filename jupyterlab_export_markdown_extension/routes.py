@@ -131,13 +131,17 @@ class ExportHandlerBase(APIHandler):
         png_base64 = base64.b64encode(png_bytes).decode('utf-8')
         return f'data:image/png;base64,{png_base64}'
 
-    def extract_data_uri_images(self, html: str, temp_dir: str) -> str:
+    def extract_data_uri_images(self, html: str, temp_dir: str,
+                                convert_svg: bool = False,
+                                dpi: int = 150) -> str:
         """
         Extract data URI images to temp files for htmldocx compatibility.
 
         Args:
             html: HTML content with data URI images
             temp_dir: Directory to store temp image files
+            convert_svg: If True, convert SVG images to PNG (python-docx can't handle SVG)
+            dpi: DPI for SVG to PNG conversion
 
         Returns:
             HTML with data URIs replaced by file paths
@@ -161,6 +165,17 @@ class ExportHandlerBase(APIHandler):
             # Decode and save to temp file
             try:
                 img_bytes = base64.b64decode(base64_data)
+
+                # Convert SVG to PNG if requested (python-docx doesn't support SVG)
+                if convert_svg and img_type == 'svg+xml':
+                    try:
+                        import cairosvg
+                        img_bytes = cairosvg.svg2png(bytestring=img_bytes, dpi=dpi)
+                        ext = '.png'
+                    except ImportError:
+                        # cairosvg not available - skip this image
+                        return match.group(0)
+
                 # Create unique filename
                 import hashlib
                 hash_id = hashlib.md5(img_bytes).hexdigest()[:8]
@@ -1161,6 +1176,7 @@ class ExportPdfHandler(ExportHandlerBase):
             data = json.loads(self.request.body)
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
+            svg_dpi = data.get('svgDPI', 150)
 
             if not relative_path:
                 self.set_status(400)
@@ -1193,7 +1209,9 @@ class ExportPdfHandler(ExportHandlerBase):
             body_html = body_match.group(1) if body_match else html
 
             with tempfile.TemporaryDirectory() as temp_dir:
-                body_html = self.extract_data_uri_images(body_html, temp_dir)
+                body_html = self.extract_data_uri_images(body_html, temp_dir,
+                                                         convert_svg=True,
+                                                         dpi=svg_dpi)
 
                 document = Document()
 
@@ -1250,6 +1268,7 @@ class ExportDocxHandler(ExportHandlerBase):
             data = json.loads(self.request.body)
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
+            svg_dpi = data.get('svgDPI', 150)
 
             if not relative_path:
                 self.set_status(400)
@@ -1282,7 +1301,9 @@ class ExportDocxHandler(ExportHandlerBase):
 
             # Use temp directory for images (htmldocx can't handle data URIs)
             with tempfile.TemporaryDirectory() as temp_dir:
-                body_html = self.extract_data_uri_images(body_html, temp_dir)
+                body_html = self.extract_data_uri_images(body_html, temp_dir,
+                                                         convert_svg=True,
+                                                         dpi=svg_dpi)
 
                 document = Document()
 

@@ -1,6 +1,8 @@
 """Export fidelity tests - validate that HTML, DOCX, and PDF exports contain expected content."""
 
 import json
+import io
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -402,3 +404,118 @@ class TestSyntaxHighlighting:
         assert len(response.body) > 1000
         # PDF should have valid structure
         assert response.body.startswith(b"%PDF-")
+
+
+# Minimal SVG for testing
+TEST_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+  <rect width="200" height="100" fill="#4F81BD"/>
+  <text x="100" y="55" text-anchor="middle" fill="white" font-size="16">Test SVG</text>
+</svg>"""
+
+# Markdown with an SVG image reference
+TEST_MARKDOWN_WITH_SVG = """# Document With SVG
+
+Some text before the image.
+
+![Architecture Diagram](images/test-diagram.svg)
+
+Some text after the image.
+"""
+
+
+@pytest.fixture
+def test_svg_markdown_file(jp_root_dir):
+    """Create a test markdown file with an SVG image reference."""
+    # Create images directory and SVG file
+    images_dir = jp_root_dir / "images"
+    images_dir.mkdir(exist_ok=True)
+    svg_file = images_dir / "test-diagram.svg"
+    svg_file.write_text(TEST_SVG, encoding="utf-8")
+    # Create markdown file
+    md_file = jp_root_dir / "test_svg.md"
+    md_file.write_text(TEST_MARKDOWN_WITH_SVG, encoding="utf-8")
+    return md_file
+
+
+class TestSVGConversion:
+    """Test SVG to PNG conversion in DOCX and PDF exports."""
+
+    async def test_docx_with_svg_succeeds(self, jp_fetch, test_svg_markdown_file):
+        """Test DOCX export does not fail when markdown contains SVG images."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_svg.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body[:2] == b"PK"  # Valid ZIP/DOCX
+
+    async def test_docx_with_svg_contains_image(self, jp_fetch, test_svg_markdown_file):
+        """Test DOCX with SVG contains a converted PNG image."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_svg.md"}),
+        )
+        docx_bytes = io.BytesIO(response.body)
+        with zipfile.ZipFile(docx_bytes, "r") as zf:
+            # DOCX stores images in word/media/ directory
+            image_files = [n for n in zf.namelist() if n.startswith("word/media/")]
+            assert len(image_files) > 0, "DOCX should contain at least one image"
+            # Image should be PNG (converted from SVG)
+            for img in image_files:
+                img_data = zf.read(img)
+                assert img_data[:4] == b"\x89PNG", f"{img} should be PNG format"
+
+    async def test_docx_with_svg_contains_text(self, jp_fetch, test_svg_markdown_file):
+        """Test DOCX with SVG still contains surrounding text content."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_svg.md"}),
+        )
+        docx_bytes = io.BytesIO(response.body)
+        with zipfile.ZipFile(docx_bytes, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8")
+            assert "Document With SVG" in document_xml
+            assert "Some text before" in document_xml
+
+    async def test_pdf_with_svg_succeeds(self, jp_fetch, test_svg_markdown_file):
+        """Test PDF export does not fail when markdown contains SVG images."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "test_svg.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")
+
+    async def test_svg_dpi_parameter(self, jp_fetch, test_svg_markdown_file):
+        """Test svgDPI parameter is accepted by the export endpoint."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_svg.md", "svgDPI": 300}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body[:2] == b"PK"
+
+    async def test_html_with_svg_keeps_svg(self, jp_fetch, test_svg_markdown_file):
+        """Test HTML export preserves SVG as-is (no conversion needed)."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "test_svg.md"}),
+        )
+        html = response.body.decode("utf-8")
+        # HTML should contain the image as base64 data URI (SVG format preserved)
+        assert "data:image/svg+xml" in html or "Architecture Diagram" in html

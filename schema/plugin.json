@@ -7,7 +7,15 @@
   "properties": {
     "diagramDPI": {
       "title": "Diagram DPI",
-      "description": "Resolution for Mermaid diagram images in exports (dots per inch). Uses calibrated scaling matching jupyterlab_mmd_to_png_extension. Standard values: 150 (standard), 300 (high quality print).",
+      "description": "Resolution for Mermaid diagram images captured from the browser (dots per inch). Uses calibrated scaling matching jupyterlab_mmd_to_png_extension. Standard values: 150 (standard), 300 (high quality print).",
+      "type": "number",
+      "default": 150,
+      "minimum": 72,
+      "maximum": 600
+    },
+    "svgDPI": {
+      "title": "SVG Conversion DPI",
+      "description": "Resolution for server-side SVG to PNG conversion in DOCX and PDF exports (dots per inch). Applies to all SVG images embedded in markdown. Standard values: 150 (standard), 300 (high quality print).",
       "type": "number",
       "default": 150,
       "minimum": 72,
