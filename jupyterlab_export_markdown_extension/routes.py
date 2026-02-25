@@ -1234,8 +1234,16 @@ class ExportPdfHandler(ExportHandlerBase):
                             tblLook.set(qn('w:firstColumn'), '0')
 
                 while document.paragraphs and not document.paragraphs[0].text.strip():
-                    p = document.paragraphs[0]._element
-                    p.getparent().remove(p)
+                    p_elem = document.paragraphs[0]._element
+                    # Keep paragraphs that contain images (drawings or VML)
+                    from docx.oxml.ns import qn as _qn
+                    has_image = bool(
+                        p_elem.findall('.//' + _qn('w:drawing')) or
+                        p_elem.findall('.//{urn:schemas-microsoft-com:vml}imagedata')
+                    )
+                    if has_image:
+                        break
+                    p_elem.getparent().remove(p_elem)
 
                 docx_buffer = io.BytesIO()
                 document.save(docx_buffer)
@@ -1330,8 +1338,16 @@ class ExportDocxHandler(ExportHandlerBase):
 
                 # Remove empty paragraphs at the beginning
                 while document.paragraphs and not document.paragraphs[0].text.strip():
-                    p = document.paragraphs[0]._element
-                    p.getparent().remove(p)
+                    p_elem = document.paragraphs[0]._element
+                    # Keep paragraphs that contain images (drawings or VML)
+                    from docx.oxml.ns import qn as _qn
+                    has_image = bool(
+                        p_elem.findall('.//' + _qn('w:drawing')) or
+                        p_elem.findall('.//{urn:schemas-microsoft-com:vml}imagedata')
+                    )
+                    if has_image:
+                        break
+                    p_elem.getparent().remove(p_elem)
 
                 # Page dimensions (Letter/A4 width minus margins)
                 page_width = Inches(8.5) - Inches(1.0)  # 7.5 inches usable

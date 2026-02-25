@@ -519,3 +519,59 @@ class TestSVGConversion:
         html = response.body.decode("utf-8")
         # HTML should contain the image as base64 data URI (SVG format preserved)
         assert "data:image/svg+xml" in html or "Architecture Diagram" in html
+
+
+# Markdown with SVG as first element (header banner pattern)
+TEST_MARKDOWN_LEADING_SVG = """![Header Banner](images/test-diagram.svg)
+
+---
+
+## Content
+
+Some text content below the header image.
+"""
+
+
+@pytest.fixture
+def test_leading_svg_markdown_file(jp_root_dir):
+    """Create a test markdown file with SVG as the very first element."""
+    images_dir = jp_root_dir / "images"
+    images_dir.mkdir(exist_ok=True)
+    svg_file = images_dir / "test-diagram.svg"
+    svg_file.write_text(TEST_SVG, encoding="utf-8")
+    md_file = jp_root_dir / "test_leading_svg.md"
+    md_file.write_text(TEST_MARKDOWN_LEADING_SVG, encoding="utf-8")
+    return md_file
+
+
+class TestLeadingImagePreservation:
+    """Test that image-only paragraphs at document start are not removed."""
+
+    async def test_docx_preserves_leading_image(self, jp_fetch, test_leading_svg_markdown_file):
+        """Test DOCX export keeps an image that is the first element in the document."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_leading_svg.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        docx_bytes = io.BytesIO(response.body)
+        with zipfile.ZipFile(docx_bytes, "r") as zf:
+            image_files = [n for n in zf.namelist() if n.startswith("word/media/")]
+            assert len(image_files) > 0, "Leading image should be preserved in DOCX"
+
+    async def test_pdf_preserves_leading_image(self, jp_fetch, test_leading_svg_markdown_file):
+        """Test PDF export keeps an image that is the first element in the document."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "test_leading_svg.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")
+        # PDF should be substantial (contains image data)
+        assert len(response.body) > 2000
