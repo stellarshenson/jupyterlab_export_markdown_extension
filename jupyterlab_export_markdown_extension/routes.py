@@ -170,7 +170,12 @@ class ExportHandlerBase(APIHandler):
                 if convert_svg and img_type == 'svg+xml':
                     try:
                         import cairosvg
-                        img_bytes = cairosvg.svg2png(bytestring=img_bytes, dpi=dpi)
+                        # cairosvg 'dpi' only affects SVGs with physical units (cm, mm, in)
+                        # 'scale' controls actual pixel output for SVGs with px dimensions
+                        scale = dpi / 96  # 96 is the default SVG DPI
+                        img_bytes = cairosvg.svg2png(
+                            bytestring=img_bytes, scale=scale, dpi=dpi
+                        )
                         ext = '.png'
                     except ImportError:
                         # cairosvg not available - skip this image
