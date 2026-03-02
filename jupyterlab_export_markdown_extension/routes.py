@@ -445,32 +445,80 @@ class ExportHandlerBase(APIHandler):
 
         return [XPreformatted(formatted_code, code_style)]
 
-    def preprocess_github_alerts(self, content: str) -> str:
-        """Convert GitHub-style alerts to HTML divs.
+    # Alert color scheme (GitHub-aligned)
+    ALERT_COLORS = {
+        'NOTE':      {'border': '0969DA', 'shading': 'DBEAFE'},  # Blue
+        'TIP':       {'border': '1A7F37', 'shading': 'D1FAE5'},  # Green
+        'IMPORTANT': {'border': '8250DF', 'shading': 'E9D5FF'},  # Purple
+        'WARNING':   {'border': '9A6700', 'shading': 'FEF3C7'},  # Amber
+        'CAUTION':   {'border': 'CF222E', 'shading': 'FEE2E2'},  # Red
+    }
 
-        Supports: NOTE, TIP, IMPORTANT, WARNING, CAUTION
+    def preprocess_github_alerts(self, content: str) -> str:
+        """Convert GitHub-style alerts to bold-prefixed text with markers.
+
+        Supports: NOTE, TIP, IMPORTANT, WARNING, CAUTION.
+        Zero-width space markers (\u200b) around the type name allow
+        post-processing in DOCX to apply colored borders and shading.
         """
         alert_pattern = r'> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\n((?:> .*\n?)*)'
 
         def replace_alert(match):
-            alert_type = match.group(1).lower()
+            alert_type = match.group(1).upper()
             # Remove '> ' prefix from each line and join
             alert_lines = match.group(2).strip().split('\n')
             alert_content = ' '.join(line.lstrip('> ').strip() for line in alert_lines if line.strip())
 
-            # Map alert types to colors
-            color_map = {
-                'note': '#0969da',      # Blue
-                'tip': '#1a7f37',       # Green
-                'important': '#8250df', # Purple
-                'warning': '#9a6700',   # Yellow/Orange
-                'caution': '#cf222e'    # Red
-            }
-            color = color_map.get(alert_type, '#0969da')
-
-            return f'**{alert_type.upper()}:** {alert_content}\n\n'
+            # Zero-width space markers for DOCX post-processing
+            marker = f'\u200b{alert_type}\u200b'
+            return f'**{marker}:** {alert_content}\n\n'
 
         return re.sub(alert_pattern, replace_alert, content)
+
+    def style_docx_alert_boxes(self, document):
+        """Apply colored left border and background shading to alert paragraphs.
+
+        Scans for zero-width space markers inserted by preprocess_github_alerts()
+        and applies Word XML styling: left border + background fill.
+        """
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+        from docx.shared import Pt
+
+        for paragraph in document.paragraphs:
+            text = paragraph.text
+            for alert_type, colors in self.ALERT_COLORS.items():
+                marker = f'\u200b{alert_type}\u200b'
+                if marker not in text:
+                    continue
+
+                pPr = paragraph._p.get_or_add_pPr()
+
+                # Left border
+                pBdr = OxmlElement('w:pBdr')
+                left = OxmlElement('w:left')
+                left.set(qn('w:val'), 'single')
+                left.set(qn('w:sz'), '24')      # 3pt (units are 1/8 pt)
+                left.set(qn('w:space'), '6')
+                left.set(qn('w:color'), colors['border'])
+                pBdr.append(left)
+                pPr.append(pBdr)
+
+                # Background shading
+                shd = OxmlElement('w:shd')
+                shd.set(qn('w:val'), 'clear')
+                shd.set(qn('w:color'), 'auto')
+                shd.set(qn('w:fill'), colors['shading'])
+                pPr.append(shd)
+
+                # Left indent + padding
+                paragraph.paragraph_format.left_indent = Pt(8)
+
+                # Remove zero-width space markers from text
+                for run in paragraph.runs:
+                    run.text = run.text.replace('\u200b', '')
+
+                break  # One alert type per paragraph
 
     def markdown_to_html(self, content: str, title: str = 'Exported Document',
                          compact: bool = False) -> str:
@@ -1229,6 +1277,9 @@ class ExportPdfHandler(ExportHandlerBase):
                 parser = HtmlToDocx()
                 parser.add_html_to_document(body_html, document)
 
+                # Style GitHub alert boxes with colored borders and shading
+                self.style_docx_alert_boxes(document)
+
                 for table in document.tables:
                     table.style = 'Light List Accent 1'
                     tblPr = table._tbl.tblPr
@@ -1329,6 +1380,9 @@ class ExportDocxHandler(ExportHandlerBase):
 
                 parser = HtmlToDocx()
                 parser.add_html_to_document(body_html, document)
+
+                # Style GitHub alert boxes with colored borders and shading
+                self.style_docx_alert_boxes(document)
 
                 # Style tables: banded rows (pale blue), no first column emphasis
                 for table in document.tables:

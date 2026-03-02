@@ -312,7 +312,7 @@ class TestPDFExport:
 
 
 class TestGitHubAlerts:
-    """Test GitHub-style alerts preprocessing."""
+    """Test GitHub-style alerts preprocessing and DOCX styling."""
 
     async def test_note_alert_html(self, jp_fetch, test_markdown_file):
         """Test NOTE alert is processed in HTML."""
@@ -326,11 +326,8 @@ class TestGitHubAlerts:
         # Alert should be converted to bold prefix
         assert "NOTE:" in html or "note" in html.lower()
 
-    async def test_alert_in_docx(self, jp_fetch, test_markdown_file):
-        """Test alert is processed in DOCX."""
-        import zipfile
-        import io
-
+    async def test_alert_styled_in_docx(self, jp_fetch, test_markdown_file):
+        """Test alert has colored border and shading in DOCX."""
         response = await jp_fetch(
             "jupyterlab-export-markdown-extension",
             "export/docx",
@@ -341,7 +338,14 @@ class TestGitHubAlerts:
         docx_bytes = io.BytesIO(response.body)
         with zipfile.ZipFile(docx_bytes, "r") as zf:
             document_xml = zf.read("word/document.xml").decode("utf-8")
-            assert "NOTE" in document_xml or "note" in document_xml.lower()
+            # Alert text present
+            assert "NOTE" in document_xml
+            # Blue shading applied for NOTE alert
+            assert 'w:fill="DBEAFE"' in document_xml
+            # Left border applied
+            assert 'w:color="0969DA"' in document_xml
+            # Zero-width space markers removed
+            assert '\u200b' not in document_xml
 
 
 class TestSyntaxHighlighting:
