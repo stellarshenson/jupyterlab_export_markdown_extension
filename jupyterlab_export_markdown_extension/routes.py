@@ -454,12 +454,13 @@ class ExportHandlerBase(APIHandler):
         'CAUTION':   {'border': 'CF222E', 'shading': 'FEE2E2'},  # Red
     }
 
-    def preprocess_github_alerts(self, content: str) -> str:
-        """Convert GitHub-style alerts to bold-prefixed text with markers.
+    def preprocess_github_alerts(self, content: str, show_labels: bool = False) -> str:
+        """Convert GitHub-style alerts to text with markers.
 
         Supports: NOTE, TIP, IMPORTANT, WARNING, CAUTION.
         Zero-width space markers (\u200b) around the type name allow
         post-processing in DOCX to apply colored borders and shading.
+        When show_labels is False, the alert type label is hidden from output.
         """
         alert_pattern = r'> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\n((?:> .*\n?)*)'
 
@@ -471,7 +472,11 @@ class ExportHandlerBase(APIHandler):
 
             # Zero-width space markers for DOCX post-processing
             marker = f'\u200b{alert_type}\u200b'
-            return f'**{marker}:** {alert_content}\n\n'
+            if show_labels:
+                return f'**{marker}:** {alert_content}\n\n'
+            else:
+                # Hidden marker at start for DOCX styling detection, no visible label
+                return f'{marker} {alert_content}\n\n'
 
         return re.sub(alert_pattern, replace_alert, content)
 
@@ -480,10 +485,11 @@ class ExportHandlerBase(APIHandler):
 
         Scans for zero-width space markers inserted by preprocess_github_alerts()
         and applies Word XML styling: left border + background fill.
+        The shading extends to the page margins while text is indented for readability.
         """
         from docx.oxml.ns import qn
         from docx.oxml import OxmlElement
-        from docx.shared import Pt
+        from docx.shared import Pt, Emu
 
         for paragraph in document.paragraphs:
             text = paragraph.text
@@ -494,25 +500,34 @@ class ExportHandlerBase(APIHandler):
 
                 pPr = paragraph._p.get_or_add_pPr()
 
-                # Left border
+                # Left border - thick colored line
                 pBdr = OxmlElement('w:pBdr')
                 left = OxmlElement('w:left')
                 left.set(qn('w:val'), 'single')
                 left.set(qn('w:sz'), '24')      # 3pt (units are 1/8 pt)
-                left.set(qn('w:space'), '6')
+                left.set(qn('w:space'), '12')    # 12pt space between border and text
                 left.set(qn('w:color'), colors['border'])
                 pBdr.append(left)
                 pPr.append(pBdr)
 
-                # Background shading
+                # Background shading - extends to full paragraph width
                 shd = OxmlElement('w:shd')
                 shd.set(qn('w:val'), 'clear')
                 shd.set(qn('w:color'), 'auto')
                 shd.set(qn('w:fill'), colors['shading'])
                 pPr.append(shd)
 
-                # Left indent + padding
-                paragraph.paragraph_format.left_indent = Pt(8)
+                # Indentation via XML for precise control
+                # w:ind left="0" keeps shading flush to margin
+                # The border w:space provides the text offset from border
+                ind = OxmlElement('w:ind')
+                ind.set(qn('w:left'), '0')
+                ind.set(qn('w:right'), '0')
+                pPr.append(ind)
+
+                # Vertical spacing for breathing room
+                paragraph.paragraph_format.space_before = Pt(6)
+                paragraph.paragraph_format.space_after = Pt(6)
 
                 # Remove zero-width space markers from text
                 for run in paragraph.runs:
@@ -1230,6 +1245,7 @@ class ExportPdfHandler(ExportHandlerBase):
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
             svg_dpi = data.get('svgDPI', 150)
+            show_alert_labels = data.get('showAlertLabels', False)
 
             if not relative_path:
                 self.set_status(400)
@@ -1244,7 +1260,7 @@ class ExportPdfHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
-            content = self.preprocess_github_alerts(content)
+            content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
 
@@ -1333,6 +1349,7 @@ class ExportDocxHandler(ExportHandlerBase):
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
             svg_dpi = data.get('svgDPI', 150)
+            show_alert_labels = data.get('showAlertLabels', False)
 
             if not relative_path:
                 self.set_status(400)
@@ -1347,7 +1364,7 @@ class ExportDocxHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
-            content = self.preprocess_github_alerts(content)
+            content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             # Use PNG for DOCX (better Word compatibility)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
@@ -1462,6 +1479,7 @@ class ExportHtmlHandler(ExportHandlerBase):
             data = json.loads(self.request.body)
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
+            show_alert_labels = data.get('showAlertLabels', False)
 
             if not relative_path:
                 self.set_status(400)
@@ -1476,7 +1494,7 @@ class ExportHtmlHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
-            content = self.preprocess_github_alerts(content)
+            content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams)
             content = self.embed_images_as_base64(content, file_path.parent)
             html = self.markdown_to_html(content, file_path.stem)

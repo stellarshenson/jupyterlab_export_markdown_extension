@@ -20,6 +20,12 @@
       "default": 150,
       "minimum": 72,
       "maximum": 600
+    },
+    "showAlertLabels": {
+      "title": "Show Alert Labels",
+      "description": "Show alert type labels (NOTE, TIP, IMPORTANT, WARNING, CAUTION) in exported documents. When disabled, only the alert content is shown with colored styling.",
+      "type": "boolean",
+      "default": false
     }
   },
   "additionalProperties": false

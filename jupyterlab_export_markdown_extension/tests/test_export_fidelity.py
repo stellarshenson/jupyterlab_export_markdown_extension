@@ -323,8 +323,20 @@ class TestGitHubAlerts:
             body=json.dumps({"path": "test.md"}),
         )
         html = response.body.decode("utf-8")
-        # Alert should be converted to bold prefix
-        assert "NOTE:" in html or "note" in html.lower()
+        # Alert content should be present (labels hidden by default)
+        assert "note" in html.lower() or "useful information" in html.lower()
+
+    async def test_note_alert_html_with_labels(self, jp_fetch, test_markdown_file):
+        """Test NOTE alert shows label when showAlertLabels is enabled."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "test.md", "showAlertLabels": True}),
+        )
+        html = response.body.decode("utf-8")
+        # Alert should have bold label when enabled
+        assert "NOTE" in html
 
     async def test_alert_styled_in_docx(self, jp_fetch, test_markdown_file):
         """Test alert has colored border and shading in DOCX."""

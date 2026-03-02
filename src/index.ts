@@ -290,14 +290,15 @@ async function exportMarkdown(
   path: string,
   format: ExportFormat,
   mermaidDiagrams: IMermaidDiagram[],
-  svgDPI: number = 150
+  svgDPI: number = 150,
+  showAlertLabels: boolean = false
 ): Promise<void> {
   const blob = await requestBlobAPI(`export/${format}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ path, mermaidDiagrams, svgDPI })
+    body: JSON.stringify({ path, mermaidDiagrams, svgDPI, showAlertLabels })
   });
 
   // Ensure correct MIME type
@@ -329,27 +330,34 @@ const plugin: JupyterFrontEndPlugin<void> = {
     // Load settings
     let diagramDPI = 150; // Default: browser-side mermaid capture DPI
     let svgDPI = 150; // Default: server-side SVG to PNG conversion DPI
+    let showAlertLabels = false; // Default: hide alert type labels
     if (settingRegistry) {
       try {
         const settings = await settingRegistry.load(plugin.id);
         diagramDPI = settings.get('diagramDPI').composite as number;
         svgDPI = settings.get('svgDPI').composite as number;
+        showAlertLabels = settings.get('showAlertLabels').composite as boolean;
         console.log(
           'Export Markdown: Loaded settings - diagramDPI:',
           diagramDPI,
           'svgDPI:',
-          svgDPI
+          svgDPI,
+          'showAlertLabels:',
+          showAlertLabels
         );
 
         // Listen for settings changes
         settings.changed.connect(() => {
           diagramDPI = settings.get('diagramDPI').composite as number;
           svgDPI = settings.get('svgDPI').composite as number;
+          showAlertLabels = settings.get('showAlertLabels').composite as boolean;
           console.log(
             'Export Markdown: Settings changed - diagramDPI:',
             diagramDPI,
             'svgDPI:',
-            svgDPI
+            svgDPI,
+            'showAlertLabels:',
+            showAlertLabels
           );
         });
       } catch (error) {
@@ -399,7 +407,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
           try {
             // Capture rendered Mermaid diagrams from the preview (includes PNG conversion at configured DPI)
             const mermaidDiagrams = captureMermaidDiagrams(shell, diagramDPI);
-            await exportMarkdown(path, format, mermaidDiagrams, svgDPI);
+            await exportMarkdown(path, format, mermaidDiagrams, svgDPI, showAlertLabels);
           } catch (error) {
             console.error(
               `Failed to export to ${format.toUpperCase()}:`,
