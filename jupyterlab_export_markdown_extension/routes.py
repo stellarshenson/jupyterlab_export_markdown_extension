@@ -485,11 +485,10 @@ class ExportHandlerBase(APIHandler):
 
         Scans for zero-width space markers inserted by preprocess_github_alerts()
         and applies Word XML styling: left border + background fill.
-        The shading extends to the page margins while text is indented for readability.
         """
         from docx.oxml.ns import qn
         from docx.oxml import OxmlElement
-        from docx.shared import Pt, Emu
+        from docx.shared import Pt
 
         for paragraph in document.paragraphs:
             text = paragraph.text
@@ -500,32 +499,24 @@ class ExportHandlerBase(APIHandler):
 
                 pPr = paragraph._p.get_or_add_pPr()
 
-                # Left border - thick colored line
+                # Left border
                 pBdr = OxmlElement('w:pBdr')
                 left = OxmlElement('w:left')
                 left.set(qn('w:val'), 'single')
                 left.set(qn('w:sz'), '24')      # 3pt (units are 1/8 pt)
-                left.set(qn('w:space'), '12')    # 12pt space between border and text
+                left.set(qn('w:space'), '6')
                 left.set(qn('w:color'), colors['border'])
                 pBdr.append(left)
                 pPr.append(pBdr)
 
-                # Background shading - extends to full paragraph width
+                # Background shading
                 shd = OxmlElement('w:shd')
                 shd.set(qn('w:val'), 'clear')
                 shd.set(qn('w:color'), 'auto')
                 shd.set(qn('w:fill'), colors['shading'])
                 pPr.append(shd)
 
-                # Indentation via XML for precise control
-                # w:ind left="0" keeps shading flush to margin
-                # The border w:space provides the text offset from border
-                ind = OxmlElement('w:ind')
-                ind.set(qn('w:left'), '0')
-                ind.set(qn('w:right'), '0')
-                pPr.append(ind)
-
-                # Vertical spacing for breathing room
+                # Vertical spacing
                 paragraph.paragraph_format.space_before = Pt(6)
                 paragraph.paragraph_format.space_after = Pt(6)
 

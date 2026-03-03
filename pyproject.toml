@@ -33,7 +33,6 @@ dynamic = ["version", "description", "authors", "urls", "keywords"]
 
 [project.optional-dependencies]
 dev = [
-    "jupyterlab>=4",
 ]
 test = [
     "coverage",
