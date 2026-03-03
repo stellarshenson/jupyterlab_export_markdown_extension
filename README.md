@@ -19,12 +19,14 @@ Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No extern
 - **PDF Export** - Full Unicode and emoji support via weasyprint
 - **DOCX Export** - Microsoft Word documents with smart image sizing (fit-to-page for large images)
 - **HTML Export** - Standalone files with embedded images
+- **GitHub Alerts** - Colored alert boxes for `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]` with left border and background shading in DOCX/PDF
 - **Mermaid Diagrams** - Client-side rendering with calibrated DPI scaling (configurable, default 150 DPI)
 - **Embedded Images** - Local images automatically converted to base64
+- **Syntax Highlighting** - Code blocks with Pygments-powered coloring
 - **Export Spinner** - Modal dialog shows progress during export operations
 - **File Menu Integration** - "Export Markdown As" submenu appears when markdown is active
 - **Command Palette** - All export commands available via Ctrl+Shift+C
-- **Settings** - Configure diagram DPI via JupyterLab Settings Editor
+- **Settings** - Configure diagram DPI and alert label visibility via Settings Editor
 - **Pure Python** - No pandoc, no LaTeX, no system dependencies
 
 ## Requirements
@@ -60,14 +62,15 @@ That's it. No really, that's actually it. We spent considerable effort making su
 | Format | Library                | Notes                                           |
 | ------ | ---------------------- | ----------------------------------------------- |
 | PDF    | weasyprint             | Unicode, emojis, compact styling                |
-| DOCX   | python-docx + htmldocx | Smart image sizing, banded tables, 0.5" margins |
-| HTML   | markdown               | Standalone with embedded images                 |
+| DOCX   | python-docx + htmldocx | Smart image sizing, banded tables, alert boxes, 0.5" margins |
+| HTML   | markdown               | Standalone with embedded images                              |
 
 ## Settings
 
 Configure the extension via **Settings -> Settings Editor -> Export Markdown Extension**:
 
 - **Diagram DPI** - Resolution for Mermaid diagrams (default: 150, range: 72-600)
+- **Show Alert Labels** - Display alert type labels (NOTE, TIP, etc.) in exported documents (default: off)
 
 ## Uninstall
 

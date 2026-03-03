@@ -455,76 +455,164 @@ class ExportHandlerBase(APIHandler):
     }
 
     def preprocess_github_alerts(self, content: str, show_labels: bool = False) -> str:
-        """Convert GitHub-style alerts to text with markers.
+        """Convert GitHub-style alerts to paragraphs with markers.
 
         Supports: NOTE, TIP, IMPORTANT, WARNING, CAUTION.
         Zero-width space markers (\u200b) around the type name allow
-        post-processing in DOCX to apply colored borders and shading.
+        post-processing in DOCX to apply colored styling.
+        Preserves <br> tags and markdown links/formatting within alert content.
         When show_labels is False, the alert type label is hidden from output.
         """
-        alert_pattern = r'> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\n((?:> .*\n?)*)'
+        alert_pattern = r'> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\] *\n((?:> .*\n?)*)'
 
         def replace_alert(match):
             alert_type = match.group(1).upper()
-            # Remove '> ' prefix from each line and join
+            # Remove '> ' prefix from each line, preserve content including <br> and links
             alert_lines = match.group(2).strip().split('\n')
             alert_content = ' '.join(line.lstrip('> ').strip() for line in alert_lines if line.strip())
 
             # Zero-width space markers for DOCX post-processing
             marker = f'\u200b{alert_type}\u200b'
             if show_labels:
-                return f'**{marker}:** {alert_content}\n\n'
+                return f'\n\n**{marker}:** {alert_content}\n\n'
             else:
-                # Hidden marker at start for DOCX styling detection, no visible label
-                return f'{marker} {alert_content}\n\n'
+                return f'\n\n{marker}{alert_content}\n\n'
 
         return re.sub(alert_pattern, replace_alert, content)
 
+    def clean_alert_markers_from_html(self, html: str, show_labels: bool = False) -> str:
+        """Remove zero-width space markers from HTML output.
+
+        When show_labels is True, only strip the zero-width markers, keeping
+        the alert type text visible. When False, strip both markers and the
+        alert type text between them.
+        """
+        if show_labels:
+            html = html.replace('\u200b', '')
+        else:
+            for alert_type in self.ALERT_COLORS:
+                html = html.replace(f'\u200b{alert_type}\u200b', '')
+            html = html.replace('\u200b', '')
+        return html
+
     def style_docx_alert_boxes(self, document):
-        """Apply colored left border and background shading to alert paragraphs.
+        """Replace alert paragraphs with styled single-cell tables.
 
         Scans for zero-width space markers inserted by preprocess_github_alerts()
-        and applies Word XML styling: left border + background fill.
+        and wraps each alert in a one-cell table with colored left border,
+        background shading, and cell margins for padding control.
+        Moves the original paragraph XML (preserving hyperlinks, bold, etc.)
+        into the table cell rather than rebuilding it.
         """
         from docx.oxml.ns import qn
         from docx.oxml import OxmlElement
-        from docx.shared import Pt
+        import copy
 
+        # Collect paragraphs to replace (can't modify while iterating)
+        replacements = []
         for paragraph in document.paragraphs:
             text = paragraph.text
             for alert_type, colors in self.ALERT_COLORS.items():
                 marker = f'\u200b{alert_type}\u200b'
                 if marker not in text:
                     continue
+                replacements.append((paragraph, alert_type, colors))
+                break
 
-                pPr = paragraph._p.get_or_add_pPr()
+        for paragraph, alert_type, colors in replacements:
+            parent = paragraph._p.getparent()
 
-                # Left border
-                pBdr = OxmlElement('w:pBdr')
-                left = OxmlElement('w:left')
-                left.set(qn('w:val'), 'single')
-                left.set(qn('w:sz'), '24')      # 3pt (units are 1/8 pt)
-                left.set(qn('w:space'), '6')
-                left.set(qn('w:color'), colors['border'])
-                pBdr.append(left)
-                pPr.append(pBdr)
+            # Clean zero-width markers and alert type label from runs
+            for run in paragraph.runs:
+                text = run.text
+                if '\u200b' in text:
+                    cleaned = text.replace('\u200b', '')
+                    # Remove alert type label at start (e.g. "NOTE" or "NOTE:")
+                    for at in self.ALERT_COLORS:
+                        if cleaned.startswith(at):
+                            cleaned = cleaned[len(at):]
+                            if cleaned.startswith(':'):
+                                cleaned = cleaned[1:]
+                            cleaned = cleaned.lstrip()
+                            break
+                    run.text = cleaned
 
-                # Background shading
-                shd = OxmlElement('w:shd')
-                shd.set(qn('w:val'), 'clear')
-                shd.set(qn('w:color'), 'auto')
-                shd.set(qn('w:fill'), colors['shading'])
-                pPr.append(shd)
+            # Build the one-cell table
+            tbl = OxmlElement('w:tbl')
 
-                # Vertical spacing
-                paragraph.paragraph_format.space_before = Pt(6)
-                paragraph.paragraph_format.space_after = Pt(6)
+            # Table properties: 100% width via percentage
+            tblPr = OxmlElement('w:tblPr')
+            tblW = OxmlElement('w:tblW')
+            tblW.set(qn('w:w'), '5000')
+            tblW.set(qn('w:type'), 'pct')
+            tblPr.append(tblW)
 
-                # Remove zero-width space markers from text
-                for run in paragraph.runs:
-                    run.text = run.text.replace('\u200b', '')
+            # Table borders: only left border colored, others invisible
+            tblBorders = OxmlElement('w:tblBorders')
+            for side in ['top', 'bottom', 'right', 'insideH', 'insideV']:
+                border = OxmlElement(f'w:{side}')
+                border.set(qn('w:val'), 'none')
+                border.set(qn('w:sz'), '0')
+                border.set(qn('w:space'), '0')
+                border.set(qn('w:color'), 'auto')
+                tblBorders.append(border)
+            left_border = OxmlElement('w:left')
+            left_border.set(qn('w:val'), 'single')
+            left_border.set(qn('w:sz'), '24')  # 3pt
+            left_border.set(qn('w:space'), '0')
+            left_border.set(qn('w:color'), colors['border'])
+            tblBorders.append(left_border)
+            tblPr.append(tblBorders)
 
-                break  # One alert type per paragraph
+            # Cell margins for internal padding
+            tblCellMar = OxmlElement('w:tblCellMar')
+            for side, val in [('top', '80'), ('bottom', '80'),
+                              ('left', '180'), ('right', '120')]:
+                margin = OxmlElement(f'w:{side}')
+                margin.set(qn('w:w'), val)
+                margin.set(qn('w:type'), 'dxa')
+                tblCellMar.append(margin)
+            tblPr.append(tblCellMar)
+
+            tbl.append(tblPr)
+
+            # Table grid (single column)
+            tblGrid = OxmlElement('w:tblGrid')
+            gridCol = OxmlElement('w:gridCol')
+            gridCol.set(qn('w:w'), '9360')
+            tblGrid.append(gridCol)
+            tbl.append(tblGrid)
+
+            # Single row, single cell
+            tr = OxmlElement('w:tr')
+            tc = OxmlElement('w:tc')
+            tcPr = OxmlElement('w:tcPr')
+            tcW = OxmlElement('w:tcW')
+            tcW.set(qn('w:w'), '5000')
+            tcW.set(qn('w:type'), 'pct')
+            tcPr.append(tcW)
+
+            # Cell shading
+            shd = OxmlElement('w:shd')
+            shd.set(qn('w:val'), 'clear')
+            shd.set(qn('w:color'), 'auto')
+            shd.set(qn('w:fill'), colors['shading'])
+            tcPr.append(shd)
+            tc.append(tcPr)
+
+            # Move the original paragraph into the cell (preserves all formatting,
+            # hyperlinks, bold, italic, line breaks, etc.)
+            tc.append(copy.deepcopy(paragraph._p))
+            tr.append(tc)
+            tbl.append(tr)
+
+            # Insert table then a spacer paragraph after the original paragraph
+            paragraph._p.addnext(tbl)
+            spacer = OxmlElement('w:p')
+            tbl.addnext(spacer)
+
+            # Remove the original paragraph
+            parent.remove(paragraph._p)
 
     def markdown_to_html(self, content: str, title: str = 'Exported Document',
                          compact: bool = False) -> str:
@@ -1288,6 +1376,9 @@ class ExportPdfHandler(ExportHandlerBase):
                 self.style_docx_alert_boxes(document)
 
                 for table in document.tables:
+                    # Skip single-cell alert tables
+                    if len(table.rows) == 1 and len(table.columns) == 1:
+                        continue
                     table.style = 'Light List Accent 1'
                     tblPr = table._tbl.tblPr
                     if tblPr is not None:
@@ -1394,6 +1485,9 @@ class ExportDocxHandler(ExportHandlerBase):
 
                 # Style tables: banded rows (pale blue), no first column emphasis
                 for table in document.tables:
+                    # Skip single-cell alert tables
+                    if len(table.rows) == 1 and len(table.columns) == 1:
+                        continue
                     table.style = 'Light List Accent 1'
                     # Disable first column emphasis via XML properties
                     tblPr = table._tbl.tblPr
@@ -1489,6 +1583,9 @@ class ExportHtmlHandler(ExportHandlerBase):
             content = self.replace_mermaid_with_images(content, mermaid_diagrams)
             content = self.embed_images_as_base64(content, file_path.parent)
             html = self.markdown_to_html(content, file_path.stem)
+
+            # Strip zero-width space markers used for DOCX alert styling
+            html = self.clean_alert_markers_from_html(html, show_labels=show_alert_labels)
 
             self.set_header('Content-Type', 'text/html; charset=utf-8')
             self.set_header('Content-Disposition',

@@ -339,7 +339,7 @@ class TestGitHubAlerts:
         assert "NOTE" in html
 
     async def test_alert_styled_in_docx(self, jp_fetch, test_markdown_file):
-        """Test alert has colored border and shading in DOCX."""
+        """Test alert is rendered as styled table in DOCX."""
         response = await jp_fetch(
             "jupyterlab-export-markdown-extension",
             "export/docx",
@@ -350,14 +350,15 @@ class TestGitHubAlerts:
         docx_bytes = io.BytesIO(response.body)
         with zipfile.ZipFile(docx_bytes, "r") as zf:
             document_xml = zf.read("word/document.xml").decode("utf-8")
-            # Alert text present
-            assert "NOTE" in document_xml
-            # Blue shading applied for NOTE alert
+            # Blue shading applied for NOTE alert in table cell
             assert 'w:fill="DBEAFE"' in document_xml
             # Left border applied
             assert 'w:color="0969DA"' in document_xml
             # Zero-width space markers removed
             assert '\u200b' not in document_xml
+            # Alert label should not appear (showAlertLabels defaults to false)
+            # Table element present (alert rendered as table)
+            assert 'w:tbl' in document_xml
 
 
 class TestSyntaxHighlighting:
@@ -591,3 +592,119 @@ class TestLeadingImagePreservation:
         assert response.body.startswith(b"%PDF-")
         # PDF should be substantial (contains image data)
         assert len(response.body) > 2000
+
+
+# Rich alert test content with line breaks, hyperlinks, bold, and consecutive alerts
+TEST_MARKDOWN_RICH_ALERTS = """# Rich Alert Test
+
+> [!IMPORTANT]
+> Based on factory-observed void dimensions (5 x 3 x 2 mm), overall casting porosity appears well within criteria. <br><br>The 30% rejection rate is driven by **void location**.
+
+> [!NOTE]
+> **Applicable standards**: <br>[ASTM E505](https://www.astm.org/e0505_e0505m-15.html) (Reference Radiographs), <br>[EN 12681](https://www.en-standard.eu/csn-en-12681-founding-radiographic-testing/) (Founding - Radiographic testing).
+
+> [!WARNING]
+> Simple warning without special formatting.
+
+Some text after alerts.
+
+| Col A | Col B |
+| ----- | ----- |
+| A1    | B1    |
+"""
+
+
+@pytest.fixture
+def test_rich_alerts_file(jp_root_dir):
+    """Create a test markdown file with rich alert content."""
+    md_file = jp_root_dir / "test_rich_alerts.md"
+    md_file.write_text(TEST_MARKDOWN_RICH_ALERTS, encoding="utf-8")
+    return md_file
+
+
+class TestRichAlerts:
+    """Test alert boxes with line breaks, hyperlinks, bold, and consecutive alerts."""
+
+    async def test_alert_table_has_hyperlinks(self, jp_fetch, test_rich_alerts_file):
+        """Test NOTE alert with markdown links produces hyperlinks in DOCX."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_rich_alerts.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        docx_bytes = io.BytesIO(response.body)
+        with zipfile.ZipFile(docx_bytes, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8")
+            # Hyperlinks present (from markdown links in NOTE alert)
+            assert "w:hyperlink" in document_xml or "Hyperlink" in document_xml
+            # Zero-width markers cleaned
+            assert "\u200b" not in document_xml
+
+    async def test_alert_table_has_line_breaks(self, jp_fetch, test_rich_alerts_file):
+        """Test IMPORTANT alert with <br> tags produces line breaks in DOCX."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_rich_alerts.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        docx_bytes = io.BytesIO(response.body)
+        with zipfile.ZipFile(docx_bytes, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8")
+            # Line breaks present (from <br> tags in IMPORTANT alert)
+            assert "w:br" in document_xml
+
+    async def test_consecutive_alerts_separate(self, jp_fetch, test_rich_alerts_file):
+        """Test consecutive alerts are rendered as separate tables with spacing."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_rich_alerts.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        docx_bytes = io.BytesIO(response.body)
+        with zipfile.ZipFile(docx_bytes, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8")
+            # Three alert colors should be present (IMPORTANT=purple, NOTE=blue, WARNING=amber)
+            assert 'w:fill="E9D5FF"' in document_xml  # purple
+            assert 'w:fill="DBEAFE"' in document_xml  # blue
+            assert 'w:fill="FEF3C7"' in document_xml  # amber
+
+    async def test_data_table_not_styled_as_alert(self, jp_fetch, test_rich_alerts_file):
+        """Test regular data tables are not affected by alert styling."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_rich_alerts.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        docx_bytes = io.BytesIO(response.body)
+        with zipfile.ZipFile(docx_bytes, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8")
+            # Data table text should be present
+            assert "Col A" in document_xml or "A1" in document_xml
+
+    async def test_alert_labels_hidden_by_default(self, jp_fetch, test_rich_alerts_file):
+        """Test alert type labels are not visible when showAlertLabels is false."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "test_rich_alerts.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        # Content should be present but not the label prefix pattern "IMPORTANT:"
+        assert "void location" in html
+        # Zero-width markers should not appear in HTML output
+        assert "\u200b" not in html

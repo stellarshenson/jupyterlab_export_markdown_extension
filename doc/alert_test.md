@@ -19,13 +19,24 @@ This document tests all five GitHub-style alert types in DOCX export.
 > [!CAUTION]
 > This is a caution - advises about risks or negative outcomes of certain actions.
 
+## Consecutive Alerts
+
+> [!NOTE]
+> First consecutive alert - these should have spacing between them.
+
+> [!WARNING]
+> Second consecutive alert - should NOT merge with the one above.
+
+> [!TIP]
+> Third consecutive alert - should be its own separate box.
+
 ## Alerts with Rich Content
 
 > [!IMPORTANT]
 > Based on factory-observed void dimensions (5 x 3 x 2 mm), overall casting porosity appears well within automotive structural acceptance criteria. <br><br>The 30% post-milling rejection rate is driven by **void location** - individual voids exposed on machined surfaces - not by bulk porosity exceeding volume thresholds.
 
 > [!NOTE]
-> **Applicable standards**: [ASTM E505](https://www.astm.org/e0505_e0505m-15.html) (Reference Radiographs for Aluminum and Magnesium Die Castings), [EN 12681](https://www.en-standard.eu/csn-en-12681-founding-radiographic-testing/) (Founding - Radiographic testing).
+> **Applicable standards for HPDC aluminium casting porosity**: <br>[ASTM E505](https://www.astm.org/e0505_e0505m-15.html) (Reference Radiographs for Aluminum and Magnesium Die Castings, severity levels 1-3), <br>[EN 12681](https://www.en-standard.eu/csn-en-12681-founding-radiographic-testing/) (Founding - Radiographic testing, ISO 19232 series), <br>[VW 50093](https://www.beuth.de/en/technical-rule/vw-50093/345702123) (Volkswagen casting quality classification, Class A-C), <br>[BMW GS 93005](https://www.normadoc.com/english/gs-93005-2019-11.html) (BMW aluminium die castings quality requirements).
 
 ## Content After Alerts
 
