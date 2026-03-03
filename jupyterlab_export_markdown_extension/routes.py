@@ -1383,9 +1383,18 @@ class ExportPdfHandler(ExportHandlerBase):
                     tblPr = table._tbl.tblPr
                     if tblPr is not None:
                         from docx.oxml.ns import qn
+                        from docx.oxml import OxmlElement
                         tblLook = tblPr.find(qn('w:tblLook'))
                         if tblLook is not None:
                             tblLook.set(qn('w:firstColumn'), '0')
+                        # Set table to 100% page width
+                        existing_w = tblPr.find(qn('w:tblW'))
+                        if existing_w is not None:
+                            tblPr.remove(existing_w)
+                        tblW = OxmlElement('w:tblW')
+                        tblW.set(qn('w:w'), '5000')
+                        tblW.set(qn('w:type'), 'pct')
+                        tblPr.append(tblW)
 
                 while document.paragraphs and not document.paragraphs[0].text.strip():
                     p_elem = document.paragraphs[0]._element
@@ -1493,9 +1502,18 @@ class ExportDocxHandler(ExportHandlerBase):
                     tblPr = table._tbl.tblPr
                     if tblPr is not None:
                         from docx.oxml.ns import qn
+                        from docx.oxml import OxmlElement
                         tblLook = tblPr.find(qn('w:tblLook'))
                         if tblLook is not None:
                             tblLook.set(qn('w:firstColumn'), '0')
+                        # Set table to 100% page width
+                        existing_w = tblPr.find(qn('w:tblW'))
+                        if existing_w is not None:
+                            tblPr.remove(existing_w)
+                        tblW = OxmlElement('w:tblW')
+                        tblW.set(qn('w:w'), '5000')
+                        tblW.set(qn('w:type'), 'pct')
+                        tblPr.append(tblW)
 
                 # Remove empty paragraphs at the beginning
                 while document.paragraphs and not document.paragraphs[0].text.strip():
