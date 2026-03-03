@@ -59,9 +59,9 @@ That's it. No really, that's actually it. We spent considerable effort making su
 
 ## Export Formats
 
-| Format | Library                | Notes                                           |
-| ------ | ---------------------- | ----------------------------------------------- |
-| PDF    | weasyprint             | Unicode, emojis, compact styling                |
+| Format | Library                | Notes                                                        |
+| ------ | ---------------------- | ------------------------------------------------------------ |
+| PDF    | weasyprint             | Unicode, emojis, compact styling                             |
 | DOCX   | python-docx + htmldocx | Smart image sizing, banded tables, alert boxes, 0.5" margins |
 | HTML   | markdown               | Standalone with embedded images                              |
 

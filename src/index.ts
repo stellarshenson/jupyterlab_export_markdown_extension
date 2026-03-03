@@ -350,7 +350,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
         settings.changed.connect(() => {
           diagramDPI = settings.get('diagramDPI').composite as number;
           svgDPI = settings.get('svgDPI').composite as number;
-          showAlertLabels = settings.get('showAlertLabels').composite as boolean;
+          showAlertLabels = settings.get('showAlertLabels')
+            .composite as boolean;
           console.log(
             'Export Markdown: Settings changed - diagramDPI:',
             diagramDPI,
@@ -407,7 +408,13 @@ const plugin: JupyterFrontEndPlugin<void> = {
           try {
             // Capture rendered Mermaid diagrams from the preview (includes PNG conversion at configured DPI)
             const mermaidDiagrams = captureMermaidDiagrams(shell, diagramDPI);
-            await exportMarkdown(path, format, mermaidDiagrams, svgDPI, showAlertLabels);
+            await exportMarkdown(
+              path,
+              format,
+              mermaidDiagrams,
+              svgDPI,
+              showAlertLabels
+            );
           } catch (error) {
             console.error(
               `Failed to export to ${format.toUpperCase()}:`,

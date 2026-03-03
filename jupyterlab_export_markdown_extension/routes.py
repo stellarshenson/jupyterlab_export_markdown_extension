@@ -447,11 +447,11 @@ class ExportHandlerBase(APIHandler):
 
     # Alert color scheme (GitHub-aligned)
     ALERT_COLORS = {
-        'NOTE':      {'border': '0969DA', 'shading': 'DBEAFE'},  # Blue
-        'TIP':       {'border': '1A7F37', 'shading': 'D1FAE5'},  # Green
-        'IMPORTANT': {'border': '8250DF', 'shading': 'E9D5FF'},  # Purple
-        'WARNING':   {'border': '9A6700', 'shading': 'FEF3C7'},  # Amber
-        'CAUTION':   {'border': 'CF222E', 'shading': 'FEE2E2'},  # Red
+        'NOTE':      {'border': '0969DA', 'shading': 'EDF5FD'},  # Blue
+        'TIP':       {'border': '1A7F37', 'shading': 'EDFBF2'},  # Green
+        'IMPORTANT': {'border': '8250DF', 'shading': 'F4EDFF'},  # Purple
+        'WARNING':   {'border': '9A6700', 'shading': 'FEF9E7'},  # Amber
+        'CAUTION':   {'border': 'CF222E', 'shading': 'FEF0F0'},  # Red
     }
 
     def preprocess_github_alerts(self, content: str, show_labels: bool = False) -> str:
@@ -495,7 +495,7 @@ class ExportHandlerBase(APIHandler):
             html = html.replace('\u200b', '')
         return html
 
-    def style_docx_alert_boxes(self, document):
+    def style_docx_alert_boxes(self, document, show_labels: bool = False):
         """Replace alert paragraphs with styled single-cell tables.
 
         Scans for zero-width space markers inserted by preprocess_github_alerts()
@@ -522,19 +522,19 @@ class ExportHandlerBase(APIHandler):
         for paragraph, alert_type, colors in replacements:
             parent = paragraph._p.getparent()
 
-            # Clean zero-width markers and alert type label from runs
+            # Clean zero-width markers from runs; strip type label only when hidden
             for run in paragraph.runs:
                 text = run.text
                 if '\u200b' in text:
                     cleaned = text.replace('\u200b', '')
-                    # Remove alert type label at start (e.g. "NOTE" or "NOTE:")
-                    for at in self.ALERT_COLORS:
-                        if cleaned.startswith(at):
-                            cleaned = cleaned[len(at):]
-                            if cleaned.startswith(':'):
-                                cleaned = cleaned[1:]
-                            cleaned = cleaned.lstrip()
-                            break
+                    if not show_labels:
+                        for at in self.ALERT_COLORS:
+                            if cleaned.startswith(at):
+                                cleaned = cleaned[len(at):]
+                                if cleaned.startswith(':'):
+                                    cleaned = cleaned[1:]
+                                cleaned = cleaned.lstrip()
+                                break
                     run.text = cleaned
 
             # Build the one-cell table
@@ -1373,7 +1373,7 @@ class ExportPdfHandler(ExportHandlerBase):
                 parser.add_html_to_document(body_html, document)
 
                 # Style GitHub alert boxes with colored borders and shading
-                self.style_docx_alert_boxes(document)
+                self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
 
                 for table in document.tables:
                     # Skip single-cell alert tables
@@ -1481,7 +1481,7 @@ class ExportDocxHandler(ExportHandlerBase):
                 parser.add_html_to_document(body_html, document)
 
                 # Style GitHub alert boxes with colored borders and shading
-                self.style_docx_alert_boxes(document)
+                self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
 
                 # Style tables: banded rows (pale blue), no first column emphasis
                 for table in document.tables:

@@ -351,7 +351,7 @@ class TestGitHubAlerts:
         with zipfile.ZipFile(docx_bytes, "r") as zf:
             document_xml = zf.read("word/document.xml").decode("utf-8")
             # Blue shading applied for NOTE alert in table cell
-            assert 'w:fill="DBEAFE"' in document_xml
+            assert 'w:fill="EDF5FD"' in document_xml
             # Left border applied
             assert 'w:color="0969DA"' in document_xml
             # Zero-width space markers removed
@@ -673,9 +673,9 @@ class TestRichAlerts:
         with zipfile.ZipFile(docx_bytes, "r") as zf:
             document_xml = zf.read("word/document.xml").decode("utf-8")
             # Three alert colors should be present (IMPORTANT=purple, NOTE=blue, WARNING=amber)
-            assert 'w:fill="E9D5FF"' in document_xml  # purple
-            assert 'w:fill="DBEAFE"' in document_xml  # blue
-            assert 'w:fill="FEF3C7"' in document_xml  # amber
+            assert 'w:fill="F4EDFF"' in document_xml  # purple
+            assert 'w:fill="EDF5FD"' in document_xml  # blue
+            assert 'w:fill="FEF9E7"' in document_xml  # amber
 
     async def test_data_table_not_styled_as_alert(self, jp_fetch, test_rich_alerts_file):
         """Test regular data tables are not affected by alert styling."""
