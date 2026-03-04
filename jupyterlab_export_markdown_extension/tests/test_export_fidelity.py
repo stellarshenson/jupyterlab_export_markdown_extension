@@ -601,7 +601,7 @@ TEST_MARKDOWN_RICH_ALERTS = """# Rich Alert Test
 > Based on factory-observed void dimensions (5 x 3 x 2 mm), overall casting porosity appears well within criteria. <br><br>The 30% rejection rate is driven by **void location**.
 
 > [!NOTE]
-> **Applicable standards**: <br>[ASTM E505](https://www.astm.org/e0505_e0505m-15.html) (Reference Radiographs), <br>[EN 12681](https://www.en-standard.eu/csn-en-12681-founding-radiographic-testing/) (Founding - Radiographic testing).
+> **Applicable standards**: <br>[ASTM E505](https://example.com/astm-e505) (Reference Radiographs), <br>[EN 12681](https://example.com/en-12681) (Founding - Radiographic testing).
 
 > [!WARNING]
 > Simple warning without special formatting.
