@@ -614,6 +614,36 @@ class ExportHandlerBase(APIHandler):
             # Remove the original paragraph
             parent.remove(paragraph._p)
 
+    def remove_empty_paragraphs_before_images(self, document):
+        """Remove empty paragraphs that immediately precede image paragraphs.
+
+        htmldocx inserts blank paragraphs before images. This removes them
+        to eliminate unnecessary vertical space above images.
+        """
+        from docx.oxml.ns import qn
+        body = document.element.body
+        paragraphs = body.findall(qn('w:p'))
+        to_remove = []
+        for i in range(len(paragraphs) - 1):
+            current = paragraphs[i]
+            nxt = paragraphs[i + 1]
+            # Check if current paragraph is empty (no text content)
+            if current.text and current.text.strip():
+                continue
+            runs = current.findall('.//' + qn('w:t'))
+            if any(r.text and r.text.strip() for r in runs):
+                continue
+            # Check current has no image itself
+            if (current.findall('.//' + qn('w:drawing')) or
+                    current.findall('.//{urn:schemas-microsoft-com:vml}imagedata')):
+                continue
+            # Check next paragraph contains an image
+            if (nxt.findall('.//' + qn('w:drawing')) or
+                    nxt.findall('.//{urn:schemas-microsoft-com:vml}imagedata')):
+                to_remove.append(current)
+        for p in to_remove:
+            p.getparent().remove(p)
+
     def markdown_to_html(self, content: str, title: str = 'Exported Document',
                          compact: bool = False) -> str:
         """Convert markdown to standalone HTML.
@@ -1408,6 +1438,9 @@ class ExportPdfHandler(ExportHandlerBase):
                         break
                     p_elem.getparent().remove(p_elem)
 
+                # Remove empty paragraphs before images
+                self.remove_empty_paragraphs_before_images(document)
+
                 docx_buffer = io.BytesIO()
                 document.save(docx_buffer)
                 docx_bytes = docx_buffer.getvalue()
@@ -1527,6 +1560,9 @@ class ExportDocxHandler(ExportHandlerBase):
                     if has_image:
                         break
                     p_elem.getparent().remove(p_elem)
+
+                # Remove empty paragraphs before images
+                self.remove_empty_paragraphs_before_images(document)
 
                 # Page dimensions (Letter/A4 width minus margins)
                 page_width = Inches(8.5) - Inches(1.0)  # 7.5 inches usable
