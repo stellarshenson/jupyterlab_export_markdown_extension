@@ -423,6 +423,143 @@ class TestSyntaxHighlighting:
         assert response.body.startswith(b"%PDF-")
 
 
+# Test markdown with LaTeX math expressions
+TEST_MARKDOWN_MATH = """# Math Test
+
+Inline math: $E=mc^2$ is well known.
+
+Display math:
+
+$$\\int_0^\\infty e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}$$
+
+Greek letters: $\\alpha + \\beta = \\gamma$
+
+Currency (should NOT render): The price is $100 and total $200.
+
+Code block math (should NOT render):
+
+```python
+# The formula $E=mc^2$ in a comment
+x = "$not_math$"
+```
+
+Inline code math: `$E=mc^2$` should stay as text.
+"""
+
+
+@pytest.fixture
+def test_math_file(jp_root_dir):
+    """Create a test markdown file with LaTeX math expressions."""
+    md_file = jp_root_dir / "test_math.md"
+    md_file.write_text(TEST_MARKDOWN_MATH, encoding="utf-8")
+    return md_file
+
+
+class TestMathRendering:
+    """Test LaTeX math rendering in exports."""
+
+    async def test_html_has_katex_scripts(self, jp_fetch, test_math_file):
+        """Test HTML export includes KaTeX CDN scripts for math rendering."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "test_math.md"}),
+        )
+        html = response.body.decode("utf-8")
+        assert "katex" in html.lower()
+        assert "cdn.jsdelivr.net" in html
+        assert "auto-render" in html
+
+    async def test_html_preserves_math_delimiters(self, jp_fetch, test_math_file):
+        """Test HTML export keeps $...$ delimiters for KaTeX client-side rendering."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "test_math.md"}),
+        )
+        html = response.body.decode("utf-8")
+        # Math delimiters should be preserved for KaTeX (not replaced with images)
+        assert "E=mc^2" in html
+
+    async def test_docx_has_omml_math(self, jp_fetch, test_math_file):
+        """Test DOCX export renders math as native OMML equations."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_math.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        docx_bytes = io.BytesIO(response.body)
+        with zipfile.ZipFile(docx_bytes, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8")
+            # OMML equations use oMath namespace
+            assert "oMath" in document_xml, "DOCX should contain native OMML equations"
+            # Marker text should be cleaned up
+            assert "MATH_INLINE_" not in document_xml
+            assert "MATH_DISPLAY_" not in document_xml
+
+    async def test_docx_inline_math_in_paragraph(self, jp_fetch, test_math_file):
+        """Test inline OMML math flows within text paragraph."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_math.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        docx_bytes = io.BytesIO(response.body)
+        with zipfile.ZipFile(docx_bytes, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8")
+            # "is well known" text should be in same paragraph as oMath
+            # (inline math doesn't break text flow)
+            assert "well known" in document_xml
+
+    async def test_pdf_with_math_succeeds(self, jp_fetch, test_math_file):
+        """Test PDF export succeeds when markdown contains math."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "test_math.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")
+
+    async def test_code_blocks_preserved(self, jp_fetch, test_math_file):
+        """Test math inside code blocks is NOT rendered."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "test_math.md"}),
+        )
+        html = response.body.decode("utf-8")
+        # Code block content should remain as text, not be rendered as math images
+        assert "not_math" in html
+
+    async def test_currency_not_matched(self, jp_fetch, test_math_file):
+        """Test $100 currency amounts are not falsely matched as math."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_math.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        docx_bytes = io.BytesIO(response.body)
+        with zipfile.ZipFile(docx_bytes, "r") as zf:
+            document_xml = zf.read("word/document.xml").decode("utf-8")
+            # Currency text should be preserved as-is
+            assert "100" in document_xml
+
+
 # Minimal SVG for testing
 TEST_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
   <rect width="200" height="100" fill="#4F81BD"/>

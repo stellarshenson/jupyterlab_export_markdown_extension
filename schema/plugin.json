@@ -21,6 +21,14 @@
       "minimum": 72,
       "maximum": 600
     },
+    "mathDPI": {
+      "title": "Math DPI",
+      "description": "Resolution for LaTeX math expression images in PDF exports (dots per inch). DOCX uses native OMML equations (no images). HTML uses KaTeX client-side rendering. Standard values: 150 (standard), 200 (default), 300 (high quality print).",
+      "type": "number",
+      "default": 200,
+      "minimum": 96,
+      "maximum": 600
+    },
     "showAlertLabels": {
       "title": "Show Alert Labels",
       "description": "Show alert type labels (NOTE, TIP, IMPORTANT, WARNING, CAUTION) in exported documents. When disabled, only the alert content is shown with colored styling.",

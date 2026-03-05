@@ -190,6 +190,14 @@ class ExportHandlerBase(APIHandler):
                 with open(filepath, 'wb') as f:
                     f.write(img_bytes)
 
+                # Preserve other attributes (alt, style, width, height) from original tag
+                full_tag = match.group(0)
+                other_attrs = re.findall(
+                    r'((?:alt|style|width|height)=["\'][^"\']*["\'])', full_tag
+                )
+                attrs_str = ' '.join(other_attrs)
+                if attrs_str:
+                    return f'<img src="{filepath}" {attrs_str}>'
                 return f'<img src="{filepath}">'
             except Exception:
                 return match.group(0)
@@ -495,6 +503,237 @@ class ExportHandlerBase(APIHandler):
             html = html.replace('\u200b', '')
         return html
 
+    def render_math_to_png(self, latex: str, dpi: int = 200, display: bool = False) -> str:
+        """Render a LaTeX math expression to a PNG base64 data URI.
+
+        Uses matplotlib.mathtext to render LaTeX to PNG with transparent background.
+
+        Args:
+            latex: LaTeX math expression (without delimiters)
+            dpi: Resolution in dots per inch
+            display: If True, use larger font size for display math
+        """
+        from matplotlib.mathtext import math_to_image
+        from matplotlib.font_manager import FontProperties
+
+        fontsize = 16 if display else 12
+        prop = FontProperties(size=fontsize)
+
+        # matplotlib mathtext requires $ delimiters
+        tex = f'${latex.strip()}$'
+
+        buf = io.BytesIO()
+        math_to_image(tex, buf, dpi=dpi, format='png', prop=prop)
+        buf.seek(0)
+
+        # Fix DPI metadata so python-docx sizes the image correctly.
+        # Calculate the DPI that makes the PNG display at the target
+        # physical height (fontsize in points).
+        from PIL import Image as PILImage
+        img = PILImage.open(buf)
+        target_height_inches = fontsize / 72  # points to inches
+        effective_dpi = img.height / target_height_inches
+        corrected_buf = io.BytesIO()
+        img.save(corrected_buf, format='png', dpi=(effective_dpi, effective_dpi))
+        corrected_buf.seek(0)
+
+        b64 = base64.b64encode(corrected_buf.read()).decode('ascii')
+        return f'data:image/png;base64,{b64}'
+
+    def replace_math_with_images(self, content: str, dpi: int = 200) -> str:
+        """Replace LaTeX math delimiters with rendered PNG images.
+
+        Protects code blocks (fenced and inline) before processing.
+        Matches $$...$$ (display) and $...$ (inline) while avoiding
+        false positives on currency amounts like $100.
+
+        Args:
+            content: Markdown content with LaTeX math expressions
+            dpi: Resolution for rendered math images
+        """
+        # Protect code blocks by replacing with placeholders
+        code_placeholders = []
+
+        # Protect fenced code blocks (```...```)
+        def protect_fenced(match):
+            code_placeholders.append(match.group(0))
+            return f'[[MATH_CODE_BLOCK_{len(code_placeholders) - 1}]]'
+
+        content = re.sub(r'```[\s\S]*?```', protect_fenced, content)
+
+        # Protect inline code (`...`)
+        def protect_inline(match):
+            code_placeholders.append(match.group(0))
+            return f'[[MATH_CODE_BLOCK_{len(code_placeholders) - 1}]]'
+
+        content = re.sub(r'`[^`]+`', protect_inline, content)
+
+        # Replace display math $$...$$ first (greedy within single expression)
+        def replace_display(match):
+            latex = match.group(1)
+            try:
+                data_uri = self.render_math_to_png(latex, dpi=dpi, display=True)
+                return f'\n\n<div style="text-align:center"><img src="{data_uri}" alt="{latex}" style="max-width:100%"></div>\n\n'
+            except Exception:
+                return match.group(0)
+
+        content = re.sub(r'\$\$(.+?)\$\$', replace_display, content, flags=re.DOTALL)
+
+        # Replace inline math $...$ (require non-space after opening and before closing $)
+        def replace_inline(match):
+            latex = match.group(1)
+            try:
+                data_uri = self.render_math_to_png(latex, dpi=dpi, display=False)
+                return f'<img src="{data_uri}" alt="{latex}" style="vertical-align:middle">'
+            except Exception:
+                return match.group(0)
+
+        content = re.sub(r'(?<!\$)\$(\S(?:[^$]*?\S)?)\$(?!\$)', replace_inline, content)
+
+        # Restore code blocks
+        for i, block in enumerate(code_placeholders):
+            content = content.replace(f'[[MATH_CODE_BLOCK_{i}]]', block)
+
+        return content
+
+    def latex_to_omml(self, latex: str):
+        """Convert LaTeX to OMML element for Word documents.
+
+        Pipeline: LaTeX -> MathML (latex2mathml) -> OMML (XSLT mml2omml.xsl)
+        Returns an lxml Element with the oMath OMML structure.
+        """
+        import latex2mathml.converter
+        from lxml import etree
+
+        mathml = latex2mathml.converter.convert(latex)
+        tree = etree.fromstring(mathml.encode('utf-8'))
+
+        xsl_path = Path(__file__).parent / 'mml2omml.xsl'
+        xslt = etree.parse(str(xsl_path))
+        transform = etree.XSLT(xslt)
+        omml = transform(tree)
+        return omml.getroot()
+
+    def replace_math_with_markers(self, content: str):
+        """Replace LaTeX math delimiters with text markers for DOCX post-processing.
+
+        Instead of rendering math as images, inserts zero-width joiner markers
+        that are later replaced with native OMML equations after htmldocx processing.
+
+        Returns (content, inline_math_list, display_math_list).
+        """
+        inline_math = []
+        display_math = []
+
+        # Protect code blocks by replacing with placeholders
+        code_placeholders = []
+
+        def protect_fenced(match):
+            code_placeholders.append(match.group(0))
+            return f'[[MATH_CODE_BLOCK_{len(code_placeholders) - 1}]]'
+
+        content = re.sub(r'```[\s\S]*?```', protect_fenced, content)
+
+        def protect_inline(match):
+            code_placeholders.append(match.group(0))
+            return f'[[MATH_CODE_BLOCK_{len(code_placeholders) - 1}]]'
+
+        content = re.sub(r'`[^`]+`', protect_inline, content)
+
+        # Replace display math $$...$$ first
+        def replace_display(match):
+            latex = match.group(1)
+            idx = len(display_math)
+            display_math.append(latex)
+            return f'\n\n\u200dMATH_DISPLAY_{idx}\u200d\n\n'
+
+        content = re.sub(r'\$\$(.+?)\$\$', replace_display, content, flags=re.DOTALL)
+
+        # Replace inline math $...$
+        def replace_inline(match):
+            latex = match.group(1)
+            idx = len(inline_math)
+            inline_math.append(latex)
+            return f'\u200dMATH_INLINE_{idx}\u200d'
+
+        content = re.sub(r'(?<!\$)\$(\S(?:[^$]*?\S)?)\$(?!\$)', replace_inline, content)
+
+        # Restore code blocks
+        for i, block in enumerate(code_placeholders):
+            content = content.replace(f'[[MATH_CODE_BLOCK_{i}]]', block)
+
+        return content, inline_math, display_math
+
+    def merge_inline_math_omml(self, document, inline_math, display_math):
+        """Post-process DOCX to replace math markers with native OMML equations.
+
+        Scans all paragraph runs for MATH_INLINE_N and MATH_DISPLAY_N markers,
+        splits runs at marker boundaries, and inserts OMML elements.
+        """
+        from docx.oxml.ns import qn
+        from lxml import etree
+        import copy
+
+        OMML_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+
+        for paragraph in document.paragraphs:
+            full_text = paragraph.text
+
+            # Handle display math (marker in its own paragraph)
+            for idx, latex in enumerate(display_math):
+                marker = f'\u200dMATH_DISPLAY_{idx}\u200d'
+                if marker in full_text:
+                    try:
+                        omml_elem = self.latex_to_omml(latex)
+                        # Create oMathPara wrapper for display (centered) math
+                        omath_para = etree.SubElement(
+                            paragraph._p, f'{{{OMML_NS}}}oMathPara'
+                        )
+                        omath_para.append(omml_elem)
+                        # Remove all existing runs (marker text)
+                        for run in paragraph.runs:
+                            run._r.getparent().remove(run._r)
+                    except Exception:
+                        # Fallback: leave marker text (will show raw LaTeX)
+                        for run in paragraph.runs:
+                            if marker in run.text:
+                                run.text = run.text.replace(marker, latex)
+
+            # Handle inline math (marker within text runs)
+            for idx, latex in enumerate(inline_math):
+                marker = f'\u200dMATH_INLINE_{idx}\u200d'
+                if marker not in full_text:
+                    continue
+
+                # Find the run containing the marker
+                for run in list(paragraph.runs):
+                    if marker not in run.text:
+                        continue
+
+                    try:
+                        omml_elem = self.latex_to_omml(latex)
+                    except Exception:
+                        run.text = run.text.replace(marker, latex)
+                        continue
+
+                    parts = run.text.split(marker, 1)
+                    parent = run._r.getparent()
+                    run_index = list(parent).index(run._r)
+
+                    # Set before-text in current run
+                    run.text = parts[0]
+
+                    # Insert OMML element after current run
+                    parent.insert(run_index + 1, omml_elem)
+
+                    # Create after-text run if needed
+                    if parts[1]:
+                        after_run = copy.deepcopy(run._r)
+                        after_run.find(qn('w:t')).text = parts[1]
+                        parent.insert(run_index + 2, after_run)
+
+                    break  # Only one marker per run expected
+
     def style_docx_alert_boxes(self, document, show_labels: bool = False):
         """Replace alert paragraphs with styled single-cell tables.
 
@@ -645,13 +884,14 @@ class ExportHandlerBase(APIHandler):
             p.getparent().remove(p)
 
     def markdown_to_html(self, content: str, title: str = 'Exported Document',
-                         compact: bool = False) -> str:
+                         compact: bool = False, math_support: bool = False) -> str:
         """Convert markdown to standalone HTML.
 
         Args:
             content: Markdown content to convert
             title: Document title
             compact: If True, use tighter spacing (for PDF)
+            math_support: If True, inject KaTeX CSS/JS for client-side math rendering
         """
         import markdown
 
@@ -827,16 +1067,37 @@ class ExportHandlerBase(APIHandler):
         /* Pygments syntax highlighting */
         {pygments_css}'''
 
+        katex_head = ''
+        katex_script = ''
+        if math_support:
+            katex_head = '''
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/contrib/auto-render.min.js"></script>'''
+            katex_script = '''
+    <script>
+      document.addEventListener("DOMContentLoaded", function() {
+        renderMathInElement(document.body, {
+          delimiters: [
+            {left: "$$", right: "$$", display: true},
+            {left: "$", right: "$", display: false}
+          ],
+          ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+          throwOnError: false
+        });
+      });
+    </script>'''
+
         html = f'''<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
     <title>{title}</title>
     <style>{style}
-    </style>
+    </style>{katex_head}
 </head>
 <body>
-{body}
+{body}{katex_script}
 </body>
 </html>'''
         return html
@@ -1355,6 +1616,7 @@ class ExportPdfHandler(ExportHandlerBase):
             mermaid_diagrams = data.get('mermaidDiagrams', [])
             svg_dpi = data.get('svgDPI', 150)
             show_alert_labels = data.get('showAlertLabels', False)
+            math_dpi = data.get('mathDPI', 200)
 
             if not relative_path:
                 self.set_status(400)
@@ -1370,6 +1632,7 @@ class ExportPdfHandler(ExportHandlerBase):
 
             content = self.read_markdown_file(file_path)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
+            content = self.replace_math_with_images(content, dpi=math_dpi)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
 
@@ -1489,6 +1752,8 @@ class ExportDocxHandler(ExportHandlerBase):
 
             content = self.read_markdown_file(file_path)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
+            # Use OMML markers for DOCX (native Word equations)
+            content, inline_math, display_math = self.replace_math_with_markers(content)
             # Use PNG for DOCX (better Word compatibility)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
@@ -1521,6 +1786,9 @@ class ExportDocxHandler(ExportHandlerBase):
 
                 parser = HtmlToDocx()
                 parser.add_html_to_document(body_html, document)
+
+                # Insert native OMML equations replacing markers
+                self.merge_inline_math_omml(document, inline_math, display_math)
 
                 # Style GitHub alert boxes with colored borders and shading
                 self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
@@ -1636,7 +1904,7 @@ class ExportHtmlHandler(ExportHandlerBase):
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams)
             content = self.embed_images_as_base64(content, file_path.parent)
-            html = self.markdown_to_html(content, file_path.stem)
+            html = self.markdown_to_html(content, file_path.stem, math_support=True)
 
             # Strip zero-width space markers used for DOCX alert styling
             html = self.clean_alert_markers_from_html(html, show_labels=show_alert_labels)
