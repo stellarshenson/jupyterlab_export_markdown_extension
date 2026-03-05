@@ -159,6 +159,22 @@ graph LR
     style C fill:#fef3c7,stroke:#f59e0b
 ```
 
+## LaTeX Math
+
+Inline math: The equation $E=mc^2$ is well known. The quadratic formula gives $x = \frac{-b \pm \sqrt{b^2-4ac}}{2a}$.
+
+Display math:
+
+$$\int_0^\infty e^{-x^2} dx = \frac{\sqrt{\pi}}{2}$$
+
+$$\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}$$
+
+Greek letters inline: $\alpha + \beta = \gamma$
+
+Currency amounts should NOT render as math: The price is $100 and the total is $200.
+
+Math inside code should NOT render: `$E=mc^2$` and `$x^2$`
+
 ## Horizontal Rule
 
 ---

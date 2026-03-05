@@ -291,6 +291,7 @@ async function exportMarkdown(
   format: ExportFormat,
   mermaidDiagrams: IMermaidDiagram[],
   svgDPI: number = 150,
+  mathDPI: number = 200,
   showAlertLabels: boolean = false
 ): Promise<void> {
   const blob = await requestBlobAPI(`export/${format}`, {
@@ -298,7 +299,13 @@ async function exportMarkdown(
     headers: {
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ path, mermaidDiagrams, svgDPI, showAlertLabels })
+    body: JSON.stringify({
+      path,
+      mermaidDiagrams,
+      svgDPI,
+      mathDPI,
+      showAlertLabels
+    })
   });
 
   // Ensure correct MIME type
@@ -330,18 +337,22 @@ const plugin: JupyterFrontEndPlugin<void> = {
     // Load settings
     let diagramDPI = 150; // Default: browser-side mermaid capture DPI
     let svgDPI = 150; // Default: server-side SVG to PNG conversion DPI
+    let mathDPI = 200; // Default: math expression rendering DPI
     let showAlertLabels = false; // Default: hide alert type labels
     if (settingRegistry) {
       try {
         const settings = await settingRegistry.load(plugin.id);
         diagramDPI = settings.get('diagramDPI').composite as number;
         svgDPI = settings.get('svgDPI').composite as number;
+        mathDPI = settings.get('mathDPI').composite as number;
         showAlertLabels = settings.get('showAlertLabels').composite as boolean;
         console.log(
           'Export Markdown: Loaded settings - diagramDPI:',
           diagramDPI,
           'svgDPI:',
           svgDPI,
+          'mathDPI:',
+          mathDPI,
           'showAlertLabels:',
           showAlertLabels
         );
@@ -350,6 +361,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
         settings.changed.connect(() => {
           diagramDPI = settings.get('diagramDPI').composite as number;
           svgDPI = settings.get('svgDPI').composite as number;
+          mathDPI = settings.get('mathDPI').composite as number;
           showAlertLabels = settings.get('showAlertLabels')
             .composite as boolean;
           console.log(
@@ -357,6 +369,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
             diagramDPI,
             'svgDPI:',
             svgDPI,
+            'mathDPI:',
+            mathDPI,
             'showAlertLabels:',
             showAlertLabels
           );
@@ -413,6 +427,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
               format,
               mermaidDiagrams,
               svgDPI,
+              mathDPI,
               showAlertLabels
             );
           } catch (error) {
