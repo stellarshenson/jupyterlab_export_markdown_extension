@@ -568,6 +568,9 @@ class ExportHandlerBase(APIHandler):
 
         content = re.sub(r'`[^`]+`', protect_inline, content)
 
+        # Protect escaped dollars (\$) from being matched as math delimiters
+        content = content.replace('\\$', '[[ESCAPED_DOLLAR]]')
+
         # Replace display math $$...$$ first (greedy within single expression)
         def replace_display(match):
             latex = match.group(1)
@@ -589,6 +592,9 @@ class ExportHandlerBase(APIHandler):
                 return match.group(0)
 
         content = re.sub(r'(?<!\$)\$(\S(?:[^$]*?\S)?)\$(?!\$)', replace_inline, content)
+
+        # Restore escaped dollars
+        content = content.replace('[[ESCAPED_DOLLAR]]', '\\$')
 
         # Restore code blocks
         for i, block in enumerate(code_placeholders):
@@ -640,6 +646,9 @@ class ExportHandlerBase(APIHandler):
 
         content = re.sub(r'`[^`]+`', protect_inline, content)
 
+        # Protect escaped dollars (\$) from being matched as math delimiters
+        content = content.replace('\\$', '[[ESCAPED_DOLLAR]]')
+
         # Replace display math $$...$$ first
         def replace_display(match):
             latex = match.group(1)
@@ -657,6 +666,9 @@ class ExportHandlerBase(APIHandler):
             return f'\u200dMATH_INLINE_{idx}\u200d'
 
         content = re.sub(r'(?<!\$)\$(\S(?:[^$]*?\S)?)\$(?!\$)', replace_inline, content)
+
+        # Restore escaped dollars
+        content = content.replace('[[ESCAPED_DOLLAR]]', '\\$')
 
         # Restore code blocks
         for i, block in enumerate(code_placeholders):
