@@ -568,7 +568,10 @@ class ExportHandlerBase(APIHandler):
 
         content = re.sub(r'`[^`]+`', protect_inline, content)
 
-        # Protect escaped dollars (\$) from being matched as math delimiters
+        # Protect escaped dollars from being matched as math delimiters
+        # Handle \\$ (double backslash + dollar, common in markdown/LaTeX) first,
+        # then \$ (single backslash + dollar). Both render as literal $ in output.
+        content = content.replace('\\\\$', '[[ESCAPED_DOLLAR]]')
         content = content.replace('\\$', '[[ESCAPED_DOLLAR]]')
 
         # Replace display math $$...$$ first (greedy within single expression)
@@ -593,8 +596,8 @@ class ExportHandlerBase(APIHandler):
 
         content = re.sub(r'(?<!\$)\$(\S(?:[^$]*?\S)?)\$(?!\$)', replace_inline, content)
 
-        # Restore escaped dollars
-        content = content.replace('[[ESCAPED_DOLLAR]]', '\\$')
+        # Restore escaped dollars as literal $ (both \$ and \\$ mean literal dollar)
+        content = content.replace('[[ESCAPED_DOLLAR]]', '$')
 
         # Restore code blocks
         for i, block in enumerate(code_placeholders):
@@ -646,7 +649,10 @@ class ExportHandlerBase(APIHandler):
 
         content = re.sub(r'`[^`]+`', protect_inline, content)
 
-        # Protect escaped dollars (\$) from being matched as math delimiters
+        # Protect escaped dollars from being matched as math delimiters
+        # Handle \\$ (double backslash + dollar, common in markdown/LaTeX) first,
+        # then \$ (single backslash + dollar). Both render as literal $ in output.
+        content = content.replace('\\\\$', '[[ESCAPED_DOLLAR]]')
         content = content.replace('\\$', '[[ESCAPED_DOLLAR]]')
 
         # Replace display math $$...$$ first
@@ -667,8 +673,8 @@ class ExportHandlerBase(APIHandler):
 
         content = re.sub(r'(?<!\$)\$(\S(?:[^$]*?\S)?)\$(?!\$)', replace_inline, content)
 
-        # Restore escaped dollars
-        content = content.replace('[[ESCAPED_DOLLAR]]', '\\$')
+        # Restore escaped dollars as literal $ (both \$ and \\$ mean literal dollar)
+        content = content.replace('[[ESCAPED_DOLLAR]]', '$')
 
         # Restore code blocks
         for i, block in enumerate(code_placeholders):
