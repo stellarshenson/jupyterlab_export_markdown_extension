@@ -845,3 +845,101 @@ class TestRichAlerts:
         assert "void location" in html
         # Zero-width markers should not appear in HTML output
         assert "\u200b" not in html
+
+
+# Markdown with JPEG images at different DPI values for scaling test
+TEST_MARKDOWN_WITH_JPEG = """# JPEG Scaling Test
+
+![High DPI](images/high_dpi.jpg)
+
+![Low DPI](images/low_dpi.jpg)
+
+Some text after images.
+"""
+
+
+@pytest.fixture
+def test_jpeg_scaling_files(jp_root_dir):
+    """Create test JPEG images with different DPI metadata."""
+    from PIL import Image as PILImage
+
+    images_dir = jp_root_dir / "images"
+    images_dir.mkdir(exist_ok=True)
+
+    # Create 200x100 JPEG at 1519 DPI (would render tiny without fix)
+    img_high = PILImage.new("RGB", (200, 100), color=(255, 0, 0))
+    img_high.save(images_dir / "high_dpi.jpg", dpi=(1519, 1519))
+
+    # Create 200x100 JPEG at 72 DPI (would render large without fix)
+    img_low = PILImage.new("RGB", (200, 100), color=(0, 0, 255))
+    img_low.save(images_dir / "low_dpi.jpg", dpi=(72, 72))
+
+    md_file = jp_root_dir / "test_jpeg_scaling.md"
+    md_file.write_text(TEST_MARKDOWN_WITH_JPEG, encoding="utf-8")
+    return md_file
+
+
+class TestImageDPINormalization:
+    """Test that JPEG DPI metadata is normalized for consistent DOCX sizing."""
+
+    async def test_docx_consistent_image_sizes(self, jp_fetch, test_jpeg_scaling_files):
+        """Test images with different DPI render at consistent sizes in DOCX."""
+        from docx import Document
+        from docx.shared import Inches
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_jpeg_scaling.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        docx_bytes = io.BytesIO(response.body)
+        doc = Document(docx_bytes)
+
+        # Both images have identical pixel dimensions (200x100)
+        # so after DPI normalization to 96, they should have
+        # identical sizes in the DOCX
+        shapes = list(doc.inline_shapes)
+        assert len(shapes) >= 2, f"Expected 2 images, found {len(shapes)}"
+
+        # Both should be the same width (200px at 96 DPI = ~2.08")
+        width_0 = shapes[0].width
+        width_1 = shapes[1].width
+        assert width_0 == width_1, (
+            f"Images with same pixel dimensions should have same DOCX width: "
+            f"{width_0} vs {width_1}"
+        )
+
+        # Width should be approximately 2.08 inches (200/96)
+        expected_width = Inches(200 / 96)
+        tolerance = Inches(0.1)
+        assert abs(width_0 - expected_width) < tolerance, (
+            f"Image width {width_0} should be ~{expected_width} (200px at 96 DPI)"
+        )
+
+    async def test_docx_with_jpeg_succeeds(self, jp_fetch, test_jpeg_scaling_files):
+        """Test DOCX export succeeds with JPEG images of varying DPI."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_jpeg_scaling.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body[:2] == b"PK"
+
+    async def test_pdf_with_jpeg_succeeds(self, jp_fetch, test_jpeg_scaling_files):
+        """Test PDF export succeeds with JPEG images of varying DPI."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "test_jpeg_scaling.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")

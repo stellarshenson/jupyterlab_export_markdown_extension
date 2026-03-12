@@ -190,6 +190,20 @@ class ExportHandlerBase(APIHandler):
                 with open(filepath, 'wb') as f:
                     f.write(img_bytes)
 
+                # Normalize DPI to 96 for consistent sizing in DOCX
+                # JPEG/PNG files have embedded DPI metadata that python-docx
+                # uses to calculate "native size". Real-world images have
+                # wildly varying DPI (72, 96, 220, 1519) causing identical
+                # pixel-dimension images to render at completely different
+                # sizes. Normalizing to 96 DPI makes sizing pixel-based.
+                if ext in ('.jpg', '.jpeg', '.png'):
+                    try:
+                        from PIL import Image
+                        img = Image.open(filepath)
+                        img.save(filepath, dpi=(96, 96))
+                    except Exception:
+                        pass  # If normalization fails, use original file
+
                 # Preserve other attributes (alt, style, width, height) from original tag
                 full_tag = match.group(0)
                 other_attrs = re.findall(
