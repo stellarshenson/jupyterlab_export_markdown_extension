@@ -34,6 +34,24 @@
       "description": "Show alert type labels (NOTE, TIP, IMPORTANT, WARNING, CAUTION) in exported documents. When disabled, only the alert content is shown with colored styling.",
       "type": "boolean",
       "default": false
+    },
+    "htmlAutoBackground": {
+      "title": "HTML Auto Background",
+      "description": "Automatically detect light/dark theme preference in HTML exports using CSS prefers-color-scheme media query. When enabled, the exported HTML adapts to the viewer's system theme. When disabled, uses the configured light background color.",
+      "type": "boolean",
+      "default": true
+    },
+    "htmlDarkBackground": {
+      "title": "HTML Dark Background",
+      "description": "Background color for dark theme in HTML exports (hex format). Only used when Auto Background is enabled.",
+      "type": "string",
+      "default": "#272b31"
+    },
+    "htmlLightBackground": {
+      "title": "HTML Light Background",
+      "description": "Background color for light theme in HTML exports (hex format). Used as the default background when Auto Background is disabled, or as the light theme color when enabled.",
+      "type": "string",
+      "default": "#ffffff"
     }
   },
   "additionalProperties": false

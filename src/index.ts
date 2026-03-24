@@ -292,7 +292,10 @@ async function exportMarkdown(
   mermaidDiagrams: IMermaidDiagram[],
   svgDPI: number = 150,
   mathDPI: number = 200,
-  showAlertLabels: boolean = false
+  showAlertLabels: boolean = false,
+  htmlAutoBackground: boolean = true,
+  htmlDarkBackground: string = '#272b31',
+  htmlLightBackground: string = '#ffffff'
 ): Promise<void> {
   const blob = await requestBlobAPI(`export/${format}`, {
     method: 'POST',
@@ -304,7 +307,10 @@ async function exportMarkdown(
       mermaidDiagrams,
       svgDPI,
       mathDPI,
-      showAlertLabels
+      showAlertLabels,
+      htmlAutoBackground,
+      htmlDarkBackground,
+      htmlLightBackground
     })
   });
 
@@ -339,6 +345,9 @@ const plugin: JupyterFrontEndPlugin<void> = {
     let svgDPI = 150; // Default: server-side SVG to PNG conversion DPI
     let mathDPI = 200; // Default: math expression rendering DPI
     let showAlertLabels = false; // Default: hide alert type labels
+    let htmlAutoBackground = true; // Default: auto-detect light/dark theme
+    let htmlDarkBackground = '#272b31'; // Default: dark theme background
+    let htmlLightBackground = '#ffffff'; // Default: light theme background
     if (settingRegistry) {
       try {
         const settings = await settingRegistry.load(plugin.id);
@@ -346,6 +355,12 @@ const plugin: JupyterFrontEndPlugin<void> = {
         svgDPI = settings.get('svgDPI').composite as number;
         mathDPI = settings.get('mathDPI').composite as number;
         showAlertLabels = settings.get('showAlertLabels').composite as boolean;
+        htmlAutoBackground = settings.get('htmlAutoBackground')
+          .composite as boolean;
+        htmlDarkBackground = settings.get('htmlDarkBackground')
+          .composite as string;
+        htmlLightBackground = settings.get('htmlLightBackground')
+          .composite as string;
         console.log(
           'Export Markdown: Loaded settings - diagramDPI:',
           diagramDPI,
@@ -354,7 +369,9 @@ const plugin: JupyterFrontEndPlugin<void> = {
           'mathDPI:',
           mathDPI,
           'showAlertLabels:',
-          showAlertLabels
+          showAlertLabels,
+          'htmlAutoBackground:',
+          htmlAutoBackground
         );
 
         // Listen for settings changes
@@ -364,6 +381,12 @@ const plugin: JupyterFrontEndPlugin<void> = {
           mathDPI = settings.get('mathDPI').composite as number;
           showAlertLabels = settings.get('showAlertLabels')
             .composite as boolean;
+          htmlAutoBackground = settings.get('htmlAutoBackground')
+            .composite as boolean;
+          htmlDarkBackground = settings.get('htmlDarkBackground')
+            .composite as string;
+          htmlLightBackground = settings.get('htmlLightBackground')
+            .composite as string;
           console.log(
             'Export Markdown: Settings changed - diagramDPI:',
             diagramDPI,
@@ -372,7 +395,9 @@ const plugin: JupyterFrontEndPlugin<void> = {
             'mathDPI:',
             mathDPI,
             'showAlertLabels:',
-            showAlertLabels
+            showAlertLabels,
+            'htmlAutoBackground:',
+            htmlAutoBackground
           );
         });
       } catch (error) {
@@ -428,7 +453,10 @@ const plugin: JupyterFrontEndPlugin<void> = {
               mermaidDiagrams,
               svgDPI,
               mathDPI,
-              showAlertLabels
+              showAlertLabels,
+              htmlAutoBackground,
+              htmlDarkBackground,
+              htmlLightBackground
             );
           } catch (error) {
             console.error(

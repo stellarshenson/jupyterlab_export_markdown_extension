@@ -261,11 +261,17 @@ class ExportHandlerBase(APIHandler):
 
         return re.sub(img_pattern, replace_image, content)
 
-    def get_pygments_css(self) -> str:
-        """Get Pygments CSS for syntax highlighting."""
+    def get_pygments_css(self, dark: bool = False) -> str:
+        """Get Pygments CSS for syntax highlighting.
+
+        Args:
+            dark: If True, return dark theme (monokai) CSS for use inside
+                  @media (prefers-color-scheme: dark) block.
+        """
         try:
             from pygments.formatters import HtmlFormatter
-            return HtmlFormatter(style='default').get_style_defs('.codehilite')
+            theme = 'monokai' if dark else 'default'
+            return HtmlFormatter(style=theme).get_style_defs('.codehilite')
         except ImportError:
             return ''
 
@@ -916,7 +922,10 @@ class ExportHandlerBase(APIHandler):
             p.getparent().remove(p)
 
     def markdown_to_html(self, content: str, title: str = 'Exported Document',
-                         compact: bool = False, math_support: bool = False) -> str:
+                         compact: bool = False, math_support: bool = False,
+                         auto_background: bool = True,
+                         dark_background: str = '#272b31',
+                         light_background: str = '#ffffff') -> str:
         """Convert markdown to standalone HTML.
 
         Args:
@@ -924,6 +933,9 @@ class ExportHandlerBase(APIHandler):
             title: Document title
             compact: If True, use tighter spacing (for PDF)
             math_support: If True, inject KaTeX CSS/JS for client-side math rendering
+            auto_background: If True, use CSS prefers-color-scheme for auto light/dark
+            dark_background: Background color for dark theme (hex)
+            light_background: Background color for light theme (hex)
         """
         import markdown
 
@@ -1042,6 +1054,9 @@ class ExportHandlerBase(APIHandler):
         else:
             # Standard HTML stylesheet with Pygments syntax highlighting
             pygments_css = self.get_pygments_css()
+            pygments_dark_css = self.get_pygments_css(dark=True)
+
+            # Base light theme styles
             style = f'''
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -1049,25 +1064,31 @@ class ExportHandlerBase(APIHandler):
             max-width: 800px;
             margin: 0 auto;
             padding: 20px;
-            color: #333;
+            color: #1a1a1a;
+            background-color: {light_background};
+        }}
+        a {{
+            color: #0969da;
         }}
         pre {{
-            background: #f8f8f8;
+            background: #f6f8fa;
             padding: 10px;
-            border-radius: 4px;
+            border-radius: 6px;
             overflow-x: auto;
             font-size: 0.85em;
+            border: 1px solid #d1d9e0;
         }}
         code {{
-            background: #f8f8f8;
-            padding: 2px 4px;
-            border-radius: 2px;
+            background: #f6f8fa;
+            padding: 2px 6px;
+            border-radius: 4px;
             font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
             font-size: 0.85em;
         }}
         pre code {{
             background: none;
             padding: 0;
+            border: none;
         }}
         table {{
             border-collapse: collapse;
@@ -1075,29 +1096,91 @@ class ExportHandlerBase(APIHandler):
             margin: 1em 0;
         }}
         th, td {{
-            border: 1px solid #ddd;
+            border: 1px solid #d1d9e0;
             padding: 8px;
             text-align: left;
         }}
         th {{
-            background: #f4f4f4;
+            background: #f6f8fa;
+            font-weight: 600;
         }}
         img {{
             max-width: 100%;
             height: auto;
         }}
         blockquote {{
-            border-left: 4px solid #ddd;
+            border-left: 4px solid #d1d9e0;
             margin: 0;
             padding-left: 16px;
-            color: #666;
+            color: #656d76;
         }}
         h1, h2, h3, h4, h5, h6 {{
             margin-top: 1.5em;
             margin-bottom: 0.5em;
+            color: #1a1a1a;
+        }}
+        h1 {{
+            padding-bottom: 0.3em;
+            border-bottom: 1px solid #d1d9e0;
+        }}
+        hr {{
+            border: none;
+            border-top: 1px solid #d1d9e0;
+            margin: 1.5em 0;
         }}
         /* Pygments syntax highlighting */
         {pygments_css}'''
+
+            # Dark theme overrides via media query
+            if auto_background:
+                style += f'''
+        @media (prefers-color-scheme: dark) {{
+            body {{
+                background-color: {dark_background};
+                color: #e6edf3;
+            }}
+            a {{
+                color: #58a6ff;
+            }}
+            pre {{
+                background: #161b22;
+                border-color: #30363d;
+            }}
+            code {{
+                background: #161b22;
+            }}
+            pre code {{
+                background: none;
+            }}
+            table {{
+                border-color: #30363d;
+            }}
+            th, td {{
+                border-color: #30363d;
+            }}
+            th {{
+                background: #161b22;
+                color: #e6edf3;
+            }}
+            blockquote {{
+                border-left-color: #30363d;
+                color: #8b949e;
+            }}
+            h1, h2, h3, h4, h5, h6 {{
+                color: #e6edf3;
+            }}
+            h1 {{
+                border-bottom-color: #30363d;
+            }}
+            hr {{
+                border-top-color: #30363d;
+            }}
+            img {{
+                opacity: 0.9;
+            }}
+            /* Pygments dark syntax highlighting */
+            {pygments_dark_css}
+        }}'''
 
         katex_head = ''
         katex_script = ''
@@ -1919,6 +2002,9 @@ class ExportHtmlHandler(ExportHandlerBase):
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
             show_alert_labels = data.get('showAlertLabels', False)
+            auto_background = data.get('htmlAutoBackground', True)
+            dark_background = data.get('htmlDarkBackground', '#272b31')
+            light_background = data.get('htmlLightBackground', '#ffffff')
 
             if not relative_path:
                 self.set_status(400)
@@ -1936,7 +2022,12 @@ class ExportHtmlHandler(ExportHandlerBase):
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams)
             content = self.embed_images_as_base64(content, file_path.parent)
-            html = self.markdown_to_html(content, file_path.stem, math_support=True)
+            html = self.markdown_to_html(
+                content, file_path.stem, math_support=True,
+                auto_background=auto_background,
+                dark_background=dark_background,
+                light_background=light_background
+            )
 
             # Strip zero-width space markers used for DOCX alert styling
             html = self.clean_alert_markers_from_html(html, show_labels=show_alert_labels)
