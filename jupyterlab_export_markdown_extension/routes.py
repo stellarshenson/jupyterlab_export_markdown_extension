@@ -923,8 +923,8 @@ class ExportHandlerBase(APIHandler):
 
     def markdown_to_html(self, content: str, title: str = 'Exported Document',
                          compact: bool = False, math_support: bool = False,
-                         auto_background: bool = True,
-                         dark_background: str = '#272b31',
+                         theme: str = 'system',
+                         dark_background: str = '#111111',
                          light_background: str = '#ffffff') -> str:
         """Convert markdown to standalone HTML.
 
@@ -933,7 +933,7 @@ class ExportHandlerBase(APIHandler):
             title: Document title
             compact: If True, use tighter spacing (for PDF)
             math_support: If True, inject KaTeX CSS/JS for client-side math rendering
-            auto_background: If True, use CSS prefers-color-scheme for auto light/dark
+            theme: 'system' (auto-detect via prefers-color-scheme), 'light', or 'dark'
             dark_background: Background color for dark theme (hex)
             light_background: Background color for light theme (hex)
         """
@@ -1056,7 +1056,34 @@ class ExportHandlerBase(APIHandler):
             pygments_css = self.get_pygments_css()
             pygments_dark_css = self.get_pygments_css(dark=True)
 
-            # Base light theme styles
+            use_dark = theme == 'dark'
+            use_light = theme == 'light'
+            use_system = theme == 'system'
+
+            # Determine base styles based on theme
+            if use_dark:
+                # Dark theme as base (no media query)
+                bg_color = dark_background
+                text_color = '#e6edf3'
+                link_color = '#58a6ff'
+                code_bg = '#161b22'
+                border_color = '#30363d'
+                heading_color = '#e6edf3'
+                blockquote_color = '#8b949e'
+                th_bg = '#161b22'
+                active_pygments = pygments_dark_css
+            else:
+                # Light theme as base (for both 'light' and 'system')
+                bg_color = light_background
+                text_color = '#1a1a1a'
+                link_color = '#0969da'
+                code_bg = '#f6f8fa'
+                border_color = '#d1d9e0'
+                heading_color = '#1a1a1a'
+                blockquote_color = '#656d76'
+                th_bg = '#f6f8fa'
+                active_pygments = pygments_css
+
             style = f'''
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -1064,22 +1091,22 @@ class ExportHandlerBase(APIHandler):
             max-width: 800px;
             margin: 0 auto;
             padding: 20px;
-            color: #1a1a1a;
-            background-color: {light_background};
+            color: {text_color};
+            background-color: {bg_color};
         }}
         a {{
-            color: #0969da;
+            color: {link_color};
         }}
         pre {{
-            background: #f6f8fa;
+            background: {code_bg};
             padding: 10px;
             border-radius: 6px;
             overflow-x: auto;
             font-size: 0.85em;
-            border: 1px solid #d1d9e0;
+            border: 1px solid {border_color};
         }}
         code {{
-            background: #f6f8fa;
+            background: {code_bg};
             padding: 2px 6px;
             border-radius: 4px;
             font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
@@ -1096,12 +1123,12 @@ class ExportHandlerBase(APIHandler):
             margin: 1em 0;
         }}
         th, td {{
-            border: 1px solid #d1d9e0;
+            border: 1px solid {border_color};
             padding: 8px;
             text-align: left;
         }}
         th {{
-            background: #f6f8fa;
+            background: {th_bg};
             font-weight: 600;
         }}
         img {{
@@ -1109,30 +1136,30 @@ class ExportHandlerBase(APIHandler):
             height: auto;
         }}
         blockquote {{
-            border-left: 4px solid #d1d9e0;
+            border-left: 4px solid {border_color};
             margin: 0;
             padding-left: 16px;
-            color: #656d76;
+            color: {blockquote_color};
         }}
         h1, h2, h3, h4, h5, h6 {{
             margin-top: 1.5em;
             margin-bottom: 0.5em;
-            color: #1a1a1a;
+            color: {heading_color};
         }}
         h1 {{
             padding-bottom: 0.3em;
-            border-bottom: 1px solid #d1d9e0;
+            border-bottom: 1px solid {border_color};
         }}
         hr {{
             border: none;
-            border-top: 1px solid #d1d9e0;
+            border-top: 1px solid {border_color};
             margin: 1.5em 0;
         }}
         /* Pygments syntax highlighting */
-        {pygments_css}'''
+        {active_pygments}'''
 
-            # Dark theme overrides via media query
-            if auto_background:
+            # System theme: add dark overrides via media query
+            if use_system:
                 style += f'''
         @media (prefers-color-scheme: dark) {{
             body {{
@@ -1151,9 +1178,6 @@ class ExportHandlerBase(APIHandler):
             }}
             pre code {{
                 background: none;
-            }}
-            table {{
-                border-color: #30363d;
             }}
             th, td {{
                 border-color: #30363d;
@@ -2002,8 +2026,8 @@ class ExportHtmlHandler(ExportHandlerBase):
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
             show_alert_labels = data.get('showAlertLabels', False)
-            auto_background = data.get('htmlAutoBackground', True)
-            dark_background = data.get('htmlDarkBackground', '#272b31')
+            html_theme = data.get('htmlTheme', 'system')
+            dark_background = data.get('htmlDarkBackground', '#111111')
             light_background = data.get('htmlLightBackground', '#ffffff')
 
             if not relative_path:
@@ -2024,7 +2048,7 @@ class ExportHtmlHandler(ExportHandlerBase):
             content = self.embed_images_as_base64(content, file_path.parent)
             html = self.markdown_to_html(
                 content, file_path.stem, math_support=True,
-                auto_background=auto_background,
+                theme=html_theme,
                 dark_background=dark_background,
                 light_background=light_background
             )

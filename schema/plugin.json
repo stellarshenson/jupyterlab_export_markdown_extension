@@ -35,21 +35,22 @@
       "type": "boolean",
       "default": false
     },
-    "htmlAutoBackground": {
-      "title": "HTML Auto Background",
-      "description": "Automatically detect light/dark theme preference in HTML exports using CSS prefers-color-scheme media query. When enabled, the exported HTML adapts to the viewer's system theme. When disabled, uses the configured light background color.",
-      "type": "boolean",
-      "default": true
+    "htmlTheme": {
+      "title": "HTML Theme",
+      "description": "Theme mode for HTML exports. 'system' auto-detects light/dark from the viewer's OS preference using CSS prefers-color-scheme. 'light' always uses the light background. 'dark' always uses the dark background.",
+      "type": "string",
+      "default": "system",
+      "enum": ["system", "light", "dark"]
     },
     "htmlDarkBackground": {
       "title": "HTML Dark Background",
-      "description": "Background color for dark theme in HTML exports (hex format). Only used when Auto Background is enabled.",
+      "description": "Background color for dark theme in HTML exports (hex format). Recommended: #000000 (black), #111111 (JupyterLab dark, default), #1e1e1e (VS Code dark), #272b31 (slate), #0d1117 (GitHub dark).",
       "type": "string",
-      "default": "#272b31"
+      "default": "#111111"
     },
     "htmlLightBackground": {
       "title": "HTML Light Background",
-      "description": "Background color for light theme in HTML exports (hex format). Used as the default background when Auto Background is disabled, or as the light theme color when enabled.",
+      "description": "Background color for light theme in HTML exports (hex format). Recommended: #ffffff (white, default), #f6f8fa (GitHub light), #fafafa (warm white), #f5f5f0 (cream).",
       "type": "string",
       "default": "#ffffff"
     }

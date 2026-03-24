@@ -293,8 +293,8 @@ async function exportMarkdown(
   svgDPI: number = 150,
   mathDPI: number = 200,
   showAlertLabels: boolean = false,
-  htmlAutoBackground: boolean = true,
-  htmlDarkBackground: string = '#272b31',
+  htmlTheme: string = 'system',
+  htmlDarkBackground: string = '#111111',
   htmlLightBackground: string = '#ffffff'
 ): Promise<void> {
   const blob = await requestBlobAPI(`export/${format}`, {
@@ -308,7 +308,7 @@ async function exportMarkdown(
       svgDPI,
       mathDPI,
       showAlertLabels,
-      htmlAutoBackground,
+      htmlTheme,
       htmlDarkBackground,
       htmlLightBackground
     })
@@ -345,8 +345,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
     let svgDPI = 150; // Default: server-side SVG to PNG conversion DPI
     let mathDPI = 200; // Default: math expression rendering DPI
     let showAlertLabels = false; // Default: hide alert type labels
-    let htmlAutoBackground = true; // Default: auto-detect light/dark theme
-    let htmlDarkBackground = '#272b31'; // Default: dark theme background
+    let htmlTheme = 'system'; // Default: auto-detect light/dark theme
+    let htmlDarkBackground = '#111111'; // Default: JupyterLab dark theme darkest gray
     let htmlLightBackground = '#ffffff'; // Default: light theme background
     if (settingRegistry) {
       try {
@@ -355,8 +355,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
         svgDPI = settings.get('svgDPI').composite as number;
         mathDPI = settings.get('mathDPI').composite as number;
         showAlertLabels = settings.get('showAlertLabels').composite as boolean;
-        htmlAutoBackground = settings.get('htmlAutoBackground')
-          .composite as boolean;
+        htmlTheme = settings.get('htmlTheme').composite as string;
         htmlDarkBackground = settings.get('htmlDarkBackground')
           .composite as string;
         htmlLightBackground = settings.get('htmlLightBackground')
@@ -370,8 +369,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
           mathDPI,
           'showAlertLabels:',
           showAlertLabels,
-          'htmlAutoBackground:',
-          htmlAutoBackground
+          'htmlTheme:',
+          htmlTheme
         );
 
         // Listen for settings changes
@@ -381,8 +380,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
           mathDPI = settings.get('mathDPI').composite as number;
           showAlertLabels = settings.get('showAlertLabels')
             .composite as boolean;
-          htmlAutoBackground = settings.get('htmlAutoBackground')
-            .composite as boolean;
+          htmlTheme = settings.get('htmlTheme').composite as string;
           htmlDarkBackground = settings.get('htmlDarkBackground')
             .composite as string;
           htmlLightBackground = settings.get('htmlLightBackground')
@@ -396,8 +394,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
             mathDPI,
             'showAlertLabels:',
             showAlertLabels,
-            'htmlAutoBackground:',
-            htmlAutoBackground
+            'htmlTheme:',
+            htmlTheme
           );
         });
       } catch (error) {
@@ -454,7 +452,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
               svgDPI,
               mathDPI,
               showAlertLabels,
-              htmlAutoBackground,
+              htmlTheme,
               htmlDarkBackground,
               htmlLightBackground
             );
