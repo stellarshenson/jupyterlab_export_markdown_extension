@@ -1060,6 +1060,14 @@ class ExportHandlerBase(APIHandler):
             use_light = theme == 'light'
             use_system = theme == 'system'
 
+            def adjust_color(hex_color: str, amount: int) -> str:
+                """Lighten (positive) or darken (negative) a hex color."""
+                hex_color = hex_color.lstrip('#')
+                r = max(0, min(255, int(hex_color[0:2], 16) + amount))
+                g = max(0, min(255, int(hex_color[2:4], 16) + amount))
+                b = max(0, min(255, int(hex_color[4:6], 16) + amount))
+                return f'#{r:02x}{g:02x}{b:02x}'
+
             # Determine base styles based on theme
             if use_dark:
                 # Dark theme as base (no media query)
@@ -1070,18 +1078,24 @@ class ExportHandlerBase(APIHandler):
                 border_color = '#30363d'
                 heading_color = '#e6edf3'
                 blockquote_color = '#8b949e'
-                th_bg = '#161b22'
+                th_bg = adjust_color(dark_background, 20)
+                tr_stripe = adjust_color(dark_background, 14)
+                tr_hover = adjust_color(dark_background, 22)
+                code_bg = adjust_color(dark_background, 20)
+                border_color = adjust_color(dark_background, 40)
                 active_pygments = pygments_dark_css
             else:
                 # Light theme as base (for both 'light' and 'system')
                 bg_color = light_background
                 text_color = '#1a1a1a'
                 link_color = '#0969da'
-                code_bg = '#f6f8fa'
-                border_color = '#d1d9e0'
+                code_bg = adjust_color(light_background, -6)
+                border_color = adjust_color(light_background, -46)
                 heading_color = '#1a1a1a'
                 blockquote_color = '#656d76'
-                th_bg = '#f6f8fa'
+                th_bg = adjust_color(light_background, -6)
+                tr_stripe = adjust_color(light_background, -6)
+                tr_hover = adjust_color(light_background, -14)
                 active_pygments = pygments_css
 
             style = f'''
@@ -1131,6 +1145,12 @@ class ExportHandlerBase(APIHandler):
             background: {th_bg};
             font-weight: 600;
         }}
+        tbody tr:nth-child(even) {{
+            background: {tr_stripe};
+        }}
+        tbody tr:hover {{
+            background: {tr_hover};
+        }}
         img {{
             max-width: 100%;
             height: auto;
@@ -1159,7 +1179,12 @@ class ExportHandlerBase(APIHandler):
         {active_pygments}'''
 
             # System theme: add dark overrides via media query
+            # Derive dark UI colors from dark_background
             if use_system:
+                dk_code = adjust_color(dark_background, 20)
+                dk_border = adjust_color(dark_background, 40)
+                dk_stripe = adjust_color(dark_background, 14)
+                dk_hover = adjust_color(dark_background, 22)
                 style += f'''
         @media (prefers-color-scheme: dark) {{
             body {{
@@ -1170,34 +1195,40 @@ class ExportHandlerBase(APIHandler):
                 color: #58a6ff;
             }}
             pre {{
-                background: #161b22;
-                border-color: #30363d;
+                background: {dk_code};
+                border-color: {dk_border};
             }}
             code {{
-                background: #161b22;
+                background: {dk_code};
             }}
             pre code {{
                 background: none;
             }}
             th, td {{
-                border-color: #30363d;
+                border-color: {dk_border};
             }}
             th {{
-                background: #161b22;
+                background: {dk_code};
                 color: #e6edf3;
             }}
+            tbody tr:nth-child(even) {{
+                background: {dk_stripe};
+            }}
+            tbody tr:hover {{
+                background: {dk_hover};
+            }}
             blockquote {{
-                border-left-color: #30363d;
+                border-left-color: {dk_border};
                 color: #8b949e;
             }}
             h1, h2, h3, h4, h5, h6 {{
                 color: #e6edf3;
             }}
             h1 {{
-                border-bottom-color: #30363d;
+                border-bottom-color: {dk_border};
             }}
             hr {{
-                border-top-color: #30363d;
+                border-top-color: {dk_border};
             }}
             img {{
                 opacity: 0.9;
