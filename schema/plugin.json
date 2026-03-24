@@ -39,7 +39,7 @@
       "title": "HTML Theme",
       "description": "Theme mode for HTML exports. 'system' auto-detects light/dark from the viewer's OS preference using CSS prefers-color-scheme. 'light' always uses the light background. 'dark' always uses the dark background.",
       "type": "string",
-      "default": "system",
+      "default": "light",
       "enum": ["system", "light", "dark"]
     },
     "htmlDarkBackground": {

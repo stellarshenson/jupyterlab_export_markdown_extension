@@ -293,7 +293,7 @@ async function exportMarkdown(
   svgDPI: number = 150,
   mathDPI: number = 200,
   showAlertLabels: boolean = false,
-  htmlTheme: string = 'system',
+  htmlTheme: string = 'light',
   htmlDarkBackground: string = '#111111',
   htmlLightBackground: string = '#ffffff'
 ): Promise<void> {
@@ -345,7 +345,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
     let svgDPI = 150; // Default: server-side SVG to PNG conversion DPI
     let mathDPI = 200; // Default: math expression rendering DPI
     let showAlertLabels = false; // Default: hide alert type labels
-    let htmlTheme = 'system'; // Default: auto-detect light/dark theme
+    let htmlTheme = 'light'; // Default: light theme
     let htmlDarkBackground = '#111111'; // Default: JupyterLab dark theme darkest gray
     let htmlLightBackground = '#ffffff'; // Default: light theme background
     if (settingRegistry) {

@@ -923,7 +923,7 @@ class ExportHandlerBase(APIHandler):
 
     def markdown_to_html(self, content: str, title: str = 'Exported Document',
                          compact: bool = False, math_support: bool = False,
-                         theme: str = 'system',
+                         theme: str = 'light',
                          dark_background: str = '#111111',
                          light_background: str = '#ffffff') -> str:
         """Convert markdown to standalone HTML.
@@ -1227,8 +1227,17 @@ class ExportHandlerBase(APIHandler):
       });
     </script>'''
 
+        # Force color-scheme on <html> element so embedded SVGs with
+        # @media (prefers-color-scheme) follow the chosen theme
+        if use_dark:
+            html_style = ' style="color-scheme: dark"'
+        elif use_light:
+            html_style = ' style="color-scheme: light"'
+        else:
+            html_style = ' style="color-scheme: light dark"'
+
         html = f'''<!DOCTYPE html>
-<html>
+<html{html_style}>
 <head>
     <meta charset="utf-8">
     <title>{title}</title>
@@ -2026,7 +2035,7 @@ class ExportHtmlHandler(ExportHandlerBase):
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
             show_alert_labels = data.get('showAlertLabels', False)
-            html_theme = data.get('htmlTheme', 'system')
+            html_theme = data.get('htmlTheme', 'light')
             dark_background = data.get('htmlDarkBackground', '#111111')
             light_background = data.get('htmlLightBackground', '#ffffff')
 
