@@ -630,6 +630,11 @@ class ExportHandlerBase(APIHandler):
 
         Pipeline: LaTeX -> MathML (latex2mathml) -> OMML (XSLT mml2omml.xsl)
         Returns an lxml Element with the oMath OMML structure.
+
+        Post-processes nary operators (sum, prod, int) whose <e/> element
+        is empty - moves all following siblings into <e> so Word renders
+        the summand/integrand inside the operator rather than showing
+        a dashed placeholder square.
         """
         import latex2mathml.converter
         from lxml import etree
@@ -641,7 +646,23 @@ class ExportHandlerBase(APIHandler):
         xslt = etree.parse(str(xsl_path))
         transform = etree.XSLT(xslt)
         omml = transform(tree)
-        return omml.getroot()
+        root = omml.getroot()
+
+        # Fix nary operators with empty <e/> by moving following siblings in
+        OMML_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+        for nary in root.iter(f'{{{OMML_NS}}}nary'):
+            e_elem = nary.find(f'{{{OMML_NS}}}e')
+            if e_elem is not None and len(e_elem) == 0 and (e_elem.text is None or not e_elem.text.strip()):
+                parent = nary.getparent()
+                if parent is not None:
+                    siblings = list(parent)
+                    nary_idx = siblings.index(nary)
+                    # Move all elements after nary into <e>
+                    for sibling in siblings[nary_idx + 1:]:
+                        parent.remove(sibling)
+                        e_elem.append(sibling)
+
+        return root
 
     def replace_math_with_markers(self, content: str):
         """Replace LaTeX math delimiters with text markers for DOCX post-processing.
