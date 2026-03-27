@@ -523,6 +523,61 @@ class ExportHandlerBase(APIHandler):
             html = html.replace('\u200b', '')
         return html
 
+    def style_html_alert_boxes(self, html: str, show_labels: bool = False) -> str:
+        """Replace alert markers in HTML with styled div elements.
+
+        Converts zero-width space markers into colored alert boxes with
+        left border and background shading matching the DOCX alert style.
+
+        HTML patterns from markdown conversion:
+        - show_labels=True:  <p><strong>\u200bNOTE\u200b:</strong> content</p>
+        - show_labels=False: <p>\u200bNOTE\u200bcontent</p>
+        """
+        for alert_type, colors in self.ALERT_COLORS.items():
+            marker = f'\u200b{alert_type}\u200b'
+            if marker not in html:
+                continue
+
+            border = f'#{colors["border"]}'
+            shading = f'#{colors["shading"]}'
+
+            if show_labels:
+                # Pattern: <p><strong>\u200bTYPE\u200b:</strong> content</p>
+                pattern = re.compile(
+                    r'<p><strong>' + re.escape(marker) + r':?</strong>\s*(.*?)</p>',
+                    re.DOTALL
+                )
+
+                def make_alert(m, _border=border, _shading=shading, _type=alert_type):
+                    content = m.group(1).strip()
+                    return (
+                        f'<div style="border-left:4px solid {_border};'
+                        f'background:{_shading};padding:12px 16px;'
+                        f'border-radius:4px;margin:1em 0">'
+                        f'<strong>{_type}:</strong> {content}</div>'
+                    )
+            else:
+                # Pattern: <p>\u200bTYPE\u200bcontent</p>
+                pattern = re.compile(
+                    r'<p>' + re.escape(marker) + r'(.*?)</p>',
+                    re.DOTALL
+                )
+
+                def make_alert(m, _border=border, _shading=shading):
+                    content = m.group(1).strip()
+                    return (
+                        f'<div style="border-left:4px solid {_border};'
+                        f'background:{_shading};padding:12px 16px;'
+                        f'border-radius:4px;margin:1em 0">'
+                        f'{content}</div>'
+                    )
+
+            html = pattern.sub(make_alert, html)
+
+        # Clean any remaining stray markers
+        html = html.replace('\u200b', '')
+        return html
+
     def render_math_to_png(self, latex: str, dpi: int = 200, display: bool = False) -> str:
         """Render a LaTeX math expression to a PNG base64 data URI.
 
@@ -2114,8 +2169,8 @@ class ExportHtmlHandler(ExportHandlerBase):
                 light_background=light_background
             )
 
-            # Strip zero-width space markers used for DOCX alert styling
-            html = self.clean_alert_markers_from_html(html, show_labels=show_alert_labels)
+            # Style GitHub alert boxes with colored borders and shading
+            html = self.style_html_alert_boxes(html, show_labels=show_alert_labels)
 
             self.set_header('Content-Type', 'text/html; charset=utf-8')
             self.set_header('Content-Disposition',
