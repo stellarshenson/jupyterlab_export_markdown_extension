@@ -1015,13 +1015,10 @@ class ExportHandlerBase(APIHandler):
         """
         import markdown
 
-        md = markdown.Markdown(extensions=[
-            'tables',
-            'fenced_code',
-            'codehilite',
-            'toc',
-            'nl2br'
-        ])
+        md = markdown.Markdown(
+            extensions=['tables', 'fenced_code', 'codehilite', 'toc', 'nl2br'],
+            tab_length=2  # Support 2-space nested lists (GitHub/CommonMark convention)
+        )
         body = md.convert(content)
 
         if compact:
