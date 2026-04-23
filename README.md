@@ -60,11 +60,11 @@ That's it. No really, that's actually it. We spent considerable effort making su
 
 ## Export Formats
 
-| Format | Library                | Notes                                                                    |
-| ------ | ---------------------- | ------------------------------------------------------------------------ |
-| PDF    | reportlab              | Unicode support, compact styling, math as PNG images                     |
-| DOCX   | python-docx + htmldocx | Native OMML math, smart image sizing, banded tables, alert boxes         |
-| HTML   | markdown + KaTeX       | Standalone with embedded images, client-side math rendering              |
+| Format | Library                | Notes                                                            |
+| ------ | ---------------------- | ---------------------------------------------------------------- |
+| PDF    | reportlab              | Unicode support, compact styling, math as PNG images             |
+| DOCX   | python-docx + htmldocx | Native OMML math, smart image sizing, banded tables, alert boxes |
+| HTML   | markdown + KaTeX       | Standalone with embedded images, client-side math rendering      |
 
 ## Settings
 
