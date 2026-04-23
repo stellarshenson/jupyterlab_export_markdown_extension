@@ -943,3 +943,107 @@ class TestImageDPINormalization:
         )
         assert response.code == 200
         assert response.body.startswith(b"%PDF-")
+
+
+TEST_MARKDOWN_WITH_ANCHORS = """# Anchor Links
+
+See footnote [<sup>A1</sup>](#A1) and [<sup>A2</sup>](#A2) below.
+
+External link: [Google](https://google.com).
+
+Inline arrow inside code: `←` and bare arrows → ← ↑ ↓.
+
+## References
+
+- <span id="A1">A1 first reference target</span>
+- <span id="A2">A2 second reference target</span>
+"""
+
+
+@pytest.fixture
+def test_anchor_markdown_file(jp_root_dir):
+    md_file = jp_root_dir / "test_anchors.md"
+    md_file.write_text(TEST_MARKDOWN_WITH_ANCHORS, encoding="utf-8")
+    return md_file
+
+
+class TestAnchorLinksAndArrowFonts:
+    """Validate anchor links become Word bookmarks and arrows escape Courier."""
+
+    async def test_docx_internal_hyperlinks_and_bookmarks(
+        self, jp_fetch, test_anchor_markdown_file
+    ):
+        import re
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_anchors.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            doc_xml = z.read("word/document.xml").decode("utf-8")
+            rels_xml = z.read("word/_rels/document.xml.rels").decode("utf-8")
+
+        assert 'w:anchor="A1"' in doc_xml, "anchor link A1 should be internal"
+        assert 'w:anchor="A2"' in doc_xml, "anchor link A2 should be internal"
+        assert 'w:name="A1"' in doc_xml, "bookmark A1 must exist"
+        assert 'w:name="A2"' in doc_xml, "bookmark A2 must exist"
+
+        assert 'Target="#A1"' not in rels_xml
+        assert 'Target="#A2"' not in rels_xml
+        assert re.search(r'Target="https://google\.com"', rels_xml), (
+            "external hyperlinks should still be preserved"
+        )
+
+        assert "⁣BM:" not in doc_xml, "bookmark sentinel must not leak"
+
+    async def test_docx_unicode_arrow_escapes_courier(
+        self, jp_fetch, test_anchor_markdown_file
+    ):
+        import re
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_anchors.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            doc_xml = z.read("word/document.xml").decode("utf-8")
+
+        arrows = ["←", "↑", "→", "↓"]
+        for arrow in arrows:
+            assert arrow in doc_xml, f"arrow {arrow!r} missing from DOCX"
+
+        courier_runs = re.findall(
+            r'<w:r>[^<]*<w:rPr>[^<]*<w:rFonts[^/]*Courier[^/]*/>.*?</w:r>',
+            doc_xml,
+            flags=re.DOTALL,
+        )
+        for run in courier_runs:
+            texts = re.findall(r"<w:t[^>]*>([^<]*)</w:t>", run)
+            for t in texts:
+                for arrow in arrows:
+                    assert arrow not in t, (
+                        f"arrow {arrow!r} remains in Courier run: {run}"
+                    )
+
+    async def test_pdf_with_anchor_links_succeeds(
+        self, jp_fetch, test_anchor_markdown_file
+    ):
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "test_anchors.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")

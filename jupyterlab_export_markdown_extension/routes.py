@@ -997,6 +997,132 @@ class ExportHandlerBase(APIHandler):
         for p in to_remove:
             p.getparent().remove(p)
 
+    # Unicode sentinels for bookmark markers injected into HTML.
+    # U+2063 (INVISIBLE SEPARATOR) is unlikely to appear in normal text and
+    # survives htmldocx as literal text that we can regex-match later.
+    _BOOKMARK_MARKER_RE = re.compile(r'⁣BM:([A-Za-z0-9_\-:.]+)⁣')
+    _SAFE_BOOKMARK_ID_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_\-:.]*$')
+
+    def inject_anchor_markers(self, html: str) -> str:
+        """Inject sentinel markers for every HTML element with an id attribute.
+
+        For ``<span id="D119">D119 ...</span>`` injects
+        ``<span id="D119">⁣BM:D119⁣D119 ...</span>``. The marker
+        survives htmldocx as plain text and is later converted into a Word
+        bookmark by apply_anchor_bookmarks().
+        """
+        def replace(match):
+            open_tag = match.group(0)
+            anchor_id = match.group(1)
+            if not self._SAFE_BOOKMARK_ID_RE.match(anchor_id):
+                return open_tag
+            return f'{open_tag}⁣BM:{anchor_id}⁣'
+
+        return re.sub(r'<[^>]*?\bid="([^"]+)"[^>]*?>', replace, html)
+
+    def apply_anchor_bookmarks(self, document):
+        """Convert bookmark markers and external hash hyperlinks into internal anchors.
+
+        Works in two passes on the finished DOCX tree:
+
+        1. Replaces each ``⁣BM:NAME⁣`` marker in a run's text with a
+           ``w:bookmarkStart`` / ``w:bookmarkEnd`` pair, preserving surrounding text.
+        2. Rewrites every ``<w:hyperlink r:id="...">`` that points to a hash-prefix
+           external relationship into ``<w:hyperlink w:anchor="NAME">`` and drops
+           the now-unused relationship. htmldocx always writes anchor links as
+           external, so this rescues them.
+        """
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+        import copy
+
+        body = document.element.body
+        bookmark_id = 0
+
+        for run_elem in list(body.iter(qn('w:r'))):
+            t_elem = run_elem.find(qn('w:t'))
+            if t_elem is None or not t_elem.text:
+                continue
+            text = t_elem.text
+            match = self._BOOKMARK_MARKER_RE.search(text)
+            if not match:
+                continue
+
+            anchor_name = match.group(1)
+            before = text[:match.start()]
+            after = text[match.end():]
+
+            parent = run_elem.getparent()
+            run_index = list(parent).index(run_elem)
+
+            t_elem.text = before
+
+            bm_start = OxmlElement('w:bookmarkStart')
+            bm_start.set(qn('w:id'), str(bookmark_id))
+            bm_start.set(qn('w:name'), anchor_name)
+            bm_end = OxmlElement('w:bookmarkEnd')
+            bm_end.set(qn('w:id'), str(bookmark_id))
+            bookmark_id += 1
+
+            parent.insert(run_index + 1, bm_start)
+            parent.insert(run_index + 2, bm_end)
+
+            if after:
+                after_run = copy.deepcopy(run_elem)
+                after_t = after_run.find(qn('w:t'))
+                if after_t is not None:
+                    after_t.text = after
+                parent.insert(run_index + 3, after_run)
+
+        HYPERLINK_RELTYPE = (
+            'http://schemas.openxmlformats.org/officeDocument/2006/'
+            'relationships/hyperlink'
+        )
+        rels = document.part.rels
+        anchor_rels = {
+            rel_id: rel.target_ref[1:]
+            for rel_id, rel in rels.items()
+            if rel.reltype == HYPERLINK_RELTYPE and rel.target_ref.startswith('#')
+        }
+        if not anchor_rels:
+            return
+
+        r_id_qn = qn('r:id')
+        anchor_qn = qn('w:anchor')
+        for hyperlink in body.iter(qn('w:hyperlink')):
+            ref = hyperlink.get(r_id_qn)
+            if ref in anchor_rels:
+                del hyperlink.attrib[r_id_qn]
+                hyperlink.set(anchor_qn, anchor_rels[ref])
+
+        for rel_id in anchor_rels:
+            del rels[rel_id]
+
+    def strip_monospace_from_unicode_runs(self, document):
+        """Drop monospace font overrides from runs containing non-ASCII characters.
+
+        htmldocx applies Courier font to every ``<code>``/``<pre>`` run, but
+        Courier does not contain unicode arrows (U+2190 etc.) and many symbol
+        glyphs. Stripping the rFonts override lets Word render these characters
+        in the body font (Cambria), which has full arrow coverage.
+        """
+        from docx.oxml.ns import qn
+        MONOSPACE_FONTS = {'Courier', 'Courier New', 'Consolas', 'Monaco'}
+        body = document.element.body
+        for run_elem in body.iter(qn('w:r')):
+            text = ''.join((t.text or '') for t in run_elem.findall(qn('w:t')))
+            if not text or text.isascii():
+                continue
+            rpr = run_elem.find(qn('w:rPr'))
+            if rpr is None:
+                continue
+            rfonts = rpr.find(qn('w:rFonts'))
+            if rfonts is None:
+                continue
+            if (rfonts.get(qn('w:ascii')) or '') in MONOSPACE_FONTS:
+                rpr.remove(rfonts)
+
+
     def markdown_to_html(self, content: str, title: str = 'Exported Document',
                          compact: bool = False, math_support: bool = False,
                          theme: str = 'light',
@@ -1901,6 +2027,8 @@ class ExportPdfHandler(ExportHandlerBase):
             body_match = re.search(r'<body>(.*?)</body>', html, re.DOTALL)
             body_html = body_match.group(1) if body_match else html
 
+            body_html = self.inject_anchor_markers(body_html)
+
             with tempfile.TemporaryDirectory() as temp_dir:
                 body_html = self.extract_data_uri_images(body_html, temp_dir,
                                                          convert_svg=True,
@@ -1916,6 +2044,9 @@ class ExportPdfHandler(ExportHandlerBase):
 
                 parser = HtmlToDocx()
                 parser.add_html_to_document(body_html, document)
+
+                self.apply_anchor_bookmarks(document)
+                self.strip_monospace_from_unicode_runs(document)
 
                 # Style GitHub alert boxes with colored borders and shading
                 self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
@@ -2021,6 +2152,10 @@ class ExportDocxHandler(ExportHandlerBase):
             body_match = re.search(r'<body>(.*?)</body>', html, re.DOTALL)
             body_html = body_match.group(1) if body_match else html
 
+            # Inject bookmark sentinels for every id="..." anchor so Word
+            # internal links (#anchor) resolve after htmldocx strips them.
+            body_html = self.inject_anchor_markers(body_html)
+
             # Use temp directory for images (htmldocx can't handle data URIs)
             with tempfile.TemporaryDirectory() as temp_dir:
                 body_html = self.extract_data_uri_images(body_html, temp_dir,
@@ -2041,6 +2176,14 @@ class ExportDocxHandler(ExportHandlerBase):
 
                 # Insert native OMML equations replacing markers
                 self.merge_inline_math_omml(document, inline_math, display_math)
+
+                # Convert anchor markers to bookmarks and rewrite hash-prefix
+                # hyperlinks from external to internal links.
+                self.apply_anchor_bookmarks(document)
+
+                # Drop Courier font from runs with unicode chars so arrows and
+                # symbols render in the body font instead of failing glyph lookup.
+                self.strip_monospace_from_unicode_runs(document)
 
                 # Style GitHub alert boxes with colored borders and shading
                 self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
