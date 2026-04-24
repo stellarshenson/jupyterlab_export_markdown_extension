@@ -109,6 +109,9 @@ class ExportHandlerBase(APIHandler):
         """
         Convert SVG data URI to PNG data URI using cairosvg.
 
+        Uses 3x supersampling with Lanczos downsampling for cleaner
+        anti-aliasing at the nominal viewBox pixel size.
+
         Args:
             svg_data_uri: SVG as base64 data URI
 
@@ -116,18 +119,27 @@ class ExportHandlerBase(APIHandler):
             PNG as base64 data URI
         """
         import cairosvg
+        from PIL import Image as _PILImage
+        import io as _io
 
-        # Extract base64 data from URI
         if svg_data_uri.startswith('data:image/svg+xml;base64,'):
             svg_base64 = svg_data_uri.replace('data:image/svg+xml;base64,', '')
             svg_bytes = base64.b64decode(svg_base64)
         else:
             raise ValueError('Invalid SVG data URI format')
 
-        # Convert SVG to PNG
-        png_bytes = cairosvg.svg2png(bytestring=svg_bytes)
+        SUPERSAMPLE = 3
+        hires_bytes = cairosvg.svg2png(bytestring=svg_bytes, scale=SUPERSAMPLE)
+        hires_img = _PILImage.open(_io.BytesIO(hires_bytes))
+        target_w = max(1, hires_img.width // SUPERSAMPLE)
+        target_h = max(1, hires_img.height // SUPERSAMPLE)
+        final_img = hires_img.resize(
+            (target_w, target_h), _PILImage.LANCZOS
+        )
+        buf = _io.BytesIO()
+        final_img.save(buf, 'PNG')
+        png_bytes = buf.getvalue()
 
-        # Encode as base64 data URI
         png_base64 = base64.b64encode(png_bytes).decode('utf-8')
         return f'data:image/png;base64,{png_base64}'
 
@@ -170,12 +182,29 @@ class ExportHandlerBase(APIHandler):
                 if convert_svg and img_type == 'svg+xml':
                     try:
                         import cairosvg
+                        from PIL import Image as _PILImage
+                        import io as _io
                         # cairosvg 'dpi' only affects SVGs with physical units (cm, mm, in)
                         # 'scale' controls actual pixel output for SVGs with px dimensions
-                        scale = dpi / 96  # 96 is the default SVG DPI
-                        img_bytes = cairosvg.svg2png(
+                        # Supersample at SUPERSAMPLE * target resolution and downscale with
+                        # Lanczos. This smooths stroke rasterization and small-font
+                        # anti-aliasing artefacts that appear when rendering SVGs
+                        # (especially text-heavy infographics) at their nominal viewBox
+                        # pixel size.
+                        SUPERSAMPLE = 3
+                        scale = (dpi / 96) * SUPERSAMPLE
+                        hires_bytes = cairosvg.svg2png(
                             bytestring=img_bytes, scale=scale, dpi=dpi
                         )
+                        hires_img = _PILImage.open(_io.BytesIO(hires_bytes))
+                        target_w = max(1, hires_img.width // SUPERSAMPLE)
+                        target_h = max(1, hires_img.height // SUPERSAMPLE)
+                        final_img = hires_img.resize(
+                            (target_w, target_h), _PILImage.LANCZOS
+                        )
+                        buf = _io.BytesIO()
+                        final_img.save(buf, 'PNG')
+                        img_bytes = buf.getvalue()
                         ext = '.png'
                     except ImportError:
                         # cairosvg not available - skip this image
