@@ -35,6 +35,133 @@ except ImportError:
     REPORTLAB_AVAILABLE = False
 
 
+class ChromiumUnavailableError(RuntimeError):
+    """Raised when Playwright cannot launch Chromium (binary or sys-libs missing).
+
+    Carries the original error message so the handler can return install
+    guidance to the frontend.
+    """
+
+
+class PlaywrightSvgRenderer:
+    """Render SVG bytes to PNG bytes via Playwright Chromium.
+
+    Reuses one browser process across multiple render() calls within an
+    `async with` block. Uses a real browser engine, so CSS classes,
+    @font-face, gradients, filters, and @media (prefers-color-scheme)
+    all behave the way they do in the user's browser.
+
+    The viewBox aspect ratio drives the screenshot dimensions; output
+    pixel width is `viewBox.width * dpi/96`. A 2x supersample plus
+    Lanczos downsample smooths anti-aliasing on text-heavy infographics.
+    """
+
+    def __init__(self, color_scheme: str = 'light'):
+        if color_scheme not in ('light', 'dark'):
+            color_scheme = 'light'
+        self.color_scheme = color_scheme
+        self._pw = None
+        self._browser = None
+
+    async def __aenter__(self):
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as e:
+            raise ChromiumUnavailableError(
+                f'playwright not installed: {e}'
+            ) from e
+        try:
+            self._pw = await async_playwright().start()
+            self._browser = await self._pw.chromium.launch(headless=True)
+        except Exception as e:
+            # Most common failure is missing system libs (libnspr4, libnss3
+            # etc.) or Chromium binary not downloaded yet.
+            await self._safe_stop()
+            raise ChromiumUnavailableError(str(e)) from e
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self._safe_stop()
+
+    async def _safe_stop(self):
+        try:
+            if self._browser is not None:
+                await self._browser.close()
+        except Exception:
+            pass
+        try:
+            if self._pw is not None:
+                await self._pw.stop()
+        except Exception:
+            pass
+        self._browser = None
+        self._pw = None
+
+    @staticmethod
+    def _viewbox_dims(svg_text: str) -> tuple[float, float]:
+        m = re.search(r'viewBox\s*=\s*"([^"]+)"', svg_text)
+        if m:
+            parts = re.split(r'[\s,]+', m.group(1).strip())
+            if len(parts) >= 4:
+                try:
+                    return float(parts[2]), float(parts[3])
+                except ValueError:
+                    pass
+        wm = re.search(r'\bwidth\s*=\s*"([0-9.]+)', svg_text)
+        hm = re.search(r'\bheight\s*=\s*"([0-9.]+)', svg_text)
+        return (
+            float(wm.group(1)) if wm else 800.0,
+            float(hm.group(1)) if hm else 600.0,
+        )
+
+    async def render(self, svg_bytes: bytes, *,
+                     dpi: int = 150, supersample: int = 2) -> bytes:
+        from PIL import Image as _PILImage
+
+        svg_text = svg_bytes.decode('utf-8', errors='replace')
+        vb_w, vb_h = self._viewbox_dims(svg_text)
+
+        nominal_w = max(1, int(vb_w * dpi / 96))
+        nominal_h = max(1, int(vb_h * dpi / 96))
+        target_w = max(1, nominal_w * supersample)
+        target_h = max(1, nominal_h * supersample)
+
+        html = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
+            "*{margin:0;padding:0}"
+            f"html,body{{background:transparent;overflow:hidden;"
+            f"width:{target_w}px;height:{target_h}px}}"
+            f"svg{{width:{target_w}px;height:{target_h}px;display:block}}"
+            "</style></head><body>"
+            f"{svg_text}"
+            "</body></html>"
+        )
+
+        ctx = await self._browser.new_context(
+            color_scheme=self.color_scheme,
+            viewport={'width': target_w, 'height': target_h},
+        )
+        try:
+            page = await ctx.new_page()
+            await page.set_content(html, wait_until='load')
+            png_bytes = await page.screenshot(
+                type='png',
+                omit_background=True,
+                clip={'x': 0, 'y': 0, 'width': target_w, 'height': target_h},
+            )
+        finally:
+            await ctx.close()
+
+        if supersample > 1:
+            img = _PILImage.open(io.BytesIO(png_bytes))
+            final = img.resize((nominal_w, nominal_h), _PILImage.LANCZOS)
+            buf = io.BytesIO()
+            final.save(buf, 'PNG')
+            png_bytes = buf.getvalue()
+
+        return png_bytes
+
+
 class ExportHandlerBase(APIHandler):
     """Base class for export handlers with common functionality."""
 
@@ -86,166 +213,122 @@ class ExportHandlerBase(APIHandler):
                 svg_data_uri = diagram['svg']
                 png_data_uri = diagram['png']
 
-                if use_png:
+                if use_png and png_data_uri:
                     # Prefer PNG from frontend (client-side Canvas conversion)
-                    if png_data_uri:
-                        return f'![Mermaid Diagram]({png_data_uri})'
-                    # Fallback to server-side conversion
-                    try:
-                        converted_png = self.svg_to_png(svg_data_uri)
-                        return f'![Mermaid Diagram]({converted_png})'
-                    except Exception:
-                        # Last resort: use SVG
-                        return f'![Mermaid Diagram]({svg_data_uri})'
-                else:
-                    return f'![Mermaid Diagram]({svg_data_uri})'
+                    return f'![Mermaid Diagram]({png_data_uri})'
+                # Otherwise emit SVG; extract_data_uri_images() converts to
+                # PNG server-side via Playwright when convert_svg=True.
+                return f'![Mermaid Diagram]({svg_data_uri})'
 
             # No pre-rendered diagram available, keep original
             return match.group(0)
 
         return re.sub(mermaid_pattern, replace_mermaid, content, flags=re.DOTALL)
 
-    def svg_to_png(self, svg_data_uri: str) -> str:
-        """
-        Convert SVG data URI to PNG data URI using cairosvg.
-
-        Uses 3x supersampling with Lanczos downsampling for cleaner
-        anti-aliasing at the nominal viewBox pixel size.
-
-        Args:
-            svg_data_uri: SVG as base64 data URI
-
-        Returns:
-            PNG as base64 data URI
-        """
-        import cairosvg
-        from PIL import Image as _PILImage
-        import io as _io
-
-        if svg_data_uri.startswith('data:image/svg+xml;base64,'):
-            svg_base64 = svg_data_uri.replace('data:image/svg+xml;base64,', '')
-            svg_bytes = base64.b64decode(svg_base64)
-        else:
-            raise ValueError('Invalid SVG data URI format')
-
-        SUPERSAMPLE = 3
-        hires_bytes = cairosvg.svg2png(bytestring=svg_bytes, scale=SUPERSAMPLE)
-        hires_img = _PILImage.open(_io.BytesIO(hires_bytes))
-        target_w = max(1, hires_img.width // SUPERSAMPLE)
-        target_h = max(1, hires_img.height // SUPERSAMPLE)
-        final_img = hires_img.resize(
-            (target_w, target_h), _PILImage.LANCZOS
-        )
-        buf = _io.BytesIO()
-        final_img.save(buf, 'PNG')
-        png_bytes = buf.getvalue()
-
-        png_base64 = base64.b64encode(png_bytes).decode('utf-8')
-        return f'data:image/png;base64,{png_base64}'
-
-    def extract_data_uri_images(self, html: str, temp_dir: str,
-                                convert_svg: bool = False,
-                                dpi: int = 150) -> str:
+    async def extract_data_uri_images(self, html: str, temp_dir: str,
+                                      convert_svg: bool = False,
+                                      dpi: int = 150,
+                                      color_scheme: str = 'light') -> str:
         """
         Extract data URI images to temp files for htmldocx compatibility.
+
+        When convert_svg=True, SVG images are rasterized to PNG via Playwright
+        Chromium so CSS (including @media (prefers-color-scheme)), web fonts,
+        filters and tspan layout match a real browser. One Chromium instance
+        is reused across all SVGs in this call.
+
+        Raises ChromiumUnavailableError if convert_svg=True and Chromium
+        cannot launch (binary or system libs missing).
 
         Args:
             html: HTML content with data URI images
             temp_dir: Directory to store temp image files
-            convert_svg: If True, convert SVG images to PNG (python-docx can't handle SVG)
-            dpi: DPI for SVG to PNG conversion
-
-        Returns:
-            HTML with data URIs replaced by file paths
+            convert_svg: If True, convert SVG images to PNG via Playwright
+            dpi: DPI for SVG-to-PNG conversion (drives output pixel width)
+            color_scheme: 'light' or 'dark'; passed to the browser context so
+                @media (prefers-color-scheme) rules in the SVG resolve correctly
         """
         img_pattern = r'<img\s+[^>]*src=["\']data:image/([^;]+);base64,([^"\']+)["\'][^>]*>'
+        ext_map = {
+            'png': '.png', 'jpeg': '.jpg', 'jpg': '.jpg',
+            'gif': '.gif', 'svg+xml': '.svg',
+        }
 
-        def replace_img(match):
-            img_type = match.group(1)
-            base64_data = match.group(2)
+        matches = list(re.finditer(img_pattern, html))
+        if not matches:
+            return html
 
-            # Determine file extension
-            ext_map = {
-                'png': '.png',
-                'jpeg': '.jpg',
-                'jpg': '.jpg',
-                'gif': '.gif',
-                'svg+xml': '.svg'
-            }
+        svg_indices = [
+            i for i, m in enumerate(matches)
+            if convert_svg and m.group(1) == 'svg+xml'
+        ]
+        rendered: dict[int, bytes | None] = {}
+
+        if svg_indices:
+            async with PlaywrightSvgRenderer(color_scheme=color_scheme) as renderer:
+                for i in svg_indices:
+                    try:
+                        svg_bytes = base64.b64decode(matches[i].group(2))
+                        rendered[i] = await renderer.render(svg_bytes, dpi=dpi)
+                    except ChromiumUnavailableError:
+                        # Bubble up; handler converts to a typed HTTP error
+                        # so the frontend can show its install-required popup.
+                        raise
+                    except Exception:
+                        rendered[i] = None  # render failed; keep original SVG
+
+        out: list[str] = []
+        last = 0
+        for i, m in enumerate(matches):
+            out.append(html[last:m.start()])
+            last = m.end()
+
+            img_type = m.group(1)
+            base64_data = m.group(2)
+            full_tag = m.group(0)
             ext = ext_map.get(img_type, '.png')
 
-            # Decode and save to temp file
             try:
-                img_bytes = base64.b64decode(base64_data)
+                if i in rendered:
+                    if rendered[i] is None:
+                        out.append(full_tag)
+                        continue
+                    img_bytes = rendered[i]
+                    ext = '.png'
+                else:
+                    img_bytes = base64.b64decode(base64_data)
 
-                # Convert SVG to PNG if requested (python-docx doesn't support SVG)
-                if convert_svg and img_type == 'svg+xml':
-                    try:
-                        import cairosvg
-                        from PIL import Image as _PILImage
-                        import io as _io
-                        # cairosvg 'dpi' only affects SVGs with physical units (cm, mm, in)
-                        # 'scale' controls actual pixel output for SVGs with px dimensions
-                        # Supersample at SUPERSAMPLE * target resolution and downscale with
-                        # Lanczos. This smooths stroke rasterization and small-font
-                        # anti-aliasing artefacts that appear when rendering SVGs
-                        # (especially text-heavy infographics) at their nominal viewBox
-                        # pixel size.
-                        SUPERSAMPLE = 3
-                        scale = (dpi / 96) * SUPERSAMPLE
-                        hires_bytes = cairosvg.svg2png(
-                            bytestring=img_bytes, scale=scale, dpi=dpi
-                        )
-                        hires_img = _PILImage.open(_io.BytesIO(hires_bytes))
-                        target_w = max(1, hires_img.width // SUPERSAMPLE)
-                        target_h = max(1, hires_img.height // SUPERSAMPLE)
-                        final_img = hires_img.resize(
-                            (target_w, target_h), _PILImage.LANCZOS
-                        )
-                        buf = _io.BytesIO()
-                        final_img.save(buf, 'PNG')
-                        img_bytes = buf.getvalue()
-                        ext = '.png'
-                    except ImportError:
-                        # cairosvg not available - skip this image
-                        return match.group(0)
-
-                # Create unique filename
                 import hashlib
                 hash_id = hashlib.md5(img_bytes).hexdigest()[:8]
-                filename = f'img_{hash_id}{ext}'
-                filepath = os.path.join(temp_dir, filename)
-
+                filepath = os.path.join(temp_dir, f'img_{hash_id}{ext}')
                 with open(filepath, 'wb') as f:
                     f.write(img_bytes)
 
-                # Normalize DPI to 96 for consistent sizing in DOCX
-                # JPEG/PNG files have embedded DPI metadata that python-docx
-                # uses to calculate "native size". Real-world images have
-                # wildly varying DPI (72, 96, 220, 1519) causing identical
-                # pixel-dimension images to render at completely different
-                # sizes. Normalizing to 96 DPI makes sizing pixel-based.
+                # Normalize DPI to 96 for consistent sizing in DOCX.
+                # Embedded DPI metadata in JPEG/PNG files drives python-docx's
+                # native-size computation; without normalization the same pixel
+                # dimensions render at wildly different sizes.
                 if ext in ('.jpg', '.jpeg', '.png'):
                     try:
                         from PIL import Image
                         img = Image.open(filepath)
                         img.save(filepath, dpi=(96, 96))
                     except Exception:
-                        pass  # If normalization fails, use original file
+                        pass
 
-                # Preserve other attributes (alt, style, width, height) from original tag
-                full_tag = match.group(0)
                 other_attrs = re.findall(
                     r'((?:alt|style|width|height)=["\'][^"\']*["\'])', full_tag
                 )
                 attrs_str = ' '.join(other_attrs)
                 if attrs_str:
-                    return f'<img src="{filepath}" {attrs_str}>'
-                return f'<img src="{filepath}">'
+                    out.append(f'<img src="{filepath}" {attrs_str}>')
+                else:
+                    out.append(f'<img src="{filepath}">')
             except Exception:
-                return match.group(0)
+                out.append(full_tag)
 
-        return re.sub(img_pattern, replace_img, html)
+        out.append(html[last:])
+        return ''.join(out)
 
     def embed_images_as_base64(self, content: str, markdown_dir: Path) -> str:
         """
@@ -2024,6 +2107,8 @@ class ExportPdfHandler(ExportHandlerBase):
             svg_dpi = data.get('svgDPI', 150)
             show_alert_labels = data.get('showAlertLabels', False)
             math_dpi = data.get('mathDPI', 200)
+            html_theme = data.get('htmlTheme', 'light')
+            svg_color_scheme = 'dark' if html_theme == 'dark' else 'light'
 
             if not relative_path:
                 self.set_status(400)
@@ -2059,9 +2144,12 @@ class ExportPdfHandler(ExportHandlerBase):
             body_html = self.inject_anchor_markers(body_html)
 
             with tempfile.TemporaryDirectory() as temp_dir:
-                body_html = self.extract_data_uri_images(body_html, temp_dir,
-                                                         convert_svg=True,
-                                                         dpi=svg_dpi)
+                body_html = await self.extract_data_uri_images(
+                    body_html, temp_dir,
+                    convert_svg=True,
+                    dpi=svg_dpi,
+                    color_scheme=svg_color_scheme,
+                )
 
                 document = Document()
 
@@ -2128,6 +2216,16 @@ class ExportPdfHandler(ExportHandlerBase):
                           f'attachment; filename="{file_path.stem}.pdf"')
             self.finish(pdf_content)
 
+        except ChromiumUnavailableError as e:
+            self.set_status(503)
+            self.finish(json.dumps({
+                'error': str(e),
+                'errorCode': 'CHROMIUM_UNAVAILABLE',
+                'message': (
+                    'Chromium is required to render embedded SVG images. '
+                    'Run: jupyterlab-export-markdown-extension install'
+                ),
+            }))
         except ImportError as e:
             self.set_status(500)
             self.finish(json.dumps({
@@ -2149,6 +2247,8 @@ class ExportDocxHandler(ExportHandlerBase):
             mermaid_diagrams = data.get('mermaidDiagrams', [])
             svg_dpi = data.get('svgDPI', 150)
             show_alert_labels = data.get('showAlertLabels', False)
+            html_theme = data.get('htmlTheme', 'light')
+            svg_color_scheme = 'dark' if html_theme == 'dark' else 'light'
 
             if not relative_path:
                 self.set_status(400)
@@ -2187,9 +2287,12 @@ class ExportDocxHandler(ExportHandlerBase):
 
             # Use temp directory for images (htmldocx can't handle data URIs)
             with tempfile.TemporaryDirectory() as temp_dir:
-                body_html = self.extract_data_uri_images(body_html, temp_dir,
-                                                         convert_svg=True,
-                                                         dpi=svg_dpi)
+                body_html = await self.extract_data_uri_images(
+                    body_html, temp_dir,
+                    convert_svg=True,
+                    dpi=svg_dpi,
+                    color_scheme=svg_color_scheme,
+                )
 
                 document = Document()
 
@@ -2291,6 +2394,16 @@ class ExportDocxHandler(ExportHandlerBase):
                           f'attachment; filename="{file_path.stem}.docx"')
             self.finish(docx_content)
 
+        except ChromiumUnavailableError as e:
+            self.set_status(503)
+            self.finish(json.dumps({
+                'error': str(e),
+                'errorCode': 'CHROMIUM_UNAVAILABLE',
+                'message': (
+                    'Chromium is required to render embedded SVG images. '
+                    'Run: jupyterlab-export-markdown-extension install'
+                ),
+            }))
         except ImportError as e:
             self.set_status(500)
             self.finish(json.dumps({

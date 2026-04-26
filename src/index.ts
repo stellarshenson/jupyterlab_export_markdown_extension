@@ -461,10 +461,21 @@ const plugin: JupyterFrontEndPlugin<void> = {
               `Failed to export to ${format.toUpperCase()}:`,
               error
             );
-            showErrorMessage(
-              `Export to ${format.toUpperCase()} Failed`,
-              error instanceof Error ? error.message : String(error)
-            );
+            const errorCode = (error as any)?.errorCode;
+            if (errorCode === 'CHROMIUM_UNAVAILABLE') {
+              showErrorMessage(
+                'Chromium runtime required',
+                'Server-side SVG rendering needs Playwright Chromium, which is not installed or cannot launch on the server.\n\n' +
+                  'Run this once on the server:\n\n' +
+                  '    jupyterlab-export-markdown-extension install\n\n' +
+                  'Then retry the export.'
+              );
+            } else {
+              showErrorMessage(
+                `Export to ${format.toUpperCase()} Failed`,
+                error instanceof Error ? error.message : String(error)
+              );
+            }
           } finally {
             dialog.dispose();
           }

@@ -26,11 +26,15 @@ dependencies = [
     "markdown>=3.4",
     "python-docx>=1.0",
     "htmldocx>=0.0.6",
-    "cairosvg>=2.7",
+    "playwright>=1.40",
+    "Pillow>=9.0",
     "reportlab>=4.0",
     "latex2mathml>=3.0"
 ]
 dynamic = ["version", "description", "authors", "urls", "keywords"]
+
+[project.scripts]
+jupyterlab-export-markdown-extension = "jupyterlab_export_markdown_extension.cli:main"
 
 [project.optional-dependencies]
 dev = [
