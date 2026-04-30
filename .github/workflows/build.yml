@@ -42,6 +42,11 @@ jobs:
         set -eux
         python -m pip install .[test]
 
+        # Server-side SVG-to-PNG conversion uses Playwright Chromium.
+        # `--with-deps` runs `apt-get install` for the system libs Chromium
+        # needs (libnss3, libnspr4, libgbm1, ...) using passwordless sudo.
+        python -m playwright install --with-deps chromium
+
         pytest -vv -r ap --cov jupyterlab_export_markdown_extension
         jupyter server extension list
         jupyter server extension list 2>&1 | grep -ie "jupyterlab_export_markdown_extension.*OK"

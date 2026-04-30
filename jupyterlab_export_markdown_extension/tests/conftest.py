@@ -3,11 +3,6 @@
 import os
 import pathlib
 
-import pytest
-
-pytest_plugins = ("pytest_jupyter.jupyter_server",)
-
-
 # pytest-jupyter (via jp_root_dir) sets HOME to a temp directory for the
 # duration of each test. Playwright resolves the Chromium binary as
 # `~/.cache/ms-playwright/...`, so the temp HOME hides the binary that's
