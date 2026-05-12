@@ -290,7 +290,7 @@ async function exportMarkdown(
   path: string,
   format: ExportFormat,
   mermaidDiagrams: IMermaidDiagram[],
-  svgDPI: number = 150,
+  svgPixelWidth: number = 2048,
   mathDPI: number = 200,
   showAlertLabels: boolean = false,
   htmlTheme: string = 'light',
@@ -305,7 +305,7 @@ async function exportMarkdown(
     body: JSON.stringify({
       path,
       mermaidDiagrams,
-      svgDPI,
+      svgPixelWidth,
       mathDPI,
       showAlertLabels,
       htmlTheme,
@@ -342,7 +342,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
 
     // Load settings
     let diagramDPI = 150; // Default: browser-side mermaid capture DPI
-    let svgDPI = 150; // Default: server-side SVG to PNG conversion DPI
+    let svgPixelWidth = 2048; // Default: server-side SVG to PNG target pixel width (2K)
     let mathDPI = 200; // Default: math expression rendering DPI
     let showAlertLabels = false; // Default: hide alert type labels
     let htmlTheme = 'light'; // Default: light theme
@@ -352,7 +352,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
       try {
         const settings = await settingRegistry.load(plugin.id);
         diagramDPI = settings.get('diagramDPI').composite as number;
-        svgDPI = settings.get('svgDPI').composite as number;
+        svgPixelWidth = settings.get('svgPixelWidth').composite as number;
         mathDPI = settings.get('mathDPI').composite as number;
         showAlertLabels = settings.get('showAlertLabels').composite as boolean;
         htmlTheme = settings.get('htmlTheme').composite as string;
@@ -363,8 +363,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
         console.log(
           'Export Markdown: Loaded settings - diagramDPI:',
           diagramDPI,
-          'svgDPI:',
-          svgDPI,
+          'svgPixelWidth:',
+          svgPixelWidth,
           'mathDPI:',
           mathDPI,
           'showAlertLabels:',
@@ -376,7 +376,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
         // Listen for settings changes
         settings.changed.connect(() => {
           diagramDPI = settings.get('diagramDPI').composite as number;
-          svgDPI = settings.get('svgDPI').composite as number;
+          svgPixelWidth = settings.get('svgPixelWidth').composite as number;
           mathDPI = settings.get('mathDPI').composite as number;
           showAlertLabels = settings.get('showAlertLabels')
             .composite as boolean;
@@ -388,8 +388,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
           console.log(
             'Export Markdown: Settings changed - diagramDPI:',
             diagramDPI,
-            'svgDPI:',
-            svgDPI,
+            'svgPixelWidth:',
+            svgPixelWidth,
             'mathDPI:',
             mathDPI,
             'showAlertLabels:',
@@ -449,7 +449,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
               path,
               format,
               mermaidDiagrams,
-              svgDPI,
+              svgPixelWidth,
               mathDPI,
               showAlertLabels,
               htmlTheme,

@@ -650,13 +650,13 @@ class TestSVGConversion:
         assert response.code == 200
         assert response.body.startswith(b"%PDF-")
 
-    async def test_svg_dpi_parameter(self, jp_fetch, test_svg_markdown_file):
-        """Test svgDPI parameter is accepted by the export endpoint."""
+    async def test_svg_pixel_width_parameter(self, jp_fetch, test_svg_markdown_file):
+        """Test svgPixelWidth parameter is accepted by the export endpoint."""
         response = await jp_fetch(
             "jupyterlab-export-markdown-extension",
             "export/docx",
             method="POST",
-            body=json.dumps({"path": "test_svg.md", "svgDPI": 300}),
+            body=json.dumps({"path": "test_svg.md", "svgPixelWidth": 1280}),
             raise_error=False,
         )
         assert response.code == 200

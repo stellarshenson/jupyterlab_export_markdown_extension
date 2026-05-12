@@ -51,9 +51,10 @@ class PlaywrightSvgRenderer:
     @font-face, gradients, filters, and @media (prefers-color-scheme)
     all behave the way they do in the user's browser.
 
-    The viewBox aspect ratio drives the screenshot dimensions; output
-    pixel width is `viewBox.width * dpi/96`. A 2x supersample plus
-    Lanczos downsample smooths anti-aliasing on text-heavy infographics.
+    The output PNG is `width` pixels wide; height follows the SVG's
+    viewBox aspect ratio. Chromium anti-aliases natively, so no
+    supersampling is needed - it renders straight to the target size.
+    Pass supersample > 1 only if a specific SVG needs extra smoothing.
     """
 
     def __init__(self, color_scheme: str = 'light'):
@@ -115,14 +116,12 @@ class PlaywrightSvgRenderer:
         )
 
     async def render(self, svg_bytes: bytes, *,
-                     dpi: int = 150, supersample: int = 2) -> bytes:
-        from PIL import Image as _PILImage
-
+                     width: int = 2048, supersample: int = 1) -> bytes:
         svg_text = svg_bytes.decode('utf-8', errors='replace')
         vb_w, vb_h = self._viewbox_dims(svg_text)
 
-        nominal_w = max(1, int(vb_w * dpi / 96))
-        nominal_h = max(1, int(vb_h * dpi / 96))
+        nominal_w = max(1, int(width))
+        nominal_h = max(1, round(vb_h * nominal_w / vb_w))
         target_w = max(1, nominal_w * supersample)
         target_h = max(1, nominal_h * supersample)
 
@@ -153,6 +152,7 @@ class PlaywrightSvgRenderer:
             await ctx.close()
 
         if supersample > 1:
+            from PIL import Image as _PILImage
             img = _PILImage.open(io.BytesIO(png_bytes))
             final = img.resize((nominal_w, nominal_h), _PILImage.LANCZOS)
             buf = io.BytesIO()
@@ -227,7 +227,7 @@ class ExportHandlerBase(APIHandler):
 
     async def extract_data_uri_images(self, html: str, temp_dir: str,
                                       convert_svg: bool = False,
-                                      dpi: int = 150,
+                                      svg_pixel_width: int = 2048,
                                       color_scheme: str = 'light') -> str:
         """
         Extract data URI images to temp files for htmldocx compatibility.
@@ -244,7 +244,8 @@ class ExportHandlerBase(APIHandler):
             html: HTML content with data URI images
             temp_dir: Directory to store temp image files
             convert_svg: If True, convert SVG images to PNG via Playwright
-            dpi: DPI for SVG-to-PNG conversion (drives output pixel width)
+            svg_pixel_width: Target pixel width for each rasterized SVG;
+                height follows the SVG's viewBox aspect ratio
             color_scheme: 'light' or 'dark'; passed to the browser context so
                 @media (prefers-color-scheme) rules in the SVG resolve correctly
         """
@@ -269,7 +270,9 @@ class ExportHandlerBase(APIHandler):
                 for i in svg_indices:
                     try:
                         svg_bytes = base64.b64decode(matches[i].group(2))
-                        rendered[i] = await renderer.render(svg_bytes, dpi=dpi)
+                        rendered[i] = await renderer.render(
+                            svg_bytes, width=svg_pixel_width
+                        )
                     except ChromiumUnavailableError:
                         # Bubble up; handler converts to a typed HTTP error
                         # so the frontend can show its install-required popup.
@@ -2104,7 +2107,7 @@ class ExportPdfHandler(ExportHandlerBase):
             data = json.loads(self.request.body)
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
-            svg_dpi = data.get('svgDPI', 150)
+            svg_pixel_width = data.get('svgPixelWidth', 2048)
             show_alert_labels = data.get('showAlertLabels', False)
             math_dpi = data.get('mathDPI', 200)
             html_theme = data.get('htmlTheme', 'light')
@@ -2147,7 +2150,7 @@ class ExportPdfHandler(ExportHandlerBase):
                 body_html = await self.extract_data_uri_images(
                     body_html, temp_dir,
                     convert_svg=True,
-                    dpi=svg_dpi,
+                    svg_pixel_width=svg_pixel_width,
                     color_scheme=svg_color_scheme,
                 )
 
@@ -2245,7 +2248,7 @@ class ExportDocxHandler(ExportHandlerBase):
             data = json.loads(self.request.body)
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
-            svg_dpi = data.get('svgDPI', 150)
+            svg_pixel_width = data.get('svgPixelWidth', 2048)
             show_alert_labels = data.get('showAlertLabels', False)
             html_theme = data.get('htmlTheme', 'light')
             svg_color_scheme = 'dark' if html_theme == 'dark' else 'light'
@@ -2290,7 +2293,7 @@ class ExportDocxHandler(ExportHandlerBase):
                 body_html = await self.extract_data_uri_images(
                     body_html, temp_dir,
                     convert_svg=True,
-                    dpi=svg_dpi,
+                    svg_pixel_width=svg_pixel_width,
                     color_scheme=svg_color_scheme,
                 )
 

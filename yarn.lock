@@ -9243,11 +9243,11 @@ __metadata:
   linkType: hard
 
 "semver@npm:^7.3.5":
-  version: 7.7.4
-  resolution: "semver@npm:7.7.4"
+  version: 7.8.0
+  resolution: "semver@npm:7.8.0"
   bin:
     semver: bin/semver.js
-  checksum: 9b4a6a58e98b9723fafcafa393c9d4e8edefaa60b8dfbe39e30892a3604cf1f45f52df9cfb1ae1a22b44c8b3d57fec8a9bb7b3e1645431587cb272399ede152e
+  checksum: 68e38bc26ed1191d7c78d2b711bdffc2f8b1d05a1caadda41a1d7e1a9d32e1da5ae5b645de5c5f2b27bde830d7e9c1cbeeafcb8fda091830411df7d40be405b1
   languageName: node
   linkType: hard
 
@@ -9758,15 +9758,15 @@ __metadata:
   linkType: hard
 
 "tar@npm:^7.5.4":
-  version: 7.5.13
-  resolution: "tar@npm:7.5.13"
+  version: 7.5.15
+  resolution: "tar@npm:7.5.15"
   dependencies:
     "@isaacs/fs-minipass": ^4.0.0
     chownr: ^3.0.0
     minipass: ^7.1.2
     minizlib: ^3.1.0
     yallist: ^5.0.0
-  checksum: adcc2a9179dab1b36ecb26575e698d2df8491a1df2cc83e2a0fdd8eaefd076da60dd2e20383a37760b5790bee34e9291aa2b2a9b3deef37ff03c1046219e5df7
+  checksum: b00ede0737f262691b18bd60aebdd15663c7cdabd40adce64dde0b69f65b7afb91cf31a4cae3bc184e2358aa14371fb0b56d6f7c0c0cc8b0238df1242c0e07ca
   languageName: node
   linkType: hard
 
