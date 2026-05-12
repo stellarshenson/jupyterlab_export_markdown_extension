@@ -116,7 +116,7 @@ class PlaywrightSvgRenderer:
         )
 
     async def render(self, svg_bytes: bytes, *,
-                     width: int = 2048, supersample: int = 1) -> bytes:
+                     width: int = 1920, supersample: int = 1) -> bytes:
         svg_text = svg_bytes.decode('utf-8', errors='replace')
         vb_w, vb_h = self._viewbox_dims(svg_text)
 
@@ -227,7 +227,7 @@ class ExportHandlerBase(APIHandler):
 
     async def extract_data_uri_images(self, html: str, temp_dir: str,
                                       convert_svg: bool = False,
-                                      svg_pixel_width: int = 2048,
+                                      svg_pixel_width: int = 1920,
                                       color_scheme: str = 'light') -> str:
         """
         Extract data URI images to temp files for htmldocx compatibility.
@@ -2107,7 +2107,7 @@ class ExportPdfHandler(ExportHandlerBase):
             data = json.loads(self.request.body)
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
-            svg_pixel_width = data.get('svgPixelWidth', 2048)
+            svg_pixel_width = data.get("svgPixelWidth", 1920)
             show_alert_labels = data.get('showAlertLabels', False)
             math_dpi = data.get('mathDPI', 200)
             html_theme = data.get('htmlTheme', 'light')
@@ -2248,7 +2248,7 @@ class ExportDocxHandler(ExportHandlerBase):
             data = json.loads(self.request.body)
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
-            svg_pixel_width = data.get('svgPixelWidth', 2048)
+            svg_pixel_width = data.get("svgPixelWidth", 1920)
             show_alert_labels = data.get('showAlertLabels', False)
             html_theme = data.get('htmlTheme', 'light')
             svg_color_scheme = 'dark' if html_theme == 'dark' else 'light'

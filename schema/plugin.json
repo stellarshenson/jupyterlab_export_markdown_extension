@@ -15,9 +15,9 @@
     },
     "svgPixelWidth": {
       "title": "SVG Export Pixel Width",
-      "description": "Target pixel width for server-side SVG to PNG conversion in DOCX and PDF exports. Applies to all SVG images embedded in markdown; height is derived from the SVG's aspect ratio. The image is rendered at 2x this width and downsampled for clean anti-aliasing. Standard values: 1280 (HD), 2048 (2K, default), 3840 (4K).",
+      "description": "Target pixel width for server-side SVG to PNG conversion in DOCX and PDF exports. Applies to all SVG images embedded in markdown; height is derived from the SVG's aspect ratio. Standard values: 1280 (HD), 1920 (Full HD, default), 2560 (QHD), 3840 (4K).",
       "type": "number",
-      "default": 2048,
+      "default": 1920,
       "minimum": 400,
       "maximum": 4096
     },

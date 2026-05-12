@@ -290,7 +290,7 @@ async function exportMarkdown(
   path: string,
   format: ExportFormat,
   mermaidDiagrams: IMermaidDiagram[],
-  svgPixelWidth: number = 2048,
+  svgPixelWidth: number = 1920,
   mathDPI: number = 200,
   showAlertLabels: boolean = false,
   htmlTheme: string = 'light',
@@ -342,7 +342,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
 
     // Load settings
     let diagramDPI = 150; // Default: browser-side mermaid capture DPI
-    let svgPixelWidth = 2048; // Default: server-side SVG to PNG target pixel width (2K)
+    let svgPixelWidth = 1920; // Default: server-side SVG to PNG target pixel width (Full HD)
     let mathDPI = 200; // Default: math expression rendering DPI
     let showAlertLabels = false; // Default: hide alert type labels
     let htmlTheme = 'light'; // Default: light theme
