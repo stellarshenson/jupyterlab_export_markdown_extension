@@ -5,29 +5,21 @@
   "jupyter.lab.setting-icon-label": "Export Markdown",
   "type": "object",
   "properties": {
-    "diagramDPI": {
-      "title": "Diagram DPI",
-      "description": "Resolution for Mermaid diagram images captured from the browser (dots per inch). Uses calibrated scaling matching jupyterlab_mmd_to_png_extension. Standard values: 150 (standard), 300 (high quality print).",
-      "type": "number",
-      "default": 150,
-      "minimum": 72,
-      "maximum": 600
-    },
     "svgPixelWidth": {
       "title": "SVG Export Pixel Width",
-      "description": "Target pixel width for server-side SVG to PNG conversion in DOCX and PDF exports. Applies to all SVG images embedded in markdown; height is derived from the SVG's aspect ratio. Standard values: 1280 (HD), 1920 (Full HD, default), 2560 (QHD), 3840 (4K).",
+      "description": "Target pixel width for server-side SVG to PNG conversion in DOCX and PDF exports. Applies to all SVG images and Mermaid diagrams embedded in markdown; height is derived from the source aspect ratio. Standard values: 1280 (HD), 1920 (Full HD, default), 2560 (QHD), 3840 (4K).",
       "type": "number",
       "default": 1920,
       "minimum": 400,
       "maximum": 4096
     },
-    "mathDPI": {
-      "title": "Math DPI",
-      "description": "Resolution for LaTeX math expression images in PDF exports (dots per inch). DOCX uses native OMML equations (no images). HTML uses KaTeX client-side rendering. Standard values: 150 (standard), 200 (default), 300 (high quality print).",
+    "mathPixelWidth": {
+      "title": "Math Export Pixel Width (PDF only)",
+      "description": "Target pixel width for LaTeX math expression images in PDF exports only. DOCX uses native OMML equations and HTML uses KaTeX, neither of which is affected by this setting. Larger values give crisper equations at the cost of file size. Standard values: 600 (compact), 800 (default), 1200 (high quality print).",
       "type": "number",
-      "default": 200,
-      "minimum": 96,
-      "maximum": 600
+      "default": 800,
+      "minimum": 200,
+      "maximum": 3000
     },
     "showAlertLabels": {
       "title": "Show Alert Labels",

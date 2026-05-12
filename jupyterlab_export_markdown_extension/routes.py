@@ -693,18 +693,22 @@ class ExportHandlerBase(APIHandler):
         html = html.replace('\u200b', '')
         return html
 
-    def render_math_to_png(self, latex: str, dpi: int = 200, display: bool = False) -> str:
+    def render_math_to_png(self, latex: str, width: int = 800, display: bool = False) -> str:
         """Render a LaTeX math expression to a PNG base64 data URI.
 
-        Uses matplotlib.mathtext to render LaTeX to PNG with transparent background.
+        Uses matplotlib.mathtext to render LaTeX to PNG with a transparent
+        background, scaled so the result is approximately `width` pixels
+        wide. The PNG's DPI metadata is then set so reportlab places it at
+        the right physical size in the PDF (12pt tall inline, 16pt display).
 
         Args:
             latex: LaTeX math expression (without delimiters)
-            dpi: Resolution in dots per inch
+            width: Target pixel width for the rendered image
             display: If True, use larger font size for display math
         """
         from matplotlib.mathtext import math_to_image
         from matplotlib.font_manager import FontProperties
+        from PIL import Image as PILImage
 
         fontsize = 16 if display else 12
         prop = FontProperties(size=fontsize)
@@ -712,14 +716,22 @@ class ExportHandlerBase(APIHandler):
         # matplotlib mathtext requires $ delimiters
         tex = f'${latex.strip()}$'
 
+        # Probe render at a reference DPI to learn the equation's natural width,
+        # then re-render at a DPI that lands close to the requested pixel width
+        # (clamped so tiny inline equations don't get absurd DPIs).
+        ref_dpi = 200
+        probe = io.BytesIO()
+        math_to_image(tex, probe, dpi=ref_dpi, format='png', prop=prop)
+        probe.seek(0)
+        probe_w = max(1, PILImage.open(probe).width)
+        render_dpi = ref_dpi * width / probe_w
+        render_dpi = max(72.0, min(1200.0, render_dpi))
+
         buf = io.BytesIO()
-        math_to_image(tex, buf, dpi=dpi, format='png', prop=prop)
+        math_to_image(tex, buf, dpi=render_dpi, format='png', prop=prop)
         buf.seek(0)
 
-        # Fix DPI metadata so python-docx sizes the image correctly.
-        # Calculate the DPI that makes the PNG display at the target
-        # physical height (fontsize in points).
-        from PIL import Image as PILImage
+        # Fix DPI metadata so reportlab sizes the image at fontsize points tall.
         img = PILImage.open(buf)
         target_height_inches = fontsize / 72  # points to inches
         effective_dpi = img.height / target_height_inches
@@ -730,8 +742,8 @@ class ExportHandlerBase(APIHandler):
         b64 = base64.b64encode(corrected_buf.read()).decode('ascii')
         return f'data:image/png;base64,{b64}'
 
-    def replace_math_with_images(self, content: str, dpi: int = 200) -> str:
-        """Replace LaTeX math delimiters with rendered PNG images.
+    def replace_math_with_images(self, content: str, width: int = 800) -> str:
+        """Replace LaTeX math delimiters with rendered PNG images (PDF export).
 
         Protects code blocks (fenced and inline) before processing.
         Matches $$...$$ (display) and $...$ (inline) while avoiding
@@ -739,7 +751,7 @@ class ExportHandlerBase(APIHandler):
 
         Args:
             content: Markdown content with LaTeX math expressions
-            dpi: Resolution for rendered math images
+            width: Target pixel width for each rendered math image
         """
         # Protect code blocks by replacing with placeholders
         code_placeholders = []
@@ -768,7 +780,7 @@ class ExportHandlerBase(APIHandler):
         def replace_display(match):
             latex = match.group(1)
             try:
-                data_uri = self.render_math_to_png(latex, dpi=dpi, display=True)
+                data_uri = self.render_math_to_png(latex, width=width, display=True)
                 return f'\n\n<div style="text-align:center"><img src="{data_uri}" alt="{latex}" style="max-width:100%"></div>\n\n'
             except Exception:
                 return match.group(0)
@@ -779,7 +791,7 @@ class ExportHandlerBase(APIHandler):
         def replace_inline(match):
             latex = match.group(1)
             try:
-                data_uri = self.render_math_to_png(latex, dpi=dpi, display=False)
+                data_uri = self.render_math_to_png(latex, width=width, display=False)
                 return f'<img src="{data_uri}" alt="{latex}" style="vertical-align:middle">'
             except Exception:
                 return match.group(0)
@@ -2109,7 +2121,7 @@ class ExportPdfHandler(ExportHandlerBase):
             mermaid_diagrams = data.get('mermaidDiagrams', [])
             svg_pixel_width = data.get("svgPixelWidth", 1920)
             show_alert_labels = data.get('showAlertLabels', False)
-            math_dpi = data.get('mathDPI', 200)
+            math_pixel_width = data.get('mathPixelWidth', 800)
             html_theme = data.get('htmlTheme', 'light')
             svg_color_scheme = 'dark' if html_theme == 'dark' else 'light'
 
@@ -2127,7 +2139,7 @@ class ExportPdfHandler(ExportHandlerBase):
 
             content = self.read_markdown_file(file_path)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
-            content = self.replace_math_with_images(content, dpi=math_dpi)
+            content = self.replace_math_with_images(content, width=math_pixel_width)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
 

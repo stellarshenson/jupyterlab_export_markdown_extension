@@ -29,57 +29,6 @@ interface IMermaidDiagram {
 }
 
 /**
- * Result of PNG conversion with dimensions
- */
-interface IPngResult {
-  dataUri: string;
-  width: number;
-  height: number;
-}
-
-/**
- * Convert an already-rendered IMG element directly to PNG data URI using Canvas.
- * This preserves fonts because the browser has already rendered the SVG with fonts loaded.
- * Uses calibrated DPI scaling matching jupyterlab_mmd_to_png_extension.
- */
-function imgElementToPng(
-  imgElement: HTMLImageElement,
-  targetDPI: number = 300
-): IPngResult {
-  // Use natural dimensions (actual image size)
-  const width = imgElement.naturalWidth || imgElement.width || 800;
-  const height = imgElement.naturalHeight || imgElement.height || 600;
-
-  // SVG native resolution calibrated to match Adobe converter output
-  // Same formula as jupyterlab_mmd_to_png_extension
-  const sourceDPI = 11.5;
-  const scale = targetDPI / sourceDPI;
-
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(width * scale);
-  canvas.height = Math.round(height * scale);
-
-  const ctx = canvas.getContext('2d', { alpha: true });
-  if (!ctx) {
-    throw new Error('Failed to get canvas context');
-  }
-
-  // High quality rendering
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-
-  // Draw the already-rendered image directly at scaled dimensions (preserves fonts)
-  ctx.drawImage(imgElement, 0, 0, canvas.width, canvas.height);
-
-  // Convert to PNG data URI
-  return {
-    dataUri: canvas.toDataURL('image/png'),
-    width: canvas.width,
-    height: canvas.height
-  };
-}
-
-/**
  * Command IDs for the extension
  */
 namespace CommandIDs {
@@ -149,12 +98,14 @@ const FORMAT_MIME_TYPES: Record<ExportFormat, string> = {
 };
 
 /**
- * Capture rendered Mermaid diagrams from the current markdown preview
- * and convert them to PNG format using Canvas (preserves fonts).
+ * Capture rendered Mermaid diagrams from the current markdown preview.
+ *
+ * Returns the SVG of each diagram; the server rasterizes them to PNG via
+ * Playwright Chromium at the configured svgPixelWidth, the same path used
+ * for any other embedded SVG image.
  */
 function captureMermaidDiagrams(
-  shell: JupyterFrontEnd.IShell,
-  targetDPI: number = 300
+  shell: JupyterFrontEnd.IShell
 ): IMermaidDiagram[] {
   const diagrams: IMermaidDiagram[] = [];
   const currentWidget = shell.currentWidget;
@@ -207,24 +158,13 @@ function captureMermaidDiagrams(
         return;
       }
 
-      // Convert the already-rendered IMG element directly to PNG
-      // This preserves fonts because the browser has already rendered them
-      let pngResult: IPngResult = { dataUri: '', width: 0, height: 0 };
-      try {
-        pngResult = imgElementToPng(img, targetDPI);
-      } catch (error) {
-        console.warn(
-          `Failed to convert Mermaid diagram ${mermaidIndex} to PNG:`,
-          error
-        );
-      }
-
+      // Hand the SVG to the server; it rasterizes via Playwright at svgPixelWidth
       diagrams.push({
         index: mermaidIndex,
         svg: svgData,
-        png: pngResult.dataUri,
-        width: pngResult.width,
-        height: pngResult.height
+        png: '',
+        width,
+        height
       });
       mermaidIndex++;
     }
@@ -245,12 +185,10 @@ function captureMermaidDiagrams(
       const base64Svg = btoa(unescape(encodeURIComponent(svgString)));
       const svgData = `data:image/svg+xml;base64,${base64Svg}`;
 
-      // For inline SVG, we return the SVG data URI (PNG conversion is more complex)
-      // The backend will handle conversion if needed
       diagrams.push({
         index: mermaidIndex,
         svg: svgData,
-        png: '', // Backend will convert using cairosvg if available
+        png: '',
         width: 0,
         height: 0
       });
@@ -291,7 +229,7 @@ async function exportMarkdown(
   format: ExportFormat,
   mermaidDiagrams: IMermaidDiagram[],
   svgPixelWidth: number = 1920,
-  mathDPI: number = 200,
+  mathPixelWidth: number = 800,
   showAlertLabels: boolean = false,
   htmlTheme: string = 'light',
   htmlDarkBackground: string = '#111111',
@@ -306,7 +244,7 @@ async function exportMarkdown(
       path,
       mermaidDiagrams,
       svgPixelWidth,
-      mathDPI,
+      mathPixelWidth,
       showAlertLabels,
       htmlTheme,
       htmlDarkBackground,
@@ -341,9 +279,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
     );
 
     // Load settings
-    let diagramDPI = 150; // Default: browser-side mermaid capture DPI
-    let svgPixelWidth = 1920; // Default: server-side SVG to PNG target pixel width (Full HD)
-    let mathDPI = 200; // Default: math expression rendering DPI
+    let svgPixelWidth = 1920; // Default: server-side SVG/Mermaid to PNG target pixel width (Full HD)
+    let mathPixelWidth = 800; // Default: PDF math expression image target pixel width
     let showAlertLabels = false; // Default: hide alert type labels
     let htmlTheme = 'light'; // Default: light theme
     let htmlDarkBackground = '#111111'; // Default: JupyterLab dark theme darkest gray
@@ -351,9 +288,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
     if (settingRegistry) {
       try {
         const settings = await settingRegistry.load(plugin.id);
-        diagramDPI = settings.get('diagramDPI').composite as number;
         svgPixelWidth = settings.get('svgPixelWidth').composite as number;
-        mathDPI = settings.get('mathDPI').composite as number;
+        mathPixelWidth = settings.get('mathPixelWidth').composite as number;
         showAlertLabels = settings.get('showAlertLabels').composite as boolean;
         htmlTheme = settings.get('htmlTheme').composite as string;
         htmlDarkBackground = settings.get('htmlDarkBackground')
@@ -361,12 +297,10 @@ const plugin: JupyterFrontEndPlugin<void> = {
         htmlLightBackground = settings.get('htmlLightBackground')
           .composite as string;
         console.log(
-          'Export Markdown: Loaded settings - diagramDPI:',
-          diagramDPI,
-          'svgPixelWidth:',
+          'Export Markdown: Loaded settings - svgPixelWidth:',
           svgPixelWidth,
-          'mathDPI:',
-          mathDPI,
+          'mathPixelWidth:',
+          mathPixelWidth,
           'showAlertLabels:',
           showAlertLabels,
           'htmlTheme:',
@@ -375,9 +309,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
 
         // Listen for settings changes
         settings.changed.connect(() => {
-          diagramDPI = settings.get('diagramDPI').composite as number;
           svgPixelWidth = settings.get('svgPixelWidth').composite as number;
-          mathDPI = settings.get('mathDPI').composite as number;
+          mathPixelWidth = settings.get('mathPixelWidth').composite as number;
           showAlertLabels = settings.get('showAlertLabels')
             .composite as boolean;
           htmlTheme = settings.get('htmlTheme').composite as string;
@@ -386,12 +319,10 @@ const plugin: JupyterFrontEndPlugin<void> = {
           htmlLightBackground = settings.get('htmlLightBackground')
             .composite as string;
           console.log(
-            'Export Markdown: Settings changed - diagramDPI:',
-            diagramDPI,
-            'svgPixelWidth:',
+            'Export Markdown: Settings changed - svgPixelWidth:',
             svgPixelWidth,
-            'mathDPI:',
-            mathDPI,
+            'mathPixelWidth:',
+            mathPixelWidth,
             'showAlertLabels:',
             showAlertLabels,
             'htmlTheme:',
@@ -443,14 +374,14 @@ const plugin: JupyterFrontEndPlugin<void> = {
           const dialog = showExportingDialog(format);
 
           try {
-            // Capture rendered Mermaid diagrams from the preview (includes PNG conversion at configured DPI)
-            const mermaidDiagrams = captureMermaidDiagrams(shell, diagramDPI);
+            // Capture rendered Mermaid diagrams (SVG); server rasterizes them
+            const mermaidDiagrams = captureMermaidDiagrams(shell);
             await exportMarkdown(
               path,
               format,
               mermaidDiagrams,
               svgPixelWidth,
-              mathDPI,
+              mathPixelWidth,
               showAlertLabels,
               htmlTheme,
               htmlDarkBackground,

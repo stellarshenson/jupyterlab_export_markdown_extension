@@ -21,13 +21,13 @@ Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No extern
 - **HTML Export** - Standalone files with embedded images
 - **LaTeX Math** - Native OMML equations in DOCX (editable in Word), KaTeX in HTML, PNG images in PDF
 - **GitHub Alerts** - Colored alert boxes for `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, `[!CAUTION]` with left border and background shading in DOCX/PDF
-- **Mermaid Diagrams** - Client-side rendering with calibrated DPI scaling (configurable, default 150 DPI)
+- **Mermaid Diagrams** - Rendered server-side to PNG via Playwright Chromium at the configured SVG export width
 - **Embedded Images** - Local images automatically converted to base64
 - **Syntax Highlighting** - Code blocks with Pygments-powered coloring
 - **Export Spinner** - Modal dialog shows progress during export operations
 - **File Menu Integration** - "Export Markdown As" submenu appears when markdown is active
 - **Command Palette** - All export commands available via Ctrl+Shift+C
-- **Settings** - Configure diagram DPI, math DPI, and alert label visibility via Settings Editor
+- **Settings** - Configure SVG export width, math export width, and alert label visibility via Settings Editor
 - **Pure Python** - No pandoc, no LaTeX, no system dependencies
 
 ## Requirements
@@ -70,8 +70,8 @@ That's it. No really, that's actually it. We spent considerable effort making su
 
 Configure the extension via **Settings -> Settings Editor -> Export Markdown Extension**:
 
-- **Diagram DPI** - Resolution for Mermaid diagrams (default: 150, range: 72-600)
-- **Math DPI** - Resolution for math images in PDF export (default: 200, range: 96-600). DOCX uses native OMML equations instead
+- **SVG Export Pixel Width** - Target pixel width for SVG images and Mermaid diagrams rasterized server-side in DOCX/PDF (default: 1920, range: 400-4096). Height follows the source aspect ratio
+- **Math Export Pixel Width (PDF only)** - Target pixel width for math expression images in PDF export (default: 800, range: 200-3000). DOCX uses native OMML equations and HTML uses KaTeX, neither affected by this setting
 - **Show Alert Labels** - Display alert type labels (NOTE, TIP, etc.) in exported documents (default: off)
 
 ## Uninstall
