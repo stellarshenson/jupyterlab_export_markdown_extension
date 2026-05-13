@@ -335,18 +335,63 @@ class ExportHandlerBase(APIHandler):
 
     def embed_images_as_base64(self, content: str, markdown_dir: Path) -> str:
         """
-        Replace local image references with base64-encoded data URIs.
+        Replace local and remote image references with base64-encoded data URIs.
 
-        This ensures images are embedded in the output document.
+        - Local paths are read from disk relative to ``markdown_dir``.
+        - ``http://`` / ``https://`` URLs are fetched (10 s timeout, 5 MB cap)
+          so badges and other remote images embed in DOCX/PDF. Failures fall
+          back to the original URL silently.
+        - ``data:`` URIs are passed through.
         """
         img_pattern = r'!\[([^\]]*)\]\(([^)"\s]+)(?:\s+"[^"]*")?\)'
+        mime_types = {
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.svg': 'image/svg+xml',
+            '.webp': 'image/webp',
+        }
+        remote_cache: dict[str, str | None] = {}
+
+        def fetch_remote(url: str) -> str | None:
+            if url in remote_cache:
+                return remote_cache[url]
+            try:
+                from urllib.request import Request, urlopen
+                req = Request(
+                    url,
+                    headers={'User-Agent': 'jupyterlab-export-markdown-extension'},
+                )
+                with urlopen(req, timeout=10) as resp:
+                    raw = resp.read(5 * 1024 * 1024 + 1)
+                    if len(raw) > 5 * 1024 * 1024:
+                        remote_cache[url] = None
+                        return None
+                    ctype = (resp.headers.get('Content-Type') or '').split(';', 1)[0].strip()
+                if not ctype:
+                    ext = os.path.splitext(url)[1].lower()
+                    ctype = mime_types.get(ext, 'application/octet-stream')
+                b64 = base64.b64encode(raw).decode('utf-8')
+                data_uri = f'data:{ctype};base64,{b64}'
+                remote_cache[url] = data_uri
+                return data_uri
+            except Exception:
+                remote_cache[url] = None
+                return None
 
         def replace_image(match):
             alt_text = match.group(1)
             img_path = match.group(2)
 
-            if img_path.startswith(('http://', 'https://', 'data:')):
+            if img_path.startswith('data:'):
                 return match.group(0)
+
+            if img_path.startswith(('http://', 'https://')):
+                data_uri = fetch_remote(img_path)
+                if data_uri is None:
+                    return match.group(0)
+                return f'![{alt_text}]({data_uri})'
 
             # URL-decode the path (handles %20 for spaces, etc.)
             img_path_decoded = unquote(img_path)
@@ -360,14 +405,6 @@ class ExportHandlerBase(APIHandler):
                     img_data = base64.b64encode(img_file.read()).decode('utf-8')
 
                 ext = full_path.suffix.lower()
-                mime_types = {
-                    '.png': 'image/png',
-                    '.jpg': 'image/jpeg',
-                    '.jpeg': 'image/jpeg',
-                    '.gif': 'image/gif',
-                    '.svg': 'image/svg+xml',
-                    '.webp': 'image/webp'
-                }
                 mime_type = mime_types.get(ext, 'application/octet-stream')
 
                 return f'![{alt_text}](data:{mime_type};base64,{img_data})'
