@@ -945,6 +945,64 @@ class TestImageDPINormalization:
         assert response.body.startswith(b"%PDF-")
 
 
+TEST_MARKDOWN_TABLE_IMAGE = """# Table Image Scaling
+
+A large photo inside a two-column table cell.
+
+| Photo | Caption |
+|---|---|
+| ![big](images/big_photo.jpg) | text in the second cell |
+"""
+
+
+@pytest.fixture
+def test_table_image_file(jp_root_dir):
+    """Create a markdown file with a large image inside a 2-column table."""
+    from PIL import Image as PILImage
+
+    images_dir = jp_root_dir / "images"
+    images_dir.mkdir(exist_ok=True)
+    # 4000x3000 px = ~41 inches wide at 96 DPI - far wider than any cell
+    PILImage.new("RGB", (4000, 3000), color=(0, 128, 0)).save(
+        images_dir / "big_photo.jpg"
+    )
+
+    md_file = jp_root_dir / "test_table_image.md"
+    md_file.write_text(TEST_MARKDOWN_TABLE_IMAGE, encoding="utf-8")
+    return md_file
+
+
+class TestTableImageScaling:
+    """Images inside table cells must be scaled to the cell, not the page."""
+
+    async def test_docx_table_image_fits_cell(self, jp_fetch, test_table_image_file):
+        """A large image in a 2-column table cell must fit the cell width."""
+        from docx import Document
+        from docx.shared import Inches
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_table_image.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        doc = Document(io.BytesIO(response.body))
+        shapes = list(doc.inline_shapes)
+        assert len(shapes) >= 1, "expected the table image to be embedded"
+
+        # A 2-column table on a 7.5\" page gives each cell ~3.75\". A
+        # page-width (7.5\") image would overflow the cell and be clipped;
+        # the scaled image must fit a cell.
+        for shape in shapes:
+            assert shape.width <= Inches(4.0), (
+                f"table-cell image width {shape.width} should fit a "
+                f"2-column cell (< 4 in), not span the page"
+            )
+
+
 TEST_MARKDOWN_WITH_ANCHORS = """# Anchor Links
 
 See footnote [<sup>A1</sup>](#A1) and [<sup>A2</sup>](#A2) below.

@@ -2415,24 +2415,56 @@ class ExportDocxHandler(ExportHandlerBase):
                 page_width = Inches(8.5) - Inches(1.0)  # 7.5 inches usable
                 page_height = Inches(11) - Inches(1.0)  # 10 inches usable
 
-                # Process images: preserve small ones, fit large ones to page
+                from docx.oxml.ns import qn as _qn
+
+                def container_width(inline_el):
+                    """Usable width for an inline shape - its table cell width
+                    if nested in a table, otherwise the full page width.
+
+                    Images in a multi-column table cell must be scaled to the
+                    cell, not the page; a page-width image overflows its cell
+                    and Word clips it at the cell boundary.
+                    """
+                    node = inline_el.getparent()
+                    tc = None
+                    while node is not None:
+                        if node.tag == _qn('w:tc'):
+                            tc = node
+                            break
+                        node = node.getparent()
+                    if tc is None:
+                        return page_width
+                    tbl = tc.getparent()
+                    while tbl is not None and tbl.tag != _qn('w:tbl'):
+                        tbl = tbl.getparent()
+                    ncols = 1
+                    if tbl is not None:
+                        grid = tbl.find(_qn('w:tblGrid'))
+                        if grid is not None:
+                            ncols = len(grid.findall(_qn('w:gridCol')))
+                        if ncols < 1:
+                            row = tbl.find(_qn('w:tr'))
+                            if row is not None:
+                                ncols = len(row.findall(_qn('w:tc')))
+                    ncols = max(1, ncols)
+                    # Per-cell content width, less an allowance for cell padding
+                    return max(Inches(0.5),
+                               int(page_width / ncols) - Inches(0.2))
+
+                # Process images: scale every image down to fit its container
+                # (page width, or table cell width when nested in a table).
                 for shape in document.inline_shapes:
                     orig_width = shape.width
                     orig_height = shape.height
+                    max_width = container_width(shape._inline)
 
-                    # Only resize if larger than page dimensions
-                    needs_resize = False
                     ratio = 1.0
-
-                    if orig_width > page_width:
-                        ratio = min(ratio, page_width / orig_width)
-                        needs_resize = True
-
+                    if orig_width > max_width:
+                        ratio = min(ratio, max_width / orig_width)
                     if orig_height > page_height:
                         ratio = min(ratio, page_height / orig_height)
-                        needs_resize = True
 
-                    if needs_resize:
+                    if ratio < 1.0:
                         shape.width = int(orig_width * ratio)
                         shape.height = int(orig_height * ratio)
 
