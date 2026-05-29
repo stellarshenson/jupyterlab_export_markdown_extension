@@ -759,6 +759,106 @@ def test_rich_alerts_file(jp_root_dir):
     return md_file
 
 
+TEST_MARKDOWN_QUOTES_IN_LIST = """# Quotes
+
+Two ideas:
+
+- **First idea** - a loose list item with a nested quote below it
+
+  > a quoted note under the first bullet
+
+  > a second quoted note
+
+- **Second idea** - another loose list item
+
+  > quoted note under the second bullet
+"""
+
+
+@pytest.fixture
+def test_quotes_in_list_file(jp_root_dir):
+    md_file = jp_root_dir / "test_quotes_in_list.md"
+    md_file.write_text(TEST_MARKDOWN_QUOTES_IN_LIST, encoding="utf-8")
+    return md_file
+
+
+class TestBlockquotesAndLooseListBullets:
+    """Loose list items keep their bullets; blockquotes get indent + bar + shading."""
+
+    async def test_docx_loose_list_keeps_bullets(self, jp_fetch, test_quotes_in_list_file):
+        """A loose <li><p>..</p>..</li> must render as a List Bullet paragraph
+        with text, not an empty bullet plus an orphaned Normal paragraph."""
+        from docx import Document
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_quotes_in_list.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        doc = Document(io.BytesIO(response.body))
+        bullets = [
+            p for p in doc.paragraphs
+            if p.style and p.style.name == "List Bullet" and p.text.strip()
+        ]
+        assert len(bullets) >= 2, "loose list items should keep their bullet text"
+        assert any("First idea" in p.text for p in bullets)
+        assert any("Second idea" in p.text for p in bullets)
+        # No empty bullet paragraphs left behind
+        empty_bullets = [
+            p for p in doc.paragraphs
+            if p.style and p.style.name == "List Bullet" and not p.text.strip()
+        ]
+        assert not empty_bullets, "no empty bullet glyphs should remain"
+
+    async def test_docx_blockquote_styled_and_no_marker(self, jp_fetch, test_quotes_in_list_file):
+        """Blockquote paragraphs get a left indent, a left border bar and
+        shading; the sentinel marker must not leak into the text."""
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_quotes_in_list.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        doc = Document(io.BytesIO(response.body))
+        full_text = "\n".join(p.text for p in doc.paragraphs)
+        assert "BQ:" not in full_text, "blockquote marker leaked into output"
+        assert "⁣" not in full_text, "zero-width marker delimiter leaked"
+
+        quoted = [p for p in doc.paragraphs if "quoted note" in p.text]
+        assert len(quoted) >= 3, "all blockquote paragraphs should survive"
+        for p in quoted:
+            pf = p.paragraph_format
+            assert pf.left_indent is not None and pf.left_indent > 0, (
+                "blockquote paragraph should be indented"
+            )
+            pPr = p._p.find(qn("w:pPr"))
+            assert pPr is not None and pPr.find(qn("w:pBdr")) is not None, (
+                "blockquote paragraph should have a left border bar"
+            )
+
+    async def test_pdf_with_quotes_in_list_succeeds(self, jp_fetch, test_quotes_in_list_file):
+        """PDF export of quotes-in-list succeeds and leaks no marker."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "test_quotes_in_list.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")
+
+
 class TestRichAlerts:
     """Test alert boxes with line breaks, hyperlinks, bold, and consecutive alerts."""
 

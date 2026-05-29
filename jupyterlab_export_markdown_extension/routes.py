@@ -1262,6 +1262,122 @@ class ExportHandlerBase(APIHandler):
         for rel_id in anchor_rels:
             del rels[rel_id]
 
+    _BLOCKQUOTE_MARKER_RE = re.compile(r'⁣BQ:(\d+)⁣')
+
+    def restructure_html_for_docx(self, html: str) -> str:
+        """Fix htmldocx structural blind spots before conversion.
+
+        htmldocx flattens two markdown structures into undifferentiated
+        ``Normal`` paragraphs:
+
+        1. Loose list items (``<li><p>text</p>...</li>``) - ``handle_li``
+           opens a bullet paragraph, then the inner ``<p>`` opens a fresh
+           ``Normal`` paragraph, so the bullet glyph ends up empty and the
+           text loses its bullet. Unwrapping the leading ``<p>`` of each
+           ``<li>`` puts the text back into the bullet paragraph.
+        2. Blockquotes - there is no ``<blockquote>`` handler at all, so the
+           inner ``<p>`` become plain paragraphs with no indent or bar. A
+           sentinel marker ``⁣BQ:<indent>⁣`` is injected at the start
+           of each blockquote paragraph (encoding the left indent in
+           hundredths of an inch, derived from list + quote nesting) and is
+           turned into real styling by style_docx_blockquotes() after
+           conversion.
+        """
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # 1. Loose list items: merge a leading <p> into the <li> itself
+        for li in soup.find_all('li'):
+            first_el = next(
+                (c for c in li.children if getattr(c, 'name', None)), None
+            )
+            if first_el is not None and first_el.name == 'p':
+                first_el.unwrap()
+
+        # 2. Blockquote paragraphs: prefix an indent-encoding marker
+        for bq in soup.find_all('blockquote'):
+            depth_bq = len(bq.find_parents('blockquote')) + 1
+            depth_list = len(bq.find_parents(['ul', 'ol']))
+            indent_in = depth_list * 0.5 + depth_bq * 0.3
+            marker = f'⁣BQ:{int(round(indent_in * 100))}⁣'
+            paras = bq.find_all('p', recursive=False)
+            if paras:
+                for p in paras:
+                    p.insert(0, marker)
+            else:
+                # No <p> wrapper (rare) - prefix the blockquote's own text
+                bq.insert(0, marker)
+
+        return str(soup)
+
+    def style_docx_blockquotes(self, document):
+        """Apply indent, a gray left bar, light shading and muted italic text
+        to paragraphs carrying the blockquote marker from
+        restructure_html_for_docx(). Strips the marker afterwards.
+        """
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+        from docx.shared import Inches, RGBColor
+
+        # Successors of w:pBdr / w:shd in the CT_PPr schema - inserting before
+        # these keeps the element order valid (mirrors htmldocx's hr handler).
+        pbdr_succ = (
+            'w:shd', 'w:tabs', 'w:suppressAutoHyphens', 'w:kinsoku',
+            'w:wordWrap', 'w:overflowPunct', 'w:topLinePunct', 'w:autoSpaceDE',
+            'w:autoSpaceDN', 'w:bidi', 'w:adjustRightInd', 'w:snapToGrid',
+            'w:spacing', 'w:ind', 'w:contextualSpacing', 'w:mirrorIndents',
+            'w:suppressOverlap', 'w:jc', 'w:textDirection', 'w:textAlignment',
+            'w:textboxTightWrap', 'w:outlineLvl', 'w:divId', 'w:cnfStyle',
+            'w:rPr', 'w:sectPr', 'w:pPrChange',
+        )
+        shd_succ = pbdr_succ[1:]
+
+        # Iterate every paragraph in the body, including those nested in table
+        # cells (document.paragraphs only yields body-level paragraphs, so a
+        # blockquote inside a table would otherwise keep its raw marker).
+        from docx.text.paragraph import Paragraph
+        body = document.element.body
+        for p_elem in body.iter(qn('w:p')):
+            paragraph = Paragraph(p_elem, document)
+            match = self._BLOCKQUOTE_MARKER_RE.search(paragraph.text or '')
+            if not match:
+                continue
+            indent_in = int(match.group(1)) / 100.0
+
+            # Strip the marker from whichever run(s) carry it
+            for run in paragraph.runs:
+                if run.text and '⁣' in run.text:
+                    run.text = self._BLOCKQUOTE_MARKER_RE.sub('', run.text)
+
+            paragraph.paragraph_format.left_indent = Inches(indent_in)
+
+            pPr = paragraph._p.get_or_add_pPr()
+
+            existing = pPr.find(qn('w:pBdr'))
+            if existing is not None:
+                pPr.remove(existing)
+            pBdr = OxmlElement('w:pBdr')
+            left = OxmlElement('w:left')
+            left.set(qn('w:val'), 'single')
+            left.set(qn('w:sz'), '18')      # ~2.25pt bar
+            left.set(qn('w:space'), '12')   # gap bar-to-text
+            left.set(qn('w:color'), 'BBBBBB')
+            pBdr.append(left)
+            pPr.insert_element_before(pBdr, *pbdr_succ)
+
+            existing_shd = pPr.find(qn('w:shd'))
+            if existing_shd is not None:
+                pPr.remove(existing_shd)
+            shd = OxmlElement('w:shd')
+            shd.set(qn('w:val'), 'clear')
+            shd.set(qn('w:color'), 'auto')
+            shd.set(qn('w:fill'), 'F4F4F4')
+            pPr.insert_element_before(shd, *shd_succ)
+
+            for run in paragraph.runs:
+                run.font.italic = True
+                run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+
     def strip_monospace_from_unicode_runs(self, document):
         """Drop monospace font overrides from runs containing non-ASCII characters.
 
@@ -2193,6 +2309,8 @@ class ExportPdfHandler(ExportHandlerBase):
             body_match = re.search(r'<body>(.*?)</body>', html, re.DOTALL)
             body_html = body_match.group(1) if body_match else html
 
+            # Fix loose-list bullets and tag blockquotes before htmldocx
+            body_html = self.restructure_html_for_docx(body_html)
             body_html = self.inject_anchor_markers(body_html)
 
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -2216,6 +2334,9 @@ class ExportPdfHandler(ExportHandlerBase):
 
                 self.apply_anchor_bookmarks(document)
                 self.strip_monospace_from_unicode_runs(document)
+                # Style and de-marker blockquotes (also strips the marker so it
+                # never leaks into the PDF text rebuild below)
+                self.style_docx_blockquotes(document)
 
                 # Style GitHub alert boxes with colored borders and shading
                 self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
@@ -2333,6 +2454,9 @@ class ExportDocxHandler(ExportHandlerBase):
             body_match = re.search(r'<body>(.*?)</body>', html, re.DOTALL)
             body_html = body_match.group(1) if body_match else html
 
+            # Fix loose-list bullets and tag blockquotes before htmldocx
+            body_html = self.restructure_html_for_docx(body_html)
+
             # Inject bookmark sentinels for every id="..." anchor so Word
             # internal links (#anchor) resolve after htmldocx strips them.
             body_html = self.inject_anchor_markers(body_html)
@@ -2368,6 +2492,9 @@ class ExportDocxHandler(ExportHandlerBase):
                 # Drop Courier font from runs with unicode chars so arrows and
                 # symbols render in the body font instead of failing glyph lookup.
                 self.strip_monospace_from_unicode_runs(document)
+
+                # Style blockquotes (left bar, indent, shading) and strip marker
+                self.style_docx_blockquotes(document)
 
                 # Style GitHub alert boxes with colored borders and shading
                 self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
