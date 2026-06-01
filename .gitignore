@@ -126,3 +126,6 @@ dmypy.json
 
 # Yarn cache
 .yarn/
+
+# project-local node environment (Makefile 1.32)
+.nodeenv/
