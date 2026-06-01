@@ -8,9 +8,27 @@ import {
   showErrorMessage
 } from '@jupyterlab/apputils';
 import { IMainMenu } from '@jupyterlab/mainmenu';
+import { IMermaidManager } from '@jupyterlab/mermaid';
 import { ISettingRegistry } from '@jupyterlab/settingregistry';
 import { Menu, Widget } from '@lumino/widgets';
 import { requestBlobAPI } from './request';
+
+/**
+ * Resolve the configured DOCX/PDF theme ('light' | 'dark' | 'auto') to a
+ * concrete 'light' or 'dark'. 'auto' follows the current JupyterLab UI
+ * theme via the `data-jp-theme-light` body attribute.
+ */
+function resolveDocxTheme(setting: string): 'light' | 'dark' {
+  if (setting === 'dark') {
+    return 'dark';
+  }
+  if (setting === 'light') {
+    return 'light';
+  }
+  // 'auto' - follow the JupyterLab UI theme
+  const isLight = document.body.dataset.jpThemeLight !== 'false';
+  return isLight ? 'light' : 'dark';
+}
 
 /**
  * Export format types
@@ -98,15 +116,68 @@ const FORMAT_MIME_TYPES: Record<ExportFormat, string> = {
 };
 
 /**
+ * Encode an SVG string as a base64 data URI.
+ */
+function svgToDataUri(svgString: string): string {
+  return `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svgString)))}`;
+}
+
+/**
+ * Re-render a mermaid source string to an SVG in the requested theme.
+ *
+ * The mermaid figure JupyterLab renders is themed to the live UI, which is
+ * wrong for a printed Word document (dark UI -> light edges, invisible on
+ * white paper). Re-rendering the source with `theme: 'default'` / 'dark'
+ * gives a diagram matching the chosen export theme. Returns null on any
+ * failure so the caller can fall back to the already-rendered SVG.
+ */
+async function renderMermaidInTheme(
+  manager: IMermaidManager,
+  source: string,
+  theme: 'light' | 'dark'
+): Promise<string | null> {
+  try {
+    const mermaid = await manager.getMermaid();
+    // initialize() is global config; JupyterLab re-applies its own theme on
+    // its next render, so forcing it here only affects this export pass.
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: theme === 'dark' ? 'dark' : 'default',
+      securityLevel: 'loose'
+    });
+    const id = `jp-export-mmd-${Math.floor(performance.now())}`;
+    const { svg } = await mermaid.render(id, source);
+    return svg;
+  } catch (error) {
+    console.warn('Export Markdown: mermaid re-render failed:', error);
+    return null;
+  }
+}
+
+/**
+ * Recover the mermaid source for a rendered diagram. JupyterLab places the
+ * original source in a <pre><code> sibling of the <img> inside the <figure>.
+ */
+function findMermaidSource(img: HTMLImageElement): string | null {
+  const figure = img.closest('figure');
+  const code = figure?.querySelector('pre code, code');
+  const text = code?.textContent?.trim();
+  return text || null;
+}
+
+/**
  * Capture rendered Mermaid diagrams from the current markdown preview.
  *
- * Returns the SVG of each diagram; the server rasterizes them to PNG via
- * Playwright Chromium at the configured svgPixelWidth, the same path used
- * for any other embedded SVG image.
+ * Each diagram is re-rendered in the requested export theme (when the
+ * mermaid manager is available and the source is recoverable); otherwise
+ * the already-rendered SVG is used as-is. The server rasterizes the SVG to
+ * PNG via Playwright at the configured svgPixelWidth.
  */
-function captureMermaidDiagrams(
-  shell: JupyterFrontEnd.IShell
-): IMermaidDiagram[] {
+async function captureMermaidDiagrams(
+  shell: JupyterFrontEnd.IShell,
+  manager: IMermaidManager | null,
+  theme: 'light' | 'dark'
+): Promise<IMermaidDiagram[]> {
   const diagrams: IMermaidDiagram[] = [];
   const currentWidget = shell.currentWidget;
 
@@ -133,21 +204,11 @@ function captureMermaidDiagrams(
   // Find all IMG elements with SVG data URIs (JupyterLab's Mermaid rendering)
   const imgElements = renderedMarkdown.querySelectorAll('img');
 
-  imgElements.forEach(img => {
+  for (const img of Array.from(imgElements)) {
     const src = img.getAttribute('src') || '';
 
     // Check if this is an SVG data URI
     if (src.startsWith('data:image/svg+xml')) {
-      let svgData = src;
-
-      if (src.startsWith('data:image/svg+xml,')) {
-        // URL-encoded SVG - convert to base64 for consistency
-        const encodedSvg = src.replace('data:image/svg+xml,', '');
-        const svgContent = decodeURIComponent(encodedSvg);
-        const base64Svg = btoa(unescape(encodeURIComponent(svgContent)));
-        svgData = `data:image/svg+xml;base64,${base64Svg}`;
-      }
-
       // Filter out small SVG icons (like GitHub alert icons) by checking dimensions
       // Mermaid diagrams are typically > 100px, while icons are 16-32px
       const width = img.naturalWidth || img.width || 0;
@@ -155,7 +216,33 @@ function captureMermaidDiagrams(
 
       // Skip small images (icons) - mermaid diagrams are always larger
       if (width < 50 && height < 50) {
-        return;
+        continue;
+      }
+
+      let svgData: string | null = null;
+
+      // Prefer re-rendering the source in the chosen export theme
+      if (manager) {
+        const source = findMermaidSource(img);
+        if (source) {
+          const themed = await renderMermaidInTheme(manager, source, theme);
+          if (themed) {
+            svgData = svgToDataUri(themed);
+          }
+        }
+      }
+
+      // Fallback: use the already-rendered SVG as-is
+      if (!svgData) {
+        if (src.startsWith('data:image/svg+xml,')) {
+          // URL-encoded SVG - convert to base64 for consistency
+          const svgContent = decodeURIComponent(
+            src.replace('data:image/svg+xml,', '')
+          );
+          svgData = svgToDataUri(svgContent);
+        } else {
+          svgData = src;
+        }
       }
 
       // Hand the SVG to the server; it rasterizes via Playwright at svgPixelWidth
@@ -168,7 +255,7 @@ function captureMermaidDiagrams(
       });
       mermaidIndex++;
     }
-  });
+  }
 
   // Also check for inline SVG elements (alternative Mermaid rendering)
   const svgElements = renderedMarkdown.querySelectorAll('svg');
@@ -182,8 +269,7 @@ function captureMermaidDiagrams(
     if (isMermaid) {
       const serializer = new XMLSerializer();
       const svgString = serializer.serializeToString(svg);
-      const base64Svg = btoa(unescape(encodeURIComponent(svgString)));
-      const svgData = `data:image/svg+xml;base64,${base64Svg}`;
+      const svgData = svgToDataUri(svgString);
 
       diagrams.push({
         index: mermaidIndex,
@@ -233,7 +319,8 @@ async function exportMarkdown(
   showAlertLabels: boolean = false,
   htmlTheme: string = 'light',
   htmlDarkBackground: string = '#111111',
-  htmlLightBackground: string = '#ffffff'
+  htmlLightBackground: string = '#ffffff',
+  docxTheme: string = 'light'
 ): Promise<void> {
   const blob = await requestBlobAPI(`export/${format}`, {
     method: 'POST',
@@ -248,7 +335,8 @@ async function exportMarkdown(
       showAlertLabels,
       htmlTheme,
       htmlDarkBackground,
-      htmlLightBackground
+      htmlLightBackground,
+      docxTheme
     })
   });
 
@@ -267,12 +355,13 @@ const plugin: JupyterFrontEndPlugin<void> = {
     'JupyterLab extension to export markdown files as PDF, DOCX and HTML with embedded images',
   autoStart: true,
   requires: [IMainMenu, ICommandPalette],
-  optional: [ISettingRegistry],
+  optional: [ISettingRegistry, IMermaidManager],
   activate: async (
     app: JupyterFrontEnd,
     mainMenu: IMainMenu,
     palette: ICommandPalette,
-    settingRegistry: ISettingRegistry | null
+    settingRegistry: ISettingRegistry | null,
+    mermaidManager: IMermaidManager | null
   ) => {
     console.log(
       'JupyterLab extension jupyterlab_export_markdown_extension is activated!'
@@ -282,6 +371,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
     let svgPixelWidth = 1920; // Default: server-side SVG/Mermaid to PNG target pixel width (Full HD)
     let mathPixelWidth = 800; // Default: PDF math expression image target pixel width
     let showAlertLabels = false; // Default: hide alert type labels
+    let docxTheme = 'light'; // Default: light - Word docs are usually printed
     let htmlTheme = 'light'; // Default: light theme
     let htmlDarkBackground = '#111111'; // Default: JupyterLab dark theme darkest gray
     let htmlLightBackground = '#ffffff'; // Default: light theme background
@@ -291,6 +381,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
         svgPixelWidth = settings.get('svgPixelWidth').composite as number;
         mathPixelWidth = settings.get('mathPixelWidth').composite as number;
         showAlertLabels = settings.get('showAlertLabels').composite as boolean;
+        docxTheme = settings.get('docxTheme').composite as string;
         htmlTheme = settings.get('htmlTheme').composite as string;
         htmlDarkBackground = settings.get('htmlDarkBackground')
           .composite as string;
@@ -303,6 +394,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
           mathPixelWidth,
           'showAlertLabels:',
           showAlertLabels,
+          'docxTheme:',
+          docxTheme,
           'htmlTheme:',
           htmlTheme
         );
@@ -313,6 +406,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
           mathPixelWidth = settings.get('mathPixelWidth').composite as number;
           showAlertLabels = settings.get('showAlertLabels')
             .composite as boolean;
+          docxTheme = settings.get('docxTheme').composite as string;
           htmlTheme = settings.get('htmlTheme').composite as string;
           htmlDarkBackground = settings.get('htmlDarkBackground')
             .composite as string;
@@ -325,6 +419,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
             mathPixelWidth,
             'showAlertLabels:',
             showAlertLabels,
+            'docxTheme:',
+            docxTheme,
             'htmlTheme:',
             htmlTheme
           );
@@ -374,8 +470,13 @@ const plugin: JupyterFrontEndPlugin<void> = {
           const dialog = showExportingDialog(format);
 
           try {
-            // Capture rendered Mermaid diagrams (SVG); server rasterizes them
-            const mermaidDiagrams = captureMermaidDiagrams(shell);
+            // Resolve the DOCX/PDF theme and re-render mermaid to match it
+            const resolvedDocxTheme = resolveDocxTheme(docxTheme);
+            const mermaidDiagrams = await captureMermaidDiagrams(
+              shell,
+              format === 'html' ? null : mermaidManager,
+              resolvedDocxTheme
+            );
             await exportMarkdown(
               path,
               format,
@@ -385,7 +486,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
               showAlertLabels,
               htmlTheme,
               htmlDarkBackground,
-              htmlLightBackground
+              htmlLightBackground,
+              resolvedDocxTheme
             );
           } catch (error) {
             console.error(

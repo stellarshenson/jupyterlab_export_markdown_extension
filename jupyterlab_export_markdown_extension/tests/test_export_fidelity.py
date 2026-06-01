@@ -591,6 +591,63 @@ def test_svg_markdown_file(jp_root_dir):
     return md_file
 
 
+# Theme-aware SVG: white background in light, black in dark
+TEST_THEME_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100">'
+    "<style>.bg{fill:#ffffff}"
+    "@media (prefers-color-scheme: dark){.bg{fill:#000000}}</style>"
+    '<rect class="bg" width="200" height="100"/></svg>'
+)
+
+
+@pytest.fixture
+def test_theme_svg_file(jp_root_dir):
+    images_dir = jp_root_dir / "images"
+    images_dir.mkdir(exist_ok=True)
+    (images_dir / "theme.svg").write_text(TEST_THEME_SVG, encoding="utf-8")
+    md = jp_root_dir / "test_theme_svg.md"
+    md.write_text("# Theme\n\n![d](images/theme.svg)\n", encoding="utf-8")
+    return md
+
+
+class TestDocxTheme:
+    """docxTheme drives the SVG color scheme; prefers-color-scheme resolves to it."""
+
+    async def _center_pixel(self, jp_fetch, theme):
+        from docx import Document
+        from PIL import Image as PILImage
+        import zipfile as _zip
+
+        body = {"path": "test_theme_svg.md"}
+        if theme is not None:
+            body["docxTheme"] = theme
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps(body),
+            raise_error=False,
+        )
+        assert response.code == 200
+        with _zip.ZipFile(io.BytesIO(response.body)) as zf:
+            media = [n for n in zf.namelist() if n.startswith("word/media/")]
+            assert media, "expected an embedded image"
+            img = PILImage.open(io.BytesIO(zf.read(media[0]))).convert("RGB")
+        return img.getpixel((img.width // 2, img.height // 2))
+
+    async def test_light_theme_renders_light(self, jp_fetch, test_theme_svg_file):
+        r, g, b = await self._center_pixel(jp_fetch, "light")
+        assert min(r, g, b) > 200, f"light theme should render white, got {(r, g, b)}"
+
+    async def test_dark_theme_renders_dark(self, jp_fetch, test_theme_svg_file):
+        r, g, b = await self._center_pixel(jp_fetch, "dark")
+        assert max(r, g, b) < 60, f"dark theme should render black, got {(r, g, b)}"
+
+    async def test_default_is_light(self, jp_fetch, test_theme_svg_file):
+        r, g, b = await self._center_pixel(jp_fetch, None)
+        assert min(r, g, b) > 200, f"default (no docxTheme) should be light, got {(r, g, b)}"
+
+
 class TestSVGConversion:
     """Test SVG to PNG conversion in DOCX and PDF exports."""
 
@@ -802,6 +859,81 @@ def test_rich_alerts_file(jp_root_dir):
     md_file = jp_root_dir / "test_rich_alerts.md"
     md_file.write_text(TEST_MARKDOWN_RICH_ALERTS, encoding="utf-8")
     return md_file
+
+
+TEST_MARKDOWN_COLOR_PILLS = """# Colours
+
+Named text colours: <span style="color:green">green</span>,
+<span style="color:red">red</span>, hex <span style="color:#3b82f6">blue</span>.
+
+| Item | Priority |
+|---|---|
+| A | <span style="background-color:#15803d;color:#ffffff;padding:1px 8px;border-radius:8px">High</span> |
+| B | <span style="background-color:#b45309;color:#ffffff;padding:1px 8px;border-radius:8px">Med</span> |
+"""
+
+
+@pytest.fixture
+def test_color_pills_file(jp_root_dir):
+    md_file = jp_root_dir / "test_color_pills.md"
+    md_file.write_text(TEST_MARKDOWN_COLOR_PILLS, encoding="utf-8")
+    return md_file
+
+
+class TestColouredHtml:
+    """Named CSS colours render in colour (not black) and background-colour
+    pills become true run shading (not an invisible Word highlight)."""
+
+    async def test_docx_named_colors_and_pills(self, jp_fetch, test_color_pills_file):
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_color_pills.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        doc = Document(io.BytesIO(response.body))
+
+        # Named colour "green" must not render black
+        green_runs = [
+            r
+            for p in doc.paragraphs
+            for r in p.runs
+            if r.text.strip() == "green"
+        ]
+        assert green_runs, "green run not found"
+        col = green_runs[0].font.color
+        assert col is not None and col.rgb is not None
+        assert str(col.rgb) != "000000", "named colour 'green' rendered black"
+
+        # Pills: locate the shaded runs in table cells
+        shaded = []
+        for tbl in doc.tables:
+            for row in tbl.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        for r in p.runs:
+                            rPr = r._r.find(qn("w:rPr"))
+                            shd = rPr.find(qn("w:shd")) if rPr is not None else None
+                            if shd is not None and shd.get(qn("w:fill")) not in (None, "auto"):
+                                shaded.append((r.text, shd.get(qn("w:fill"))))
+        fills = {t.strip(): f.upper() for t, f in shaded}
+        assert fills.get("High") == "15803D", f"High pill fill wrong: {fills}"
+        assert fills.get("Med") == "B45309", f"Med pill fill wrong: {fills}"
+
+        # No marker leakage anywhere (incl. table cells)
+        from docx.text.paragraph import Paragraph
+        all_text = "".join(
+            Paragraph(p, doc).text
+            for p in doc.element.body.iter(qn("w:p"))
+        )
+        assert "PILL:" not in all_text
+        assert "⁣" not in all_text
 
 
 TEST_MARKDOWN_QUOTES_IN_LIST = """# Quotes

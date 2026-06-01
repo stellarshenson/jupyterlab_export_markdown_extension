@@ -1277,12 +1277,40 @@ class ExportHandlerBase(APIHandler):
             del rels[rel_id]
 
     _BLOCKQUOTE_MARKER_RE = re.compile(r'⁣BQ:(\d+)⁣')
+    _PILL_MARKER_RE = re.compile(r'⁣PILL:([0-9A-Fa-f]{6})⁣')
+
+    # CSS named colours htmldocx fails to parse (it only understands hex),
+    # so a `color: green` span renders black. Mapped to hex here. Covers the
+    # standard 16 plus the few extended names that show up in practice.
+    _CSS_NAMED_COLORS = {
+        'black': '000000', 'silver': 'C0C0C0', 'gray': '808080',
+        'grey': '808080', 'white': 'FFFFFF', 'maroon': '800000',
+        'red': 'FF0000', 'purple': '800080', 'fuchsia': 'FF00FF',
+        'magenta': 'FF00FF', 'green': '008000', 'lime': '00FF00',
+        'olive': '808000', 'yellow': 'FFFF00', 'navy': '000080',
+        'blue': '0000FF', 'teal': '008080', 'aqua': '00FFFF',
+        'cyan': '00FFFF', 'orange': 'FFA500', 'pink': 'FFC0CB',
+        'brown': 'A52A2A', 'gold': 'FFD700', 'darkgreen': '006400',
+        'darkred': '8B0000', 'darkblue': '00008B',
+    }
+
+    @classmethod
+    def _normalize_css_color(cls, value: str) -> str:
+        """Return a 6-hex (no #) for a CSS colour value, or '' if not resolvable."""
+        v = value.strip().lower()
+        if v.startswith('#'):
+            h = v[1:]
+            if len(h) == 3:
+                h = ''.join(c * 2 for c in h)
+            if len(h) == 6 and all(c in '0123456789abcdef' for c in h):
+                return h.upper()
+            return ''
+        return cls._CSS_NAMED_COLORS.get(v, '')
 
     def restructure_html_for_docx(self, html: str) -> str:
-        """Fix htmldocx structural blind spots before conversion.
+        """Fix htmldocx structural and styling blind spots before conversion.
 
-        htmldocx flattens two markdown structures into undifferentiated
-        ``Normal`` paragraphs:
+        Handles four htmldocx limitations:
 
         1. Loose list items (``<li><p>text</p>...</li>``) - ``handle_li``
            opens a bullet paragraph, then the inner ``<p>`` opens a fresh
@@ -1291,11 +1319,14 @@ class ExportHandlerBase(APIHandler):
            ``<li>`` puts the text back into the bullet paragraph.
         2. Blockquotes - there is no ``<blockquote>`` handler at all, so the
            inner ``<p>`` become plain paragraphs with no indent or bar. A
-           sentinel marker ``⁣BQ:<indent>⁣`` is injected at the start
-           of each blockquote paragraph (encoding the left indent in
-           hundredths of an inch, derived from list + quote nesting) and is
-           turned into real styling by style_docx_blockquotes() after
-           conversion.
+           sentinel marker ``⁣BQ:<indent>⁣`` is injected.
+        3. Named CSS text colours (``color: green``) - htmldocx parses only
+           hex, rendering named colours black. Normalised to hex in-place.
+        4. Coloured pills (``background-color`` spans) - htmldocx maps a CSS
+           background to a Word *highlight* from a tiny fixed palette, so an
+           arbitrary hex becomes ``lightGray``. The background is stripped
+           from the style and re-encoded as a ``⁣PILL:<hex>⁣`` marker
+           that style_docx_color_runs() turns into true run shading.
         """
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, 'html.parser')
@@ -1319,10 +1350,75 @@ class ExportHandlerBase(APIHandler):
                 for p in paras:
                     p.insert(0, marker)
             else:
-                # No <p> wrapper (rare) - prefix the blockquote's own text
                 bq.insert(0, marker)
 
+        # 3 & 4. Inline colour / pill styling on any element with a style attr
+        for el in soup.find_all(style=True):
+            style = el.get('style', '')
+            decls = [d.strip() for d in style.split(';') if d.strip()]
+            kept, fg_hex, bg_hex = [], '', ''
+            for d in decls:
+                if ':' not in d:
+                    kept.append(d)
+                    continue
+                prop, val = d.split(':', 1)
+                prop = prop.strip().lower()
+                if prop == 'color':
+                    h = self._normalize_css_color(val)
+                    if h:
+                        fg_hex = h
+                        kept.append(f'color:#{h}')
+                    else:
+                        kept.append(d)
+                elif prop == 'background-color' or prop == 'background':
+                    h = self._normalize_css_color(val.split()[0] if val.split() else '')
+                    if h:
+                        bg_hex = h  # drop from style; re-encode as marker below
+                    else:
+                        kept.append(d)
+                else:
+                    kept.append(d)
+            if bg_hex:
+                el['style'] = ';'.join(kept)
+                el.insert(0, f'⁣PILL:{bg_hex}⁣')
+            elif fg_hex:
+                el['style'] = ';'.join(kept)
+
         return str(soup)
+
+    def style_docx_color_runs(self, document):
+        """Apply true run shading (``w:shd``) to runs carrying a pill marker
+        from restructure_html_for_docx(). htmldocx can only express a CSS
+        background as a Word highlight from a fixed palette; this gives the
+        exact hex fill instead. Strips the marker afterwards.
+        """
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+        from docx.text.paragraph import Paragraph
+
+        body = document.element.body
+        for p_elem in body.iter(qn('w:p')):
+            paragraph = Paragraph(p_elem, document)
+            for run in paragraph.runs:
+                text = run.text or ''
+                m = self._PILL_MARKER_RE.search(text)
+                if not m:
+                    continue
+                fill = m.group(1)
+                run.text = self._PILL_MARKER_RE.sub('', text)
+
+                rPr = run._r.get_or_add_rPr()
+                # Remove any highlight htmldocx may have added for the bg
+                for hl in rPr.findall(qn('w:highlight')):
+                    rPr.remove(hl)
+                existing = rPr.find(qn('w:shd'))
+                if existing is not None:
+                    rPr.remove(existing)
+                shd = OxmlElement('w:shd')
+                shd.set(qn('w:val'), 'clear')
+                shd.set(qn('w:color'), 'auto')
+                shd.set(qn('w:fill'), fill)
+                rPr.append(shd)
 
     def style_docx_blockquotes(self, document):
         """Apply indent, a gray left bar, light shading and muted italic text
@@ -2289,8 +2385,11 @@ class ExportPdfHandler(ExportHandlerBase):
             svg_pixel_width = data.get("svgPixelWidth", 1920)
             show_alert_labels = data.get('showAlertLabels', False)
             math_pixel_width = data.get('mathPixelWidth', 800)
-            html_theme = data.get('htmlTheme', 'light')
-            svg_color_scheme = 'dark' if html_theme == 'dark' else 'light'
+            # DOCX/PDF SVG + Mermaid rasterization theme. Defaults to light
+            # (Word docs are usually printed). 'auto' is resolved by the
+            # frontend to a concrete light/dark before the request.
+            docx_theme = data.get('docxTheme', data.get('htmlTheme', 'light'))
+            svg_color_scheme = 'dark' if docx_theme == 'dark' else 'light'
 
             if not relative_path:
                 self.set_status(400)
@@ -2351,6 +2450,8 @@ class ExportPdfHandler(ExportHandlerBase):
                 # Style and de-marker blockquotes (also strips the marker so it
                 # never leaks into the PDF text rebuild below)
                 self.style_docx_blockquotes(document)
+                # Apply true run shading to coloured pills (background spans)
+                self.style_docx_color_runs(document)
 
                 # Style GitHub alert boxes with colored borders and shading
                 self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
@@ -2434,8 +2535,11 @@ class ExportDocxHandler(ExportHandlerBase):
             mermaid_diagrams = data.get('mermaidDiagrams', [])
             svg_pixel_width = data.get("svgPixelWidth", 1920)
             show_alert_labels = data.get('showAlertLabels', False)
-            html_theme = data.get('htmlTheme', 'light')
-            svg_color_scheme = 'dark' if html_theme == 'dark' else 'light'
+            # DOCX/PDF SVG + Mermaid rasterization theme. Defaults to light
+            # (Word docs are usually printed). 'auto' is resolved by the
+            # frontend to a concrete light/dark before the request.
+            docx_theme = data.get('docxTheme', data.get('htmlTheme', 'light'))
+            svg_color_scheme = 'dark' if docx_theme == 'dark' else 'light'
 
             if not relative_path:
                 self.set_status(400)
@@ -2509,6 +2613,8 @@ class ExportDocxHandler(ExportHandlerBase):
 
                 # Style blockquotes (left bar, indent, shading) and strip marker
                 self.style_docx_blockquotes(document)
+                # Apply true run shading to coloured pills (background spans)
+                self.style_docx_color_runs(document)
 
                 # Style GitHub alert boxes with colored borders and shading
                 self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
