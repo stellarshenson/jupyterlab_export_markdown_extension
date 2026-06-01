@@ -118,6 +118,20 @@ class PlaywrightSvgRenderer:
     async def render(self, svg_bytes: bytes, *,
                      width: int = 1920, supersample: int = 1) -> bytes:
         svg_text = svg_bytes.decode('utf-8', errors='replace')
+
+        # Drop any XML declaration / DOCTYPE prologue before the <svg> root.
+        # The SVG is embedded into an HTML document and parsed by Chromium's
+        # HTML parser, which does not understand a DOCTYPE internal subset
+        # (`<!DOCTYPE svg [ <!ENTITY ...> ]>`). It ends the DOCTYPE at the
+        # first `>`, spilling the rest of the subset - including the closing
+        # `]>` - as a visible text node in the top-left corner. JupyterLab's
+        # mermaid renderer prepends exactly such a prologue, so this leak
+        # showed up on every exported mermaid diagram. Cutting to the first
+        # `<svg` removes it; Chromium renders the element fine without it.
+        svg_start = svg_text.find('<svg')
+        if svg_start > 0:
+            svg_text = svg_text[svg_start:]
+
         vb_w, vb_h = self._viewbox_dims(svg_text)
 
         nominal_w = max(1, int(width))

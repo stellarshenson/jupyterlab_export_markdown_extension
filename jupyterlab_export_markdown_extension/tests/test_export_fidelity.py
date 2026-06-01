@@ -675,6 +675,51 @@ class TestSVGConversion:
         assert "data:image/svg+xml" in html or "Architecture Diagram" in html
 
 
+class TestSVGDoctypePrologue:
+    """An XML declaration / DOCTYPE prologue must not leak as a top-left
+    text artefact (e.g. ']>') when rasterizing - JupyterLab's mermaid
+    renderer prepends exactly such a prologue."""
+
+    async def test_doctype_prologue_no_top_left_artefact(self):
+        from jupyterlab_export_markdown_extension.routes import (
+            PlaywrightSvgRenderer,
+        )
+        from PIL import Image as PILImage
+
+        # A minimal SVG with a white background, preceded by the same
+        # XML+DOCTYPE-with-internal-subset prologue JupyterLab emits.
+        prologue = (
+            '<?xml version="1.0" standalone="no"?>\n'
+            '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" '
+            '"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" ['
+            '<!ENTITY Aacute "&#193;">\n<!ENTITY amp "&#38;">]>'
+        )
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" '
+            'viewBox="0 0 400 100">'
+            '<rect width="400" height="100" fill="#ffffff"/></svg>'
+        )
+        svg_bytes = (prologue + "\n" + svg).encode("utf-8")
+
+        async with PlaywrightSvgRenderer(color_scheme="light") as renderer:
+            png = await renderer.render(svg_bytes, width=400)
+
+        img = PILImage.open(io.BytesIO(png)).convert("RGBA")
+        bg = PILImage.new("RGBA", img.size, (255, 255, 255, 255))
+        comp = PILImage.alpha_composite(bg, img)
+        tl = comp.crop((0, 0, 80, 80)).load()
+        dark = sum(
+            1
+            for y in range(80)
+            for x in range(80)
+            if sum(tl[x, y][:3]) < 200
+        )
+        assert dark == 0, (
+            f"DOCTYPE prologue leaked a dark text artefact in the "
+            f"top-left corner ({dark} dark pixels)"
+        )
+
+
 # Markdown with SVG as first element (header banner pattern)
 TEST_MARKDOWN_LEADING_SVG = """![Header Banner](images/test-diagram.svg)
 
