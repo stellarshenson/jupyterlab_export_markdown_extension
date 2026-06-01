@@ -2,6 +2,7 @@
 
 import json
 import io
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -1277,6 +1278,97 @@ class TestTableImageScaling:
             assert shape.width <= Inches(4.0), (
                 f"table-cell image width {shape.width} should fit a "
                 f"2-column cell (< 4 in), not span the page"
+            )
+
+
+SIZE_BADGE_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 40" '
+    'width="60" height="40" role="img" aria-label="XL">'
+    '<rect x="2" y="2" width="56" height="36" rx="8" fill="#b45309"/>'
+    '<text x="30" y="27" font-size="20" fill="#ffffff" '
+    'text-anchor="middle">XL</text></svg>'
+)
+
+TEST_MARKDOWN_HTML_IMG_BADGES = """# Badges
+
+| Model | Size |
+|---|---|
+| M00 | <img src="badges/size-xl.svg" alt="XL" style="max-height:22px;max-width:1000px"> 64h |
+| M01 | <img src="badges/size-xl.svg" alt="XL" style="max-height:22px;max-width:1000px"> 16h |
+"""
+
+
+@pytest.fixture
+def test_html_img_badge_file(jp_root_dir):
+    badges_dir = jp_root_dir / "badges"
+    badges_dir.mkdir(exist_ok=True)
+    (badges_dir / "size-xl.svg").write_text(SIZE_BADGE_SVG, encoding="utf-8")
+    md_file = jp_root_dir / "test_html_img_badges.md"
+    md_file.write_text(TEST_MARKDOWN_HTML_IMG_BADGES, encoding="utf-8")
+    return md_file
+
+
+class TestHtmlImgBadges:
+    """Raw HTML <img> tags with relative local paths (inline table badges)
+    must embed and render small, not break or fill the cell width."""
+
+    def test_embed_local_html_img(self):
+        """embed_images_as_base64 inlines a raw HTML <img> local src."""
+        from jupyterlab_export_markdown_extension.routes import ExportDocxHandler
+
+        handler = ExportDocxHandler.__new__(ExportDocxHandler)
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "badge.svg").write_text(SIZE_BADGE_SVG)
+            html = '<img src="badge.svg" alt="XL" style="max-height:22px">'
+            out = handler.embed_images_as_base64(html, Path(d))
+            assert "data:image/svg+xml;base64," in out
+            assert 'src="badge.svg"' not in out
+            assert 'alt="XL"' in out  # other attributes preserved
+
+    def test_badge_render_spec(self):
+        """A small max-height yields a tiny render width + high DPI; an
+        unsized image yields None (full diagram width)."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        small = ExportHandlerBase._badge_render_spec(
+            '<img style="max-height:22px;max-width:1000px">', 60, 40
+        )
+        assert small is not None
+        render_w, dpi = small
+        # 22px * (60/40) = 33px display -> *4 supersample = 132px, dpi 384
+        assert render_w == 132
+        assert dpi == 384
+
+        assert ExportHandlerBase._badge_render_spec('<img alt="x">', 800, 345) is None
+        assert ExportHandlerBase._badge_render_spec(
+            '<img style="max-height:900px">', 60, 40
+        ) is None
+
+    async def test_docx_badges_small_inline(self, jp_fetch, test_html_img_badge_file):
+        """HTML <img> badges embed and stay small (~22px), not cell-width."""
+        from docx import Document
+        from docx.shared import Inches
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_html_img_badges.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        doc = Document(io.BytesIO(response.body))
+        shapes = list(doc.inline_shapes)
+        assert len(shapes) == 2, "both HTML <img> badges must embed"
+        for shape in shapes:
+            # 22px at 96 DPI is ~0.23 in; allow slack but assert it is a
+            # small badge, not a cell-width or page-width image.
+            assert shape.height <= Inches(0.4), (
+                f"badge height {shape.height} should be ~22px, not full size"
+            )
+            assert shape.width <= Inches(0.6), (
+                f"badge width {shape.width} should be small, not cell-width"
             )
 
 

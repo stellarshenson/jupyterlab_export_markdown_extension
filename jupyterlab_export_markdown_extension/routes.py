@@ -239,6 +239,46 @@ class ExportHandlerBase(APIHandler):
 
         return re.sub(mermaid_pattern, replace_mermaid, content, flags=re.DOTALL)
 
+    # Inline images carrying an explicit display size at or below this many
+    # CSS px are treated as small badges/pills, not full-width diagrams.
+    _BADGE_MAX_PX = 200
+    # Pixel-density multiplier applied to a badge's display size when
+    # rasterizing, so it stays crisp when zoomed in Word.
+    _BADGE_RENDER_SCALE = 4
+
+    @classmethod
+    def _badge_render_spec(cls, full_tag: str, vb_w: float, vb_h: float):
+        """Render width and DPI for a small, explicitly-sized inline image.
+
+        Reads ``max-height`` / ``max-width`` from the tag's ``style`` (or a
+        ``height`` attribute). When a small height is present, returns
+        ``(render_width_px, dpi)`` so the PNG embeds at that physical size with
+        ``_BADGE_RENDER_SCALE``x pixel density. Returns ``None`` for unsized or
+        large images, which then rasterize at the full diagram width.
+        """
+        max_h = max_w = None
+        style_m = re.search(r'style=["\']([^"\']*)["\']', full_tag, re.IGNORECASE)
+        if style_m:
+            s = style_m.group(1)
+            mh = re.search(r'max-height\s*:\s*([\d.]+)\s*px', s, re.IGNORECASE)
+            mw = re.search(r'max-width\s*:\s*([\d.]+)\s*px', s, re.IGNORECASE)
+            if mh:
+                max_h = float(mh.group(1))
+            if mw:
+                max_w = float(mw.group(1))
+        if max_h is None:
+            h_attr = re.search(r'\bheight=["\']?([\d.]+)', full_tag, re.IGNORECASE)
+            if h_attr:
+                max_h = float(h_attr.group(1))
+        if max_h is None or max_h > cls._BADGE_MAX_PX:
+            return None
+        if vb_w <= 0 or vb_h <= 0:
+            return None
+        disp_w = max_h * (vb_w / vb_h)
+        if max_w is not None and disp_w > max_w:
+            disp_w = max_w
+        return max(1, round(disp_w * cls._BADGE_RENDER_SCALE)), 96 * cls._BADGE_RENDER_SCALE
+
     async def extract_data_uri_images(self, html: str, temp_dir: str,
                                       convert_svg: bool = False,
                                       svg_pixel_width: int = 1920,
@@ -278,14 +318,26 @@ class ExportHandlerBase(APIHandler):
             if convert_svg and m.group(1) == 'svg+xml'
         ]
         rendered: dict[int, bytes | None] = {}
+        # Per-image target DPI: small inline badges get a high DPI so their
+        # rasterized PNG embeds at the badge's physical size (not page width).
+        target_dpi: dict[int, int] = {}
 
         if svg_indices:
             async with PlaywrightSvgRenderer(color_scheme=color_scheme) as renderer:
                 for i in svg_indices:
                     try:
                         svg_bytes = base64.b64decode(matches[i].group(2))
+                        svg_text = svg_bytes.decode('utf-8', errors='replace')
+                        vb_w, vb_h = PlaywrightSvgRenderer._viewbox_dims(svg_text)
+                        spec = self._badge_render_spec(
+                            matches[i].group(0), vb_w, vb_h
+                        )
+                        if spec is not None:
+                            render_w, target_dpi[i] = spec
+                        else:
+                            render_w = svg_pixel_width
                         rendered[i] = await renderer.render(
-                            svg_bytes, width=svg_pixel_width
+                            svg_bytes, width=render_w
                         )
                     except ChromiumUnavailableError:
                         # Bubble up; handler converts to a typed HTTP error
@@ -321,26 +373,37 @@ class ExportHandlerBase(APIHandler):
                 with open(filepath, 'wb') as f:
                     f.write(img_bytes)
 
-                # Normalize DPI to 96 for consistent sizing in DOCX.
-                # Embedded DPI metadata in JPEG/PNG files drives python-docx's
-                # native-size computation; without normalization the same pixel
-                # dimensions render at wildly different sizes.
+                # Normalize DPI for consistent sizing in DOCX. Embedded DPI
+                # metadata drives python-docx's native-size computation; without
+                # it the same pixel dimensions render at wildly different sizes.
+                # Small inline badges get a high DPI (target_dpi[i]) so their PNG
+                # embeds at the badge's physical size rather than at page width.
+                dpi = target_dpi.get(i, 96)
                 if ext in ('.jpg', '.jpeg', '.png'):
                     try:
                         from PIL import Image
                         img = Image.open(filepath)
-                        img.save(filepath, dpi=(96, 96))
+                        img.save(filepath, dpi=(dpi, dpi))
                     except Exception:
                         pass
 
-                other_attrs = re.findall(
-                    r'((?:alt|style|width|height)=["\'][^"\']*["\'])', full_tag
-                )
-                attrs_str = ' '.join(other_attrs)
-                if attrs_str:
-                    out.append(f'<img src="{filepath}" {attrs_str}>')
+                if i in target_dpi:
+                    # Badge: rely on native DPI size; drop width/height/style so
+                    # nothing scales it back up to the cell width. Keep alt only.
+                    alt = re.search(r'(alt=["\'][^"\']*["\'])', full_tag)
+                    out.append(
+                        f'<img src="{filepath}" {alt.group(1)}>' if alt
+                        else f'<img src="{filepath}">'
+                    )
                 else:
-                    out.append(f'<img src="{filepath}">')
+                    other_attrs = re.findall(
+                        r'((?:alt|style|width|height)=["\'][^"\']*["\'])', full_tag
+                    )
+                    attrs_str = ' '.join(other_attrs)
+                    if attrs_str:
+                        out.append(f'<img src="{filepath}" {attrs_str}>')
+                    else:
+                        out.append(f'<img src="{filepath}">')
             except Exception:
                 out.append(full_tag)
 
@@ -350,6 +413,10 @@ class ExportHandlerBase(APIHandler):
     def embed_images_as_base64(self, content: str, markdown_dir: Path) -> str:
         """
         Replace local and remote image references with base64-encoded data URIs.
+
+        Handles both Markdown image syntax ``![alt](path)`` and raw HTML
+        ``<img src="path">`` tags (the latter common inside Markdown tables,
+        where inline badges/pills are written as HTML).
 
         - Local paths are read from disk relative to ``markdown_dir``.
         - ``http://`` / ``https://`` URLs are fetched (10 s timeout, 5 MB cap)
@@ -394,38 +461,52 @@ class ExportHandlerBase(APIHandler):
                 remote_cache[url] = None
                 return None
 
-        def replace_image(match):
-            alt_text = match.group(1)
-            img_path = match.group(2)
-
-            if img_path.startswith('data:'):
-                return match.group(0)
-
-            if img_path.startswith(('http://', 'https://')):
-                data_uri = fetch_remote(img_path)
-                if data_uri is None:
-                    return match.group(0)
-                return f'![{alt_text}]({data_uri})'
-
+        def local_data_uri(img_path: str) -> str | None:
             # URL-decode the path (handles %20 for spaces, etc.)
-            img_path_decoded = unquote(img_path)
-            full_path = (markdown_dir / img_path_decoded).resolve()
-
+            full_path = (markdown_dir / unquote(img_path)).resolve()
             if not full_path.exists():
-                return match.group(0)
-
+                return None
             try:
                 with open(full_path, 'rb') as img_file:
                     img_data = base64.b64encode(img_file.read()).decode('utf-8')
-
                 ext = full_path.suffix.lower()
                 mime_type = mime_types.get(ext, 'application/octet-stream')
-
-                return f'![{alt_text}](data:{mime_type};base64,{img_data})'
+                return f'data:{mime_type};base64,{img_data}'
             except Exception:
-                return match.group(0)
+                return None
 
-        return re.sub(img_pattern, replace_image, content)
+        def resolve_src(src: str) -> str | None:
+            """Return a base64 data URI for ``src``, or None to leave it as-is."""
+            if src.startswith('data:'):
+                return None
+            if src.startswith(('http://', 'https://')):
+                return fetch_remote(src)
+            return local_data_uri(src)
+
+        def replace_image(match):
+            alt_text = match.group(1)
+            data_uri = resolve_src(match.group(2))
+            if data_uri is None:
+                return match.group(0)
+            return f'![{alt_text}]({data_uri})'
+
+        content = re.sub(img_pattern, replace_image, content)
+
+        # Raw HTML <img> tags (inline badges/pills inside Markdown tables).
+        src_attr_re = re.compile(r'(src\s*=\s*)(["\'])(.*?)\2', re.IGNORECASE)
+
+        def replace_html_img(tag_match):
+            tag = tag_match.group(0)
+
+            def sub_src(m):
+                data_uri = resolve_src(m.group(3))
+                if data_uri is None:
+                    return m.group(0)
+                return f'{m.group(1)}"{data_uri}"'
+
+            return src_attr_re.sub(sub_src, tag, count=1)
+
+        return re.sub(r'<img\b[^>]*>', replace_html_img, content, flags=re.IGNORECASE)
 
     def get_pygments_css(self, dark: bool = False) -> str:
         """Get Pygments CSS for syntax highlighting.
