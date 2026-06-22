@@ -5,6 +5,8 @@ Provides API endpoints for exporting markdown files to PDF, DOCX, and HTML forma
 using pure Python libraries (no system dependencies).
 """
 
+from __future__ import annotations
+
 import json
 import os
 import base64

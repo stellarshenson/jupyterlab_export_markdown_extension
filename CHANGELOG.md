@@ -2,6 +2,10 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.11
+
+- Fix server extension failing to load on Python 3.9 - the 1.6.10 hardening used PEP 604 `X | None` type annotations without `from __future__ import annotations`, which Python 3.9 evaluates eagerly and rejects with `unsupported operand type(s) for |`; annotations are now deferred so the extension imports on Python 3.9+ again
+
 ## 1.6.10
 
 - Contain local image reads to the Jupyter server root - path-traversal guard (fail-closed) blocks `<img src="../../etc/passwd">` and other escapes outside the workspace
