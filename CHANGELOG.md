@@ -2,6 +2,10 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.12
+
+- Drop Python 3.9 support - minimum is now Python 3.10 (`requires-python >=3.10`), matching the PEP 604 `X | None` type-annotation syntax used in the server backend; the CI isolated-install job and README requirements are updated accordingly
+
 ## 1.6.11
 
 - Fix server extension failing to load on Python 3.9 - the 1.6.10 hardening used PEP 604 `X | None` type annotations without `from __future__ import annotations`, which Python 3.9 evaluates eagerly and rejects with `unsupported operand type(s) for |`; annotations are now deferred so the extension imports on Python 3.9+ again
