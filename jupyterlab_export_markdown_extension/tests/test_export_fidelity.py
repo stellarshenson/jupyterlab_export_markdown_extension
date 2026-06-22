@@ -1314,13 +1314,16 @@ class TestHtmlImgBadges:
 
     def test_embed_local_html_img(self):
         """embed_images_as_base64 inlines a raw HTML <img> local src."""
+        from types import SimpleNamespace
         from jupyterlab_export_markdown_extension.routes import ExportDocxHandler
 
-        handler = ExportDocxHandler.__new__(ExportDocxHandler)
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "badge.svg").write_text(SIZE_BADGE_SVG)
+            stub = SimpleNamespace(
+                contents_manager=SimpleNamespace(root_dir=d)
+            )
             html = '<img src="badge.svg" alt="XL" style="max-height:22px">'
-            out = handler.embed_images_as_base64(html, Path(d))
+            out = ExportDocxHandler.embed_images_as_base64(stub, html, Path(d))
             assert "data:image/svg+xml;base64," in out
             assert 'src="badge.svg"' not in out
             assert 'alt="XL"' in out  # other attributes preserved
@@ -1329,20 +1332,77 @@ class TestHtmlImgBadges:
         """A small max-height yields a tiny render width + high DPI; an
         unsized image yields None (full diagram width)."""
         from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+        spec = ExportHandlerBase._badge_render_spec
 
-        small = ExportHandlerBase._badge_render_spec(
-            '<img style="max-height:22px;max-width:1000px">', 60, 40
-        )
+        small = spec('<img style="max-height:22px;max-width:1000px">', 60, 40)
         assert small is not None
         render_w, dpi = small
         # 22px * (60/40) = 33px display -> *4 supersample = 132px, dpi 384
         assert render_w == 132
         assert dpi == 384
 
-        assert ExportHandlerBase._badge_render_spec('<img alt="x">', 800, 345) is None
-        assert ExportHandlerBase._badge_render_spec(
-            '<img style="max-height:900px">', 60, 40
-        ) is None
+        assert spec('<img alt="x">', 800, 345) is None
+        assert spec('<img style="max-height:900px">', 60, 40) is None
+
+    def test_badge_render_spec_robustness(self):
+        """Adversarial-review hardening: plain height, width-only, unit/ garbage
+        handling, and CSS shorthands that must NOT be read as height/width."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+        spec = ExportHandlerBase._badge_render_spec
+
+        # plain `height:` in style (no max-) is detected
+        assert spec('<img style="height:22px">', 60, 40) is not None
+        # width-only badge is detected (keyed off width when no height)
+        assert spec('<img style="max-width:80px">', 60, 40) == (320, 384)
+        # height attribute (bare number) is detected
+        assert spec('<img height="22">', 60, 40) is not None
+        # malformed number must not raise and must not size (-> None)
+        assert spec('<img style="max-height:1.2.3px">', 60, 40) is None
+        # non-px units are ignored (not mis-sized)
+        assert spec('<img height="2em">', 60, 40) is None
+        assert spec('<img style="max-height:50%">', 60, 40) is None
+        # CSS shorthands containing 'height'/'width' must NOT match
+        assert spec('<img style="line-height:20px">', 60, 40) is None
+        assert spec('<img style="stroke-width:3px">', 60, 40) is None
+        # width clamp wins when max-height is huge but max-width is tiny
+        # eff_h = min(9999, 16/(60/40)=10.67)=10.67 -> disp_w 16 -> *4 = 64
+        assert spec('<img style="max-height:9999px;max-width:16px">', 60, 40) == (64, 384)
+        # bare width attribute is read; large one is not a badge
+        assert spec('<img width="22">', 60, 40) == (88, 384)
+        assert spec('<img width="800">', 60, 40) is None
+        # data-* attributes must NOT be read as width/height
+        assert spec('<img data-height="20">', 60, 40) is None
+        assert spec('<img data-width="20">', 60, 40) is None
+        # width=/height= inside another attribute's VALUE must NOT be read
+        assert spec('<img src="x.svg" alt="chart width=5 tall">', 800, 345) is None
+        assert spec('<img alt="height=8 widget">', 800, 345) is None
+        # a crafted viewBox aspect cannot drive an unbounded render width (DoS)
+        rw, _ = spec('<img style="max-height:1px">', 100000, 1)
+        assert rw <= ExportHandlerBase._BADGE_RENDER_MAX_PX
+        # max-height takes precedence over a larger plain height in the same style
+        assert spec('<img style="height:300px;max-height:22px">', 60, 40) is not None
+
+    def test_embed_src_not_confused_by_data_src(self):
+        """resolve only the real `src`, never a `data-src`/`lowsrc` substring,
+        and don't truncate a tag on a `>` inside an attribute value."""
+        from types import SimpleNamespace
+        from jupyterlab_export_markdown_extension.routes import ExportDocxHandler
+
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "real.svg").write_text(SIZE_BADGE_SVG)
+            stub = SimpleNamespace(
+                contents_manager=SimpleNamespace(root_dir=d)
+            )
+            # data-src must be left alone; real src embedded
+            out = ExportDocxHandler.embed_images_as_base64(
+                stub,
+                '<img data-src="lazy.svg" src="real.svg" alt="a > b">',
+                Path(d),
+            )
+            assert 'data-src="lazy.svg"' in out  # untouched
+            assert "data:image/svg+xml;base64," in out  # real src embedded
+            assert 'src="real.svg"' not in out
+            assert 'alt="a > b"' in out  # tag not truncated at the inner '>'
 
     async def test_docx_badges_small_inline(self, jp_fetch, test_html_img_badge_file):
         """HTML <img> badges embed and stay small (~22px), not cell-width."""
@@ -1370,6 +1430,64 @@ class TestHtmlImgBadges:
             assert shape.width <= Inches(0.6), (
                 f"badge width {shape.width} should be small, not cell-width"
             )
+
+
+class TestImageEmbedSecurity:
+    """Local-file containment and SSRF guard on image embedding."""
+
+    def test_ip_is_blocked(self):
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+        b = ExportHandlerBase._ip_is_blocked
+        # non-public ranges an SSRF would target
+        assert b("169.254.169.254")  # cloud metadata (link-local)
+        assert b("127.0.0.1")        # loopback
+        assert b("10.0.0.1")         # private
+        assert b("192.168.1.1")      # private
+        assert b("::1")              # ipv6 loopback
+        assert b("not-an-ip")        # unparseable -> fail closed
+        # public addresses are allowed
+        assert not b("8.8.8.8")
+        assert not b("1.1.1.1")
+
+    def test_host_is_blocked_localhost(self):
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+        # resolves to a loopback address -> blocked; empty host -> blocked
+        assert ExportHandlerBase._host_is_blocked("localhost")
+        assert ExportHandlerBase._host_is_blocked(None)
+
+    def test_local_read_contained_to_root(self):
+        """A traversal src escaping the server root must NOT be embedded; a
+        sibling image inside the root must still embed."""
+        from types import SimpleNamespace
+        from jupyterlab_export_markdown_extension.routes import ExportDocxHandler
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "secret.txt").write_text("TOP SECRET")  # outside markdown_dir
+            sub = root / "docs"
+            sub.mkdir()
+            (sub / "ok.svg").write_text(SIZE_BADGE_SVG)
+
+            # contents_manager is a read-only handler property; call the method
+            # with a stub self exposing only what it reads.
+            stub = SimpleNamespace(
+                contents_manager=SimpleNamespace(root_dir=str(root))
+            )
+            embed = ExportDocxHandler.embed_images_as_base64
+
+            # legit sibling under the root -> embedded
+            out_ok = embed(stub, '<img src="ok.svg">', sub)
+            assert "data:image/svg+xml;base64," in out_ok
+
+            # escape the root -> refused, left untouched
+            out_esc = embed(stub, '<img src="../../../../etc/passwd">', sub)
+            assert "data:" not in out_esc
+            assert 'src="../../../../etc/passwd"' in out_esc
+
+            # fail closed: if the root can't be determined, refuse local reads
+            blind = SimpleNamespace(contents_manager=SimpleNamespace(root_dir=None))
+            out_blind = embed(blind, '<img src="ok.svg">', sub)
+            assert "data:" not in out_blind
 
 
 TEST_MARKDOWN_WITH_ANCHORS = """# Anchor Links

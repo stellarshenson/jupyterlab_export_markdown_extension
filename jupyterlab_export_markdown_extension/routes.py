@@ -8,11 +8,13 @@ using pure Python libraries (no system dependencies).
 import json
 import os
 import base64
+import ipaddress
 import re
 import io
+import socket
 import tempfile
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from jupyter_server.base.handlers import APIHandler
 from jupyter_server.utils import url_path_join
@@ -184,6 +186,31 @@ class ExportHandlerBase(APIHandler):
         root_dir = self.contents_manager.root_dir
         return Path(root_dir) / relative_path
 
+    @staticmethod
+    def _ip_is_blocked(ip_str: str) -> bool:
+        """True for any non-public address - the ranges an SSRF would target
+        (cloud metadata 169.254.169.254, localhost, intranet, CGNAT). Allowlist
+        via ``is_global`` rather than enumerating private ranges, so special-use
+        blocks we didn't think of stay blocked.
+        """
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return True
+        return not ip.is_global
+
+    @classmethod
+    def _host_is_blocked(cls, host: str | None) -> bool:
+        """Resolve a hostname and block it if any resolved IP is non-public.
+        Unresolvable hosts are blocked (fail closed)."""
+        if not host:
+            return True
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except OSError:
+            return True
+        return any(cls._ip_is_blocked(info[4][0]) for info in infos)
+
     def read_markdown_file(self, path: Path) -> str:
         """Read and return the contents of a markdown file."""
         with open(path, 'r', encoding='utf-8') as f:
@@ -245,39 +272,73 @@ class ExportHandlerBase(APIHandler):
     # Pixel-density multiplier applied to a badge's display size when
     # rasterizing, so it stays crisp when zoomed in Word.
     _BADGE_RENDER_SCALE = 4
+    # Hard ceiling on a badge's rasterized width (px) - guards against a crafted
+    # SVG viewBox aspect ratio driving the Playwright canvas to an absurd size.
+    _BADGE_RENDER_MAX_PX = 4096
 
     @classmethod
     def _badge_render_spec(cls, full_tag: str, vb_w: float, vb_h: float):
         """Render width and DPI for a small, explicitly-sized inline image.
 
-        Reads ``max-height`` / ``max-width`` from the tag's ``style`` (or a
-        ``height`` attribute). When a small height is present, returns
-        ``(render_width_px, dpi)`` so the PNG embeds at that physical size with
-        ``_BADGE_RENDER_SCALE``x pixel density. Returns ``None`` for unsized or
-        large images, which then rasterize at the full diagram width.
+        Reads height/width from the tag's ``style`` (``max-height`` preferred
+        over ``height``) or its ``width``/``height`` attributes. When the
+        resulting display size is small, returns ``(render_width_px, dpi)`` so
+        the PNG embeds at that physical size with ``_BADGE_RENDER_SCALE``x pixel
+        density. Returns ``None`` for unsized or large images, which then
+        rasterize at the full diagram width.
         """
+        num = r'(\d+(?:\.\d+)?)'  # strict number - no ValueError on "1.2.3px"
         max_h = max_w = None
         style_m = re.search(r'style=["\']([^"\']*)["\']', full_tag, re.IGNORECASE)
         if style_m:
             s = style_m.group(1)
-            mh = re.search(r'max-height\s*:\s*([\d.]+)\s*px', s, re.IGNORECASE)
-            mw = re.search(r'max-width\s*:\s*([\d.]+)\s*px', s, re.IGNORECASE)
+            # max-height wins over plain height (CSS clamps height to max-height);
+            # the leading delimiter stops `line-height` / `stroke-width` matching.
+            mh = (re.search(r'(?:^|[;\s])max-height\s*:\s*' + num + r'\s*px', s, re.IGNORECASE)
+                  or re.search(r'(?:^|[;\s])height\s*:\s*' + num + r'\s*px', s, re.IGNORECASE))
+            mw = (re.search(r'(?:^|[;\s])max-width\s*:\s*' + num + r'\s*px', s, re.IGNORECASE)
+                  or re.search(r'(?:^|[;\s])width\s*:\s*' + num + r'\s*px', s, re.IGNORECASE))
             if mh:
                 max_h = float(mh.group(1))
             if mw:
                 max_w = float(mw.group(1))
-        if max_h is None:
-            h_attr = re.search(r'\bheight=["\']?([\d.]+)', full_tag, re.IGNORECASE)
-            if h_attr:
-                max_h = float(h_attr.group(1))
-        if max_h is None or max_h > cls._BADGE_MAX_PX:
+        # HTML width/height attributes. Tokenise attributes so a `width=`/
+        # `height=` sitting inside another attribute's quoted value (e.g.
+        # alt="x width=5") or a `data-width`/`data-height` is never read as
+        # geometry. Bare number, optional px; %, em etc. are rejected.
+        if max_h is None or max_w is None:
+            for name, dq, sq, bare in re.findall(
+                r'([-\w]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))',
+                full_tag, re.IGNORECASE,
+            ):
+                key = name.lower()
+                if key not in ('width', 'height'):
+                    continue
+                vm = re.fullmatch(num + r'(?:px)?', (dq or sq or bare).strip(), re.IGNORECASE)
+                if not vm:
+                    continue
+                if key == 'height' and max_h is None:
+                    max_h = float(vm.group(1))
+                elif key == 'width' and max_w is None:
+                    max_w = float(vm.group(1))
+        if max_h is None and max_w is None:
             return None
         if vb_w <= 0 or vb_h <= 0:
             return None
-        disp_w = max_h * (vb_w / vb_h)
-        if max_w is not None and disp_w > max_w:
-            disp_w = max_w
-        return max(1, round(disp_w * cls._BADGE_RENDER_SCALE)), 96 * cls._BADGE_RENDER_SCALE
+        # Effective rendered height = smallest height the constraints permit
+        # (a max-width can shrink a tall image below its max-height). Qualify on
+        # height so wide-but-short pills (max-width:1000px) still count as badges.
+        aspect = vb_w / vb_h
+        eff_h = max_h
+        if max_w is not None:
+            h_from_w = max_w / aspect
+            eff_h = h_from_w if eff_h is None else min(eff_h, h_from_w)
+        if eff_h > cls._BADGE_MAX_PX:
+            return None
+        disp_w = eff_h * aspect
+        render_w = min(cls._BADGE_RENDER_MAX_PX,
+                       max(1, round(disp_w * cls._BADGE_RENDER_SCALE)))
+        return render_w, 96 * cls._BADGE_RENDER_SCALE
 
     async def extract_data_uri_images(self, html: str, temp_dir: str,
                                       convert_svg: bool = False,
@@ -332,13 +393,14 @@ class ExportHandlerBase(APIHandler):
                         spec = self._badge_render_spec(
                             matches[i].group(0), vb_w, vb_h
                         )
-                        if spec is not None:
-                            render_w, target_dpi[i] = spec
-                        else:
-                            render_w = svg_pixel_width
+                        render_w = spec[0] if spec is not None else svg_pixel_width
                         rendered[i] = await renderer.render(
                             svg_bytes, width=render_w
                         )
+                        # Commit the badge DPI only after a successful render so
+                        # a later failure can't leave a stale badge flag set.
+                        if spec is not None:
+                            target_dpi[i] = spec[1]
                     except ChromiumUnavailableError:
                         # Bubble up; handler converts to a typed HTTP error
                         # so the frontend can show its install-required popup.
@@ -418,10 +480,13 @@ class ExportHandlerBase(APIHandler):
         ``<img src="path">`` tags (the latter common inside Markdown tables,
         where inline badges/pills are written as HTML).
 
-        - Local paths are read from disk relative to ``markdown_dir``.
+        - Local paths are read from disk relative to ``markdown_dir`` but must
+          stay within the Jupyter server root (the user's workspace); paths that
+          escape it (absolute, ``../`` traversal) are refused.
         - ``http://`` / ``https://`` URLs are fetched (10 s timeout, 5 MB cap)
-          so badges and other remote images embed in DOCX/PDF. Failures fall
-          back to the original URL silently.
+          so badges and other remote images embed in DOCX/PDF, but only when the
+          host resolves to a public IP (SSRF guard). Failures fall back to the
+          original reference silently.
         - ``data:`` URIs are passed through.
         """
         img_pattern = r'!\[([^\]]*)\]\(([^)"\s]+)(?:\s+"[^"]*")?\)'
@@ -434,17 +499,95 @@ class ExportHandlerBase(APIHandler):
             '.webp': 'image/webp',
         }
         remote_cache: dict[str, str | None] = {}
+        # Containment boundary for local reads - the server root the user is
+        # already allowed to browse.
+        try:
+            root_dir = Path(self.contents_manager.root_dir).resolve()
+        except Exception:
+            root_dir = None
 
         def fetch_remote(url: str) -> str | None:
             if url in remote_cache:
                 return remote_cache[url]
             try:
-                from urllib.request import Request, urlopen
+                import http.client
+                import urllib.request as _urlreq
+                from urllib.request import (
+                    Request, build_opener, HTTPRedirectHandler,
+                    HTTPHandler, HTTPSHandler,
+                )
+                parsed = urlparse(url)
+                # SSRF guard: only public http(s) hosts. Blocks localhost,
+                # intranet and the 169.254.169.254 cloud-metadata endpoint.
+                if parsed.scheme not in ('http', 'https') or \
+                        self._host_is_blocked(parsed.hostname):
+                    remote_cache[url] = None
+                    return None
+
+                # When an HTTP proxy applies, the socket connects to the proxy
+                # (often a private IP), so the peer-IP check can't run - the host
+                # pre-check above plus the proxy's own egress policy guard it.
+                try:
+                    proxied = bool(_urlreq.getproxies().get(parsed.scheme)) and \
+                        not _urlreq.proxy_bypass(parsed.hostname or '')
+                except Exception:
+                    proxied = False
+
+                host_blocked = self._host_is_blocked
+                ip_blocked = self._ip_is_blocked
+
+                def _check_peer(conn):
+                    # Authoritative SSRF check: validate the IP actually connected
+                    # to. Closes the DNS-rebinding/TOCTOU gap between the host
+                    # pre-check and urllib's own connect-time resolution.
+                    ip = conn.sock.getpeername()[0]
+                    if ip_blocked(ip):
+                        conn.close()
+                        raise OSError(f'blocked non-public address: {ip}')
+
+                class _GHTTP(http.client.HTTPConnection):
+                    def connect(self):
+                        super().connect()
+                        _check_peer(self)
+
+                class _GHTTPS(http.client.HTTPSConnection):
+                    def connect(self):
+                        super().connect()
+                        _check_peer(self)
+
+                class _GHTTPHandler(HTTPHandler):
+                    def http_open(self, req):
+                        return self.do_open(_GHTTP, req)
+
+                class _GHTTPSHandler(HTTPSHandler):
+                    def https_open(self, req):
+                        return self.do_open(
+                            _GHTTPS, req,
+                            context=getattr(self, '_context', None),
+                            check_hostname=getattr(self, '_check_hostname', None),
+                        )
+
+                class _GuardedRedirect(HTTPRedirectHandler):
+                    def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+                        p = urlparse(newurl)
+                        if p.scheme not in ('http', 'https') or host_blocked(p.hostname):
+                            return None  # refuse redirect to a non-public host
+                        return super().redirect_request(
+                            req, fp, code, msg, hdrs, newurl)
+
+                if proxied:
+                    # Default handlers route through the proxy; keep the redirect
+                    # host guard but skip the peer-IP check (peer is the proxy).
+                    opener = build_opener(_GuardedRedirect())
+                else:
+                    opener = build_opener(
+                        _GHTTPHandler(), _GHTTPSHandler(), _GuardedRedirect()
+                    )
                 req = Request(
                     url,
                     headers={'User-Agent': 'jupyterlab-export-markdown-extension'},
                 )
-                with urlopen(req, timeout=10) as resp:
+                with opener.open(req, timeout=10) as resp:
                     raw = resp.read(5 * 1024 * 1024 + 1)
                     if len(raw) > 5 * 1024 * 1024:
                         remote_cache[url] = None
@@ -462,11 +605,18 @@ class ExportHandlerBase(APIHandler):
                 return None
 
         def local_data_uri(img_path: str) -> str | None:
-            # URL-decode the path (handles %20 for spaces, etc.)
-            full_path = (markdown_dir / unquote(img_path)).resolve()
-            if not full_path.exists():
-                return None
             try:
+                # URL-decode the path (handles %20 for spaces, etc.). resolve()
+                # can raise (NUL byte, symlink loop) - treat as unresolvable.
+                full_path = (markdown_dir / unquote(img_path)).resolve()
+                # Containment: stay within the server root. Refuses absolute
+                # paths and ../ traversal that escape the workspace (e.g.
+                # /etc/passwd), while still allowing legit ../sibling refs inside
+                # the root. Fails closed: no known root -> refuse the read.
+                if root_dir is None or not full_path.is_relative_to(root_dir):
+                    return None
+                if not full_path.exists():
+                    return None
                 with open(full_path, 'rb') as img_file:
                     img_data = base64.b64encode(img_file.read()).decode('utf-8')
                 ext = full_path.suffix.lower()
@@ -477,9 +627,10 @@ class ExportHandlerBase(APIHandler):
 
         def resolve_src(src: str) -> str | None:
             """Return a base64 data URI for ``src``, or None to leave it as-is."""
-            if src.startswith('data:'):
+            low = src.lower()
+            if low.startswith('data:'):
                 return None
-            if src.startswith(('http://', 'https://')):
+            if low.startswith(('http://', 'https://')):
                 return fetch_remote(src)
             return local_data_uri(src)
 
@@ -493,7 +644,9 @@ class ExportHandlerBase(APIHandler):
         content = re.sub(img_pattern, replace_image, content)
 
         # Raw HTML <img> tags (inline badges/pills inside Markdown tables).
-        src_attr_re = re.compile(r'(src\s*=\s*)(["\'])(.*?)\2', re.IGNORECASE)
+        # The (?<![-\w:]) guard keeps `data-src`/`lowsrc`/`xlink:src` from
+        # matching as `src`.
+        src_attr_re = re.compile(r'(?<![-\w:])(src\s*=\s*)(["\'])(.*?)\2', re.IGNORECASE)
 
         def replace_html_img(tag_match):
             tag = tag_match.group(0)
@@ -506,7 +659,10 @@ class ExportHandlerBase(APIHandler):
 
             return src_attr_re.sub(sub_src, tag, count=1)
 
-        return re.sub(r'<img\b[^>]*>', replace_html_img, content, flags=re.IGNORECASE)
+        # Quote-aware tag match so a `>` inside an attribute value (e.g.
+        # alt="a > b") doesn't truncate the tag.
+        img_tag_re = r'<img\b(?:[^>"\']|"[^"]*"|\'[^\']*\')*>'
+        return re.sub(img_tag_re, replace_html_img, content, flags=re.IGNORECASE)
 
     def get_pygments_css(self, dark: bool = False) -> str:
         """Get Pygments CSS for syntax highlighting.

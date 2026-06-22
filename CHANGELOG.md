@@ -2,6 +2,13 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.10
+
+- Contain local image reads to the Jupyter server root - path-traversal guard (fail-closed) blocks `<img src="../../etc/passwd">` and other escapes outside the workspace
+- Guard remote image fetches against SSRF - global-IP allowlist plus a connection-time peer-IP check that defeats DNS rebinding, with per-hop redirect re-validation and proxy-awareness so badges still load behind a proxy
+- Harden HTML `<img>` badge sizing - strict numeric parsing, correct handling of width-only badges and `max-height`/`max-width` clamps, attribute tokenizer that ignores values inside `alt`/`data-*`, and a render-width cap
+- Anchor image `src` rewriting so `data-src`/`lowsrc`/`xlink:src` are not matched, and make `<img>` tag matching quote-aware to avoid truncation on `>` inside attribute values
+
 ## 1.2.0
 
 - Add syntax highlighting for code blocks using Pygments
