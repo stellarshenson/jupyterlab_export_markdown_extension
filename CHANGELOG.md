@@ -2,6 +2,10 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.13
+
+- Rename the extension's entry in the JupyterLab Settings Editor from "Export Markdown Extension" to "Markdown Export Extension"
+
 ## 1.6.12
 
 - Drop Python 3.9 support - minimum is now Python 3.10 (`requires-python >=3.10`), matching the PEP 604 `X | None` type-annotation syntax used in the server backend; the CI isolated-install job and README requirements are updated accordingly
