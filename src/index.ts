@@ -176,7 +176,8 @@ function findMermaidSource(img: HTMLImageElement): string | null {
 async function captureMermaidDiagrams(
   shell: JupyterFrontEnd.IShell,
   manager: IMermaidManager | null,
-  theme: 'light' | 'dark'
+  theme: 'light' | 'dark',
+  reThemeDom = true
 ): Promise<IMermaidDiagram[]> {
   const diagrams: IMermaidDiagram[] = [];
   const currentWidget = shell.currentWidget;
@@ -195,14 +196,14 @@ async function captureMermaidDiagrams(
     renderedMarkdown = document.querySelector('.jp-RenderedMarkdown');
   }
 
-  if (!renderedMarkdown) {
-    return diagrams;
-  }
-
   let mermaidIndex = 0;
 
-  // Find all IMG elements with SVG data URIs (JupyterLab's Mermaid rendering)
-  const imgElements = renderedMarkdown.querySelectorAll('img');
+  // Find all IMG elements with SVG data URIs (JupyterLab's Mermaid rendering).
+  // When no markdown is rendered (source editor open, no preview), this yields
+  // nothing and the source-based fallback below takes over.
+  const imgElements = renderedMarkdown
+    ? renderedMarkdown.querySelectorAll('img')
+    : [];
 
   for (const img of Array.from(imgElements)) {
     const src = img.getAttribute('src') || '';
@@ -222,7 +223,7 @@ async function captureMermaidDiagrams(
       let svgData: string | null = null;
 
       // Prefer re-rendering the source in the chosen export theme
-      if (manager) {
+      if (manager && reThemeDom) {
         const source = findMermaidSource(img);
         if (source) {
           const themed = await renderMermaidInTheme(manager, source, theme);
@@ -258,7 +259,9 @@ async function captureMermaidDiagrams(
   }
 
   // Also check for inline SVG elements (alternative Mermaid rendering)
-  const svgElements = renderedMarkdown.querySelectorAll('svg');
+  const svgElements = renderedMarkdown
+    ? Array.from(renderedMarkdown.querySelectorAll('svg'))
+    : [];
   svgElements.forEach(svg => {
     // Check if it's a Mermaid diagram
     const isMermaid =
@@ -281,6 +284,30 @@ async function captureMermaidDiagrams(
       mermaidIndex++;
     }
   });
+
+  // Preview-independent fallback: when nothing was captured from the rendered
+  // DOM (the file is open in the source editor with no rendered markdown view),
+  // render the mermaid blocks straight from the document source so they export
+  // as images instead of silently falling through as raw ```mermaid code.
+  if (diagrams.length === 0 && manager) {
+    const source = (currentWidget as any).context?.model?.toString?.() ?? '';
+    const blocks = source.match(/```mermaid\s*\n[\s\S]*?```/g) || [];
+    let idx = 0;
+    for (const block of blocks) {
+      const inner = block.replace(/```mermaid\s*\n/, '').replace(/```\s*$/, '');
+      const themed = await renderMermaidInTheme(manager, inner, theme);
+      if (themed) {
+        diagrams.push({
+          index: idx,
+          svg: svgToDataUri(themed),
+          png: '',
+          width: 0,
+          height: 0
+        });
+      }
+      idx++;
+    }
+  }
 
   return diagrams;
 }
@@ -474,8 +501,9 @@ const plugin: JupyterFrontEndPlugin<void> = {
             const resolvedDocxTheme = resolveDocxTheme(docxTheme);
             const mermaidDiagrams = await captureMermaidDiagrams(
               shell,
-              format === 'html' ? null : mermaidManager,
-              resolvedDocxTheme
+              mermaidManager,
+              resolvedDocxTheme,
+              format !== 'html'
             );
             await exportMarkdown(
               path,

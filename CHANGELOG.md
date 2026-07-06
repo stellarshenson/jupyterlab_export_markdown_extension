@@ -2,6 +2,10 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.14
+
+- Fix mermaid diagrams exporting as raw code instead of images when the markdown file is open in the source editor without a rendered preview - the exporter now renders mermaid blocks from the document source via the mermaid manager when no rendered diagram is present in the DOM, so DOCX/PDF/HTML exports embed the diagram regardless of whether the preview is open
+
 ## 1.6.13
 
 - Rename the extension's entry in the JupyterLab Settings Editor from "Export Markdown Extension" to "Markdown Export Extension"
