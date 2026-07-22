@@ -195,6 +195,11 @@ class ExportHandlerBase(APIHandler):
     #: Page margin of the exported PDF, every side.
     PDF_PAGE_MARGIN = 36
 
+    #: reportlab's default LEFT/RIGHTPADDING inside a table cell. Distinct from
+    #: PDF_FRAME_PADDING (which happens to share the value): this is the gap
+    #: around cell text, that is the gap inside the page frame.
+    PDF_TABLE_CELL_PADDING = 6
+
     def get_absolute_path(self, relative_path: str) -> Path:
         """Convert a relative path to an absolute path within the server root."""
         root_dir = self.contents_manager.root_dir
@@ -952,7 +957,10 @@ class ExportHandlerBase(APIHandler):
         Only outermost tables are wrapped, and a table's attributes are kept:
         a non-greedy regex would close the wrapper at a nested table's end tag,
         and browser error recovery then stretches the box over the rest of the
-        document, scrolling every element that follows.
+        document, scrolling every element that follows. Comments are matched
+        and skipped so a `<table>` written inside `<!-- ... -->` (markdown
+        passes comments through verbatim) cannot open a wrapper that never
+        closes.
 
         HTML export only - the DOCX and PDF paths parse this markup with
         htmldocx and have their own page fitting.
@@ -960,7 +968,10 @@ class ExportHandlerBase(APIHandler):
         out = []
         depth = 0
         start = 0
-        for tag in re.finditer(r'<table\b[^>]*>|</table\s*>', html):
+        for tag in re.finditer(r'<!--.*?-->|<table\b[^>]*>|</table\s*>', html,
+                               flags=re.DOTALL):
+            if tag.group().startswith('<!--'):
+                continue
             if tag.group().startswith('</'):
                 if depth == 0:
                     continue
@@ -1884,7 +1895,11 @@ class ExportHandlerBase(APIHandler):
         """
         ncols = max((len(row) for row in table_data), default=1) or 1
         fair_share = available / ncols
-        side_padding = 6 if fair_share >= 16 else (1 if fair_share >= 3 else 0)
+        # Full padding while columns are roomy, then step down so reportlab
+        # still has room to render as the fair share shrinks past the padding
+        # (>= 16pt) and then past a hairline column (>= 3pt)
+        full = cls.PDF_TABLE_CELL_PADDING
+        side_padding = full if fair_share >= 16 else (1 if fair_share >= 3 else 0)
         # Both paddings, plus rounding slack so a word whose width matches its
         # column is not split mid-word
         cell_padding = 2 * side_padding + 2

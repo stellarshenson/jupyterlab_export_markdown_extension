@@ -1625,19 +1625,18 @@ def pdf_frame_width():
     return (letter[0] - 2 * ExportHandlerBase.PDF_PAGE_MARGIN
             - 2 * ExportHandlerBase.PDF_FRAME_PADDING)
 
-def pdf_text_past_margin(pdf_bytes, right_margin=None):
+def pdf_text_past_margin(pdf_bytes):
     """Text runs in `pdf_bytes` whose estimated right edge passes the margin.
 
-    The margin defaults to the frame's content edge: the page margin less the
-    padding SimpleDocTemplate puts inside its frame. A run's x origin is the
-    text matrix offset within the CTM - reportlab puts it in cm for Paragraph
-    cells and in tm for string ones. 0.5em per character under-states the real
+    The margin is the frame's content edge: the page margin less the padding
+    SimpleDocTemplate puts inside its frame. A run's x origin is the text
+    matrix offset within the CTM - reportlab puts it in cm for Paragraph cells
+    and in tm for string ones. 0.5em per character under-states the real
     advance width, so a run that merely fills its column is never reported.
     """
     from pypdf import PdfReader
 
-    if right_margin is None:
-        right_margin = pdf_frame_right_edge()
+    right_margin = pdf_frame_right_edge()
     overflowing = []
 
     def visitor(text, cm, tm, font_dict, font_size):
@@ -1810,9 +1809,20 @@ class TestWideTableFitsPage:
             method="POST",
             body=json.dumps({"path": "overflowing.md"}),
         )
-        table = Document(io.BytesIO(response.body)).tables[0]
+        from docx.shared import Twips
+
+        doc = Document(io.BytesIO(response.body))
+        section = doc.sections[0]
+        usable = section.page_width - section.left_margin - section.right_margin
+        table = doc.tables[0]
         layout = table._tbl.tblPr.find(qn('w:tblLayout'))
         assert layout is not None, "an over-wide table was left on autofit"
+        # Not just present - a fixed layout of a grid that actually fits
+        assert layout.get(qn('w:type')) == 'fixed'
+        grid = table._tbl.find(qn('w:tblGrid'))
+        widths = [Twips(int(col.get(qn('w:w'))))
+                  for col in grid.findall(qn('w:gridCol'))]
+        assert sum(widths) <= usable, "fitted grid still runs past the margin"
 
     async def test_html_table_does_not_overflow_the_viewport(
             self, jp_fetch, test_wide_table_file):
@@ -2011,6 +2021,30 @@ class TestWideTableFitsPage:
 
         assert nested_in_cell, "the nested table was lifted out of its cell"
         assert wrappers == 1, f"expected one wrapper, got {wrappers}"
+
+    def test_html_table_inside_a_comment_opens_no_wrapper(self):
+        """A `<table>` inside an HTML comment must not open a scroll box.
+
+        Markdown passes comments through verbatim. A wrapper scan that is
+        blind to comments opens a `<div class="table-scroll">` at the commented
+        `<table>`, never meets a `</table>`, and leaves the div open over the
+        rest of the document.
+        """
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        handler = ExportHandlerBase.__new__(ExportHandlerBase)
+        html = ("<p>Intro.</p><!-- TODO: add a <table> here -->"
+                "<p>After the comment.</p>")
+        wrapped = handler.wrap_html_tables(html)
+        assert '<div class="table-scroll">' not in wrapped, (
+            "a commented <table> opened a wrapper"
+        )
+        # A real table after the comment must still wrap and close cleanly
+        both = handler.wrap_html_tables(
+            html + "<table><tr><td>x</td></tr></table>")
+        assert both.count('<div class="table-scroll">') == 1
+        assert both.count('</div>') == 1
+
 
 class TestColumnWidthFitting:
     """Unit tests for the shared column-width fitter."""

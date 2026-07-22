@@ -24,6 +24,7 @@ Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No extern
 - **Mermaid Diagrams** - Rendered server-side to PNG via Playwright Chromium at the configured SVG export width
 - **Embedded Images** - Local images automatically converted to base64
 - **Syntax Highlighting** - Code blocks with Pygments-powered coloring
+- **Wide Tables** - Tables wider than the page wrap within a fitted column layout instead of running past the margin, in PDF, DOCX and HTML
 - **Export Spinner** - Modal dialog shows progress during export operations
 - **File Menu Integration** - "Export Markdown As" submenu appears when markdown is active
 - **Command Palette** - All export commands available via Ctrl+Shift+C

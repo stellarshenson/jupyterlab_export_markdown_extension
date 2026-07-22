@@ -2,6 +2,10 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.15
+
+- Fix tables wider than the page running past the right margin in PDF, DOCX and HTML - cells now wrap onto multiple lines within a fitted column layout instead of overflowing, with a horizontal-scroll fallback (kept off when printing) for tables too wide to wrap in HTML
+
 ## 1.6.14
 
 - Fix mermaid diagrams exporting as raw code instead of images when the markdown file is open in the source editor without a rendered preview - the exporter now renders mermaid blocks from the document source via the mermaid manager when no rendered diagram is present in the DOM, so DOCX/PDF/HTML exports embed the diagram regardless of whether the preview is open
