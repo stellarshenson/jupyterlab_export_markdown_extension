@@ -1625,6 +1625,14 @@ def pdf_frame_width():
     return (letter[0] - 2 * ExportHandlerBase.PDF_PAGE_MARGIN
             - 2 * ExportHandlerBase.PDF_FRAME_PADDING)
 
+def pdf_frame_height():
+    """The height a flowable is given, page less both margins and both pads."""
+    from reportlab.lib.pagesizes import letter
+    from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+    return (letter[1] - 2 * ExportHandlerBase.PDF_PAGE_MARGIN
+            - 2 * ExportHandlerBase.PDF_FRAME_PADDING)
+
 def pdf_text_past_margin(pdf_bytes):
     """Text runs in `pdf_bytes` whose estimated right edge passes the margin.
 
@@ -2044,6 +2052,224 @@ class TestWideTableFitsPage:
             html + "<table><tr><td>x</td></tr></table>")
         assert both.count('<div class="table-scroll">') == 1
         assert both.count('</div>') == 1
+
+
+class TestPageFitting:
+    """Tables must not orphan a header at a page break; tall images must fit."""
+
+    async def test_pdf_table_header_repeats_on_each_page(
+            self, jp_fetch, jp_root_dir):
+        """A table spanning pages repeats its header - the mechanism that also
+        keeps the header from being stranded alone at a page bottom."""
+        import fitz
+
+        rows = "\n".join(f"| r{i:02d}a | r{i:02d}b |" for i in range(80))
+        (jp_root_dir / "tall_table.md").write_text(
+            f"| ZZHEADERZZ | COLBETA |\n|---|---|\n{rows}\n", encoding="utf-8")
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "tall_table.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        assert doc.page_count >= 2, "table should span multiple pages"
+        pages_with_header = sum(
+            1 for page in doc if "ZZHEADERZZ" in page.get_text())
+        assert pages_with_header >= 2, (
+            "header not repeated on continuation pages - it can be orphaned"
+        )
+
+    async def test_pdf_page_tall_header_row_still_exports(
+            self, jp_fetch, jp_root_dir):
+        """A repeated header must not re-arm the LayoutError splitInRow fixed.
+
+        With repeatRows the header is re-emitted on each page, so a header row
+        taller than a page cannot be placed and reportlab raises LayoutError.
+        A page-long alert (a 1x1 table), a header-only tall table and a tall
+        header with a body row must all still export.
+        """
+        long_para = " ".join(f"word{i}" for i in range(1500))
+        cases = {
+            "alert": f"> [!NOTE]\n> {long_para}\n",
+            "header_only": f"| {long_para} |\n|---|\n",
+            "tall_header": f"| {long_para} |\n|---|\n| body |\n",
+        }
+        for name, md in cases.items():
+            (jp_root_dir / f"{name}.md").write_text(md, encoding="utf-8")
+            response = await jp_fetch(
+                "jupyterlab-export-markdown-extension",
+                "export/pdf",
+                method="POST",
+                body=json.dumps({"path": f"{name}.md"}),
+                raise_error=False,
+            )
+            assert response.code == 200, (name, response.body[:200])
+            assert response.body.startswith(b"%PDF-")
+
+    async def test_docx_table_header_row_marked_repeating(
+            self, jp_fetch, jp_root_dir):
+        """The header row carries w:tblHeader so Word repeats it and never
+        strands it alone at a page bottom."""
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        (jp_root_dir / "hdr_table.md").write_text(
+            "| A | B |\n|---|---|\n| one | two |\n| three | four |\n",
+            encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "hdr_table.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        table = Document(io.BytesIO(response.body)).tables[0]
+        trPr = table.rows[0]._tr.find(qn('w:trPr'))
+        assert trPr is not None and trPr.find(qn('w:tblHeader')) is not None, (
+            "first row is not marked as a repeating header"
+        )
+
+    async def test_html_print_keeps_header_with_body(
+            self, jp_fetch, jp_root_dir):
+        """In print media the table header must not break away from its body."""
+        from playwright.async_api import async_playwright
+
+        (jp_root_dir / "hdr_html.md").write_text(
+            "| A | B |\n|---|---|\n| one | two |\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "hdr_html.md"}),
+        )
+        html = response.body.decode("utf-8")
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            try:
+                page = await browser.new_page()
+                await page.set_content(html)
+                await page.emulate_media(media="print")
+                break_inside = await page.evaluate(
+                    "() => getComputedStyle(document.querySelector('thead'))"
+                    ".breakInside"
+                )
+            finally:
+                await browser.close()
+
+        assert break_inside == "avoid", (
+            f"thead break-inside is {break_inside!r}, header can be orphaned"
+        )
+
+    async def test_pdf_tall_image_fits_page_height(self, jp_fetch, jp_root_dir):
+        """A diagram too tall at page width is scaled down to the page height."""
+        from PIL import Image as PILImage
+        import fitz
+
+        images_dir = jp_root_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        # 300 x 3000 px - narrow enough to fit the width, far too tall
+        PILImage.new("RGB", (300, 3000), color=(0, 100, 0)).save(
+            images_dir / "tall.png")
+        (jp_root_dir / "tall_image.md").write_text(
+            "![tall](images/tall.png)\n", encoding="utf-8")
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "tall_image.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        frame_height = pdf_frame_height()
+        worst = 0.0
+        for page in doc:
+            for img in page.get_images():
+                for rect in page.get_image_rects(img[0]):
+                    worst = max(worst, rect.height)
+        assert worst > 0, "image was not embedded"
+        assert worst <= frame_height + 1, (
+            f"image drawn {worst:.0f}pt tall, past the {frame_height}pt frame"
+        )
+
+    async def test_docx_tall_image_fits_page_height(self, jp_fetch, jp_root_dir):
+        """An image taller than the page is scaled down to fit its height."""
+        from PIL import Image as PILImage
+        from docx import Document
+
+        images_dir = jp_root_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        PILImage.new("RGB", (300, 3000), color=(0, 0, 100)).save(
+            images_dir / "tall_docx.png")
+        (jp_root_dir / "tall_image_docx.md").write_text(
+            "![tall](images/tall_docx.png)\n", encoding="utf-8")
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "tall_image_docx.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        doc = Document(io.BytesIO(response.body))
+        section = doc.sections[0]
+        usable_height = (section.page_height - section.top_margin
+                         - section.bottom_margin)
+        shape = list(doc.inline_shapes)[0]
+        assert shape.height <= usable_height, (
+            "tall image was not scaled down to the page height"
+        )
+
+    async def test_html_print_caps_image_height(self, jp_fetch, jp_root_dir):
+        """A tall image must fit one printed page, not spill across several.
+
+        A 300x3000 image is 10x taller than wide - uncapped it prints across
+        several pages; the print stylesheet must bound it to one page.
+        """
+        from playwright.async_api import async_playwright
+        from pypdf import PdfReader
+        from PIL import Image as PILImage
+
+        images_dir = jp_root_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        PILImage.new("RGB", (300, 3000), color=(100, 0, 0)).save(
+            images_dir / "tall_html.png")
+        (jp_root_dir / "tall_image_html.md").write_text(
+            "![tall](images/tall_html.png)\n", encoding="utf-8")
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "tall_image_html.md"}),
+        )
+        html = response.body.decode("utf-8")
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            try:
+                page = await browser.new_page()
+                await page.set_content(html)
+                printed = await page.pdf()
+            finally:
+                await browser.close()
+
+        pages = len(PdfReader(io.BytesIO(printed)).pages)
+        assert pages == 1, (
+            f"tall image printed to {pages} pages, not capped to one"
+        )
 
 
 class TestColumnWidthFitting:

@@ -2,6 +2,11 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.16
+
+- Fix a table header being stranded alone at a page break - a table whose header row would land at the bottom of a page now moves to the next page, and the header repeats on each continuation page, in PDF, DOCX and HTML
+- Fix a tall diagram or image overflowing the page height - an image scaled to the page width is now scaled down further to fit the page height, so a tall mermaid diagram fits the page instead of being clipped, in PDF, DOCX and HTML
+
 ## 1.6.15
 
 - Fix tables wider than the page running past the right margin in PDF, DOCX and HTML - cells now wrap onto multiple lines within a fitted column layout instead of overflowing, with a horizontal-scroll fallback (kept off when printing) for tables too wide to wrap in HTML

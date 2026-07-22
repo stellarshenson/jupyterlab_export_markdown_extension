@@ -1936,6 +1936,13 @@ class ExportHandlerBase(APIHandler):
                 'w:tblCaption', 'w:tblDescription', 'w:tblPrChange')
         tblW.set(qn('w:w'), '5000')
         tblW.set(qn('w:type'), 'pct')
+        # Mark the first row as a repeating header: Word then repeats it at the
+        # top of each page the table spans and does not strand it alone at a
+        # page bottom. Only a table with a body row has a header to repeat.
+        if len(table.rows) > 1:
+            trPr = table.rows[0]._tr.get_or_add_trPr()
+            if trPr.find(qn('w:tblHeader')) is None:
+                trPr.append(OxmlElement('w:tblHeader'))
 
     def fit_docx_table_to_page(self, table, available_twips: int) -> None:
         """Pin an over-wide table to the page with proportional columns.
@@ -2228,6 +2235,24 @@ class ExportHandlerBase(APIHandler):
                fewer columns than the unwrapped table would have printed */
             .table-scroll {{
                 overflow-x: visible;
+            }}
+            /* Keep a table header with a body row so it is never stranded
+               alone at a page bottom, and repeat it on each page */
+            thead {{
+                display: table-header-group;
+                break-inside: avoid;
+                break-after: avoid;
+            }}
+            tr {{
+                break-inside: avoid;
+            }}
+            /* Cap a tall image (a mermaid diagram) to one printed page so it
+               is not split across pages. A Letter page less ~1in of margins
+               is about 9in; vh units are unreliable in print and width:auto
+               defeats the cap, so a concrete bound is used. The base
+               max-width:100% and height:auto keep the width and aspect ratio. */
+            img {{
+                max-height: 9in;
             }}
         }}
         th, td {{
@@ -2792,6 +2817,12 @@ class ExportHandlerBase(APIHandler):
                     number_counters[l] = 0
                 return Paragraph(text, normal_style)
 
+        # Printable frame: the page area less the frame's own 6pt padding each
+        # side. Sizing a flowable to pdf_doc.width/height instead would put its
+        # edge past the page margin. One source for both tables and images.
+        frame_width = pdf_doc.width - 2 * self.PDF_FRAME_PADDING
+        frame_height = pdf_doc.height - 2 * self.PDF_FRAME_PADDING
+
         def process_table(tbl):
             """Process a single table and return reportlab elements."""
             # Raw text, so the widths below are measured on what is rendered
@@ -2812,10 +2843,6 @@ class ExportHandlerBase(APIHandler):
                 return pdfmetrics.stringWidth(
                     text, font, table_cell_style.fontSize)
 
-            # SimpleDocTemplate's frame pads 6pt each side, so the flowable
-            # area is narrower than pdf_doc.width - sizing to the latter puts
-            # the table's right border outside the page margin
-            frame_width = pdf_doc.width - 2 * self.PDF_FRAME_PADDING
             side_padding, col_widths = self.pdf_table_column_layout(
                 table_data, frame_width, string_width)
 
@@ -2829,8 +2856,12 @@ class ExportHandlerBase(APIHandler):
 
             # splitInRow lets a single row taller than the page carry over to
             # the next one - without it reportlab raises LayoutError and the
-            # whole export fails, which wrapping made reachable.
-            t = Table(wrapped, colWidths=col_widths, hAlign='LEFT', splitInRow=1)
+            # whole export fails, which wrapping made reachable. repeatRows=1
+            # repeats the header on each continuation page and, as a side
+            # effect, defers the whole table to the next page rather than
+            # stranding the header alone at a page bottom.
+            t = Table(wrapped, colWidths=col_widths, hAlign='LEFT',
+                      splitInRow=1, repeatRows=1)
             t.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dbe5f1')),
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -2840,6 +2871,14 @@ class ExportHandlerBase(APIHandler):
                 ('TOPPADDING', (0, 0), (-1, -1), 4),
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc'))
             ]))
+            # A repeated header must fit one page - reportlab re-emits it on
+            # every continuation and raises LayoutError if it cannot. When the
+            # header row alone is taller than the frame (a page-long alert
+            # callout in its 1x1 table, an oversized header), drop the repeat
+            # and let splitInRow carry the row across pages instead.
+            t.wrap(sum(col_widths), frame_height)
+            if t._rowHeights and t._rowHeights[0] > frame_height:
+                t.repeatRows = 0
             return [t, Spacer(1, 0.15 * inch)]
 
         def process_image(drawing_element, doc):
@@ -2864,12 +2903,18 @@ class ExportHandlerBase(APIHandler):
                 img_buffer = io.BytesIO(image_part.blob)
                 img = RLImage(img_buffer)
 
-                # Scale image to fit page width (max 7 inches)
-                max_width = 7 * inch
-                if img.drawWidth > max_width:
-                    scale = max_width / img.drawWidth
-                    img.drawWidth = max_width
+                # Scale to the frame width, then - if that leaves it taller
+                # than the frame - down to the frame height, aspect preserved.
+                # A tall mermaid diagram at full width would otherwise run off
+                # the bottom of the page. Same frame as the tables above.
+                if img.drawWidth > frame_width:
+                    scale = frame_width / img.drawWidth
+                    img.drawWidth = frame_width
                     img.drawHeight = img.drawHeight * scale
+                if img.drawHeight > frame_height:
+                    scale = frame_height / img.drawHeight
+                    img.drawHeight = frame_height
+                    img.drawWidth = img.drawWidth * scale
 
                 # Left-align image
                 img.hAlign = 'LEFT'
