@@ -1592,3 +1592,519 @@ class TestAnchorLinksAndArrowFonts:
         )
         assert response.code == 200
         assert response.body.startswith(b"%PDF-")
+
+
+TEST_MARKDOWN_WIDE_TABLE = """# Wide table
+
+| Component | Purpose | Service | Configuration detail | Monthly cost | Notes |
+|---|---|---|---|---|---|
+| Ingestion pipeline | Receives sensor telemetry from every house | Kinesis Data Streams | 4 shards with a 24 hour retention window | 145 USD | Needs enhanced fan-out for multiple consumers |
+| Storage layer | Durable raw and curated data zones | S3 with Glacier lifecycle | Intelligent tiering after 30 days, versioning on | 62 USD | https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-configuration-examples.html |
+"""
+
+@pytest.fixture
+def test_wide_table_file(jp_root_dir):
+    """Create a markdown file whose table is far wider than the page."""
+    md_file = jp_root_dir / "test_wide_table.md"
+    md_file.write_text(TEST_MARKDOWN_WIDE_TABLE, encoding="utf-8")
+    return md_file
+
+def pdf_frame_right_edge():
+    """The x past which nothing the PDF lays out may extend."""
+    from reportlab.lib.pagesizes import letter
+    from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+    return (letter[0] - ExportHandlerBase.PDF_PAGE_MARGIN
+            - ExportHandlerBase.PDF_FRAME_PADDING)
+
+def pdf_frame_width():
+    """The width a flowable is given, page less both margins and both pads."""
+    from reportlab.lib.pagesizes import letter
+    from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+    return (letter[0] - 2 * ExportHandlerBase.PDF_PAGE_MARGIN
+            - 2 * ExportHandlerBase.PDF_FRAME_PADDING)
+
+def pdf_text_past_margin(pdf_bytes, right_margin=None):
+    """Text runs in `pdf_bytes` whose estimated right edge passes the margin.
+
+    The margin defaults to the frame's content edge: the page margin less the
+    padding SimpleDocTemplate puts inside its frame. A run's x origin is the
+    text matrix offset within the CTM - reportlab puts it in cm for Paragraph
+    cells and in tm for string ones. 0.5em per character under-states the real
+    advance width, so a run that merely fills its column is never reported.
+    """
+    from pypdf import PdfReader
+
+    if right_margin is None:
+        right_margin = pdf_frame_right_edge()
+    overflowing = []
+
+    def visitor(text, cm, tm, font_dict, font_size):
+        stripped = text.strip()
+        if not stripped:
+            return
+        x = cm[4] + tm[4]
+        right = x + len(stripped) * font_size * 0.5
+        if right > right_margin:
+            overflowing.append((round(x, 1), round(right, 1), stripped[:40]))
+
+    for page in PdfReader(io.BytesIO(pdf_bytes)).pages:
+        page.extract_text(visitor_text=visitor)
+    return overflowing
+
+class TestWideTableFitsPage:
+    """A table wider than the page wraps instead of running off the edge."""
+
+    async def test_docx_wide_table_fits_page(self, jp_fetch, test_wide_table_file):
+        """The table grid stays inside the margins and uses a fixed layout."""
+        from docx import Document
+        from docx.oxml.ns import qn
+        from docx.shared import Twips
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_wide_table.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        doc = Document(io.BytesIO(response.body))
+        section = doc.sections[0]
+        usable = section.page_width - section.left_margin - section.right_margin
+
+        table = doc.tables[0]
+        grid = table._tbl.find(qn('w:tblGrid'))
+        widths = [Twips(int(col.get(qn('w:w'))))
+                  for col in grid.findall(qn('w:gridCol'))]
+        assert len(widths) == 6
+        assert sum(widths) <= usable, "table grid runs past the right margin"
+
+        # Autofit would let an unbreakable token widen the table past the page
+        layout = table._tbl.tblPr.find(qn('w:tblLayout'))
+        assert layout is not None and layout.get(qn('w:type')) == 'fixed'
+
+    async def test_docx_single_cell_table_is_fitted_too(
+            self, jp_fetch, jp_root_dir):
+        """A one-cell table is content, not an alert box, and must be fitted.
+
+        A raw HTML table of one row and one column has the same shape as the
+        alert boxes, so shape alone cannot tell them apart. Left on autofit,
+        its unbreakable token widens it past the right margin.
+        """
+        from docx import Document
+        from docx.oxml.ns import qn
+        from docx.shared import Twips
+
+        (jp_root_dir / "test_one_col.md").write_text(
+            "<table><tr><td>" + "z" * 200 + "</td></tr></table>\n",
+            encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_one_col.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        doc = Document(io.BytesIO(response.body))
+        section = doc.sections[0]
+        usable = section.page_width - section.left_margin - section.right_margin
+
+        table = doc.tables[0]
+        layout = table._tbl.tblPr.find(qn('w:tblLayout'))
+        assert layout is not None and layout.get(qn('w:type')) == 'fixed'
+        grid = table._tbl.find(qn('w:tblGrid'))
+        widths = [Twips(int(col.get(qn('w:w'))))
+                  for col in grid.findall(qn('w:gridCol'))]
+        assert sum(widths) <= usable, "one-column table runs past the margin"
+
+    async def test_pdf_wide_table_stays_inside_the_margins(
+            self, jp_fetch, test_wide_table_file):
+        """No text in the exported PDF is drawn past the right margin."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "test_wide_table.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")
+
+        overflowing = pdf_text_past_margin(response.body)
+        assert not overflowing, f"text past the right margin: {overflowing[:3]}"
+
+    async def test_pdf_row_taller_than_the_page_still_exports(self, jp_fetch,
+                                                              jp_root_dir):
+        """A wrapped row taller than the page must split, not abort the export."""
+        words = " ".join(f"word{i}" for i in range(900))
+        (jp_root_dir / "tall_row.md").write_text(
+            f"| A | B | C |\n|---|---|---|\n| x | {words} | y |\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "tall_row.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        assert response.body.startswith(b"%PDF-")
+
+    async def test_pdf_many_column_table_still_exports(self, jp_fetch,
+                                                       jp_root_dir):
+        """Columns squeezed to their fair share must not abort the export."""
+        ncols = 60  # each column falls below reportlab's own cell padding
+        head = "|" + "|".join(f"h{i}" for i in range(ncols)) + "|"
+        sep = "|" + "|".join("---" for _ in range(ncols)) + "|"
+        row = "|" + "|".join(f"v{i}" for i in range(ncols)) + "|"
+        (jp_root_dir / "many_columns.md").write_text(
+            f"{head}\n{sep}\n{row}\n", encoding="utf-8")
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "many_columns.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        assert response.body.startswith(b"%PDF-")
+
+        overflowing = pdf_text_past_margin(response.body)
+        assert not overflowing, f"text past the right margin: {overflowing[:3]}"
+
+    async def test_docx_overflowing_table_is_always_fitted(self, jp_fetch,
+                                                           jp_root_dir):
+        """A table over the page width must never slip past the fitter.
+
+        The fitted widths sum to the page width in float arithmetic, which can
+        land a hair under it - the guard has to tolerate that or the table
+        silently stays on autofit and overflows again.
+        """
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        # These lengths make the fitted widths sum to 10799.999999999998
+        # against a 10800-twip page - inside the tolerance window
+        lengths = [2, 17, 58, 59, 46, 41, 53]
+        words = [2, 16, 4, 21, 13, 13, 7]
+
+        def cell(length, word_length):
+            return ("x" * word_length + " ") * max(1, length // (word_length + 1))
+
+        head = "|" + "|".join(f"h{i}" for i in range(7)) + "|"
+        sep = "|" + "|".join("---" for _ in range(7)) + "|"
+        row = "|" + "|".join(cell(n, w) for n, w in zip(lengths, words)) + "|"
+        (jp_root_dir / "overflowing.md").write_text(
+            f"{head}\n{sep}\n{row}\n", encoding="utf-8")
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/docx",
+            method="POST",
+            body=json.dumps({"path": "overflowing.md"}),
+        )
+        table = Document(io.BytesIO(response.body)).tables[0]
+        layout = table._tbl.tblPr.find(qn('w:tblLayout'))
+        assert layout is not None, "an over-wide table was left on autofit"
+
+    async def test_html_table_does_not_overflow_the_viewport(
+            self, jp_fetch, test_wide_table_file):
+        """Rendered in a browser, the table must not scroll sideways.
+
+        The fixture holds an unbreakable URL, which forces a wider min-content
+        width than the viewport unless the cells may break inside a word.
+        """
+        from playwright.async_api import async_playwright
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "test_wide_table.md"}),
+        )
+        html = response.body.decode("utf-8")
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            try:
+                page = await browser.new_page(
+                    viewport={"width": 800, "height": 600})
+                await page.set_content(html)
+                # The row box is the grid itself - the table element may be a
+                # scroll container, which fits the viewport by construction
+                row_width, doc_width, viewport_width = await page.evaluate(
+                    "() => { const r = document.querySelector('tr');"
+                    " const d = document.documentElement;"
+                    " return [r.getBoundingClientRect().width,"
+                    " d.scrollWidth, d.clientWidth]; }"
+                )
+            finally:
+                await browser.close()
+
+        assert row_width <= viewport_width, (
+            f"table grid is {row_width}px wide in a {viewport_width}px viewport"
+        )
+        assert doc_width <= viewport_width, "the page scrolls sideways"
+
+    async def test_html_many_column_table_is_contained(self, jp_fetch,
+                                                       jp_root_dir):
+        """A table too wide to wrap scrolls in its own box, not the page."""
+        from playwright.async_api import async_playwright
+
+        ncols = 40
+        head = "|" + "|".join(f"Header {i}" for i in range(ncols)) + "|"
+        sep = "|" + "|".join("---" for _ in range(ncols)) + "|"
+        row = "|" + "|".join(f"value {i}" for i in range(ncols)) + "|"
+        (jp_root_dir / "many_columns.md").write_text(
+            f"{head}\n{sep}\n{row}\n", encoding="utf-8")
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "many_columns.md"}),
+        )
+        html = response.body.decode("utf-8")
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            try:
+                page = await browser.new_page(
+                    viewport={"width": 800, "height": 600})
+                await page.set_content(html)
+                doc_width, viewport_width = await page.evaluate(
+                    "() => { const d = document.documentElement;"
+                    " return [d.scrollWidth, d.clientWidth]; }"
+                )
+            finally:
+                await browser.close()
+
+        assert doc_width <= viewport_width, (
+            f"a {ncols}-column table scrolls the page ({doc_width}px "
+            f"in {viewport_width}px)"
+        )
+
+    async def test_html_scroll_box_does_not_clip_on_paper(self, jp_fetch,
+                                                          jp_root_dir):
+        """Paper cannot scroll, so the box must stop being one when printing.
+
+        Left as a scroll container, print media crops the table at the box
+        edge and the hidden columns are simply absent from the printout.
+        """
+        from playwright.async_api import async_playwright
+
+        from pypdf import PdfReader
+
+        ncols = 30
+        head = "|" + "|".join(f"H{i}x" for i in range(ncols)) + "|"
+        sep = "|" + "|".join("---" for _ in range(ncols)) + "|"
+        row = "|" + "|".join(f"v{i}" for i in range(ncols)) + "|"
+        (jp_root_dir / "print_table.md").write_text(
+            f"{head}\n{sep}\n{row}\n", encoding="utf-8")
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "print_table.md"}),
+        )
+        html = response.body.decode("utf-8")
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            try:
+                page = await browser.new_page()
+                await page.set_content(html)
+                printed = await page.pdf()
+            finally:
+                await browser.close()
+
+        # Columns this narrow break every character onto its own line
+        text = "".join("".join(p.extract_text().split())
+                       for p in PdfReader(io.BytesIO(printed)).pages)
+        missing = [i for i in range(ncols) if f"H{i}x" not in text]
+        assert not missing, f"printing dropped {len(missing)} headers: {missing}"
+
+    async def test_html_raw_table_with_attributes_is_wrapped(
+            self, jp_fetch, jp_root_dir):
+        """Raw HTML passes through markdown verbatim, attributes and all.
+
+        A wrapper matched on a bare `<table>` misses `<table border="1">`, and
+        the table then pushes the whole document sideways.
+        """
+        from playwright.async_api import async_playwright
+
+        ncols = 40
+        cells = "".join(f"<td>value {i}</td>" for i in range(ncols))
+        (jp_root_dir / "raw_table.md").write_text(
+            f'<table border="1"><tr>{cells}</tr></table>\n', encoding="utf-8")
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "raw_table.md"}),
+        )
+        html = response.body.decode("utf-8")
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            try:
+                page = await browser.new_page(
+                    viewport={"width": 800, "height": 600})
+                await page.set_content(html)
+                doc_width, viewport_width = await page.evaluate(
+                    "() => { const d = document.documentElement;"
+                    " return [d.scrollWidth, d.clientWidth]; }"
+                )
+            finally:
+                await browser.close()
+
+        assert doc_width <= viewport_width, (
+            f"a raw table with attributes scrolls the page ({doc_width}px "
+            f"in {viewport_width}px)"
+        )
+
+    async def test_html_nested_table_keeps_its_inner_table(
+            self, jp_fetch, jp_root_dir):
+        """The wrapper must close on the outer table, not the inner one.
+
+        A non-greedy match closes the wrapper at the first `</table>`, which
+        is the inner table's. The markup is then mis-nested and the browser
+        recovers by lifting the inner table clean out of its cell.
+        """
+        from playwright.async_api import async_playwright
+
+        (jp_root_dir / "nested_table.md").write_text(
+            "<table><tr><td><table><tr><td>inner</td></tr></table>"
+            "</td></tr></table>\n\nAfter the table.\n",
+            encoding="utf-8")
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/html",
+            method="POST",
+            body=json.dumps({"path": "nested_table.md"}),
+        )
+        html = response.body.decode("utf-8")
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            try:
+                page = await browser.new_page(
+                    viewport={"width": 800, "height": 600})
+                await page.set_content(html)
+                nested_in_cell, wrappers = await page.evaluate(
+                    "() => [!!document.querySelector("
+                    "'.table-scroll table td table'),"
+                    " document.querySelectorAll('.table-scroll').length]"
+                )
+            finally:
+                await browser.close()
+
+        assert nested_in_cell, "the nested table was lifted out of its cell"
+        assert wrappers == 1, f"expected one wrapper, got {wrappers}"
+
+class TestColumnWidthFitting:
+    """Unit tests for the shared column-width fitter."""
+
+    def _fit(self, natural, minimums, available):
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        return ExportHandlerBase.fit_column_widths(natural, minimums, available)
+
+    def test_widths_that_fit_are_untouched(self):
+        assert self._fit([100, 50], [40, 20], 500) == [100, 50]
+
+    def test_overflowing_widths_are_scaled_to_available(self):
+        widths = self._fit([600, 300, 100], [50, 50, 50], 500)
+        assert sum(widths) == pytest.approx(500)
+        assert widths[0] > widths[1] > widths[2], "proportions are preserved"
+
+    def test_every_column_keeps_its_longest_word(self):
+        # Column 2 is narrow overall but holds one long word
+        widths = self._fit([900, 100], [50, 90], 500)
+        assert widths[1] >= 90, "a column must not wrap mid-word"
+        assert sum(widths) == pytest.approx(500)
+
+    def test_minimums_wider_than_the_page_fall_back_to_equal_columns(self):
+        widths = self._fit([900, 900], [400, 400], 500)
+        assert widths == [250, 250]
+
+    def _measure(self, table_data, available, floors=None):
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        return ExportHandlerBase.measured_column_widths(
+            table_data, available, lambda text, _row: len(text) * 10.0 + 20,
+            floors)
+
+    def test_measured_widths_use_longest_line_and_longest_word(self):
+        """Natural width comes from the longest line, minimum from the word."""
+        table_data = [
+            ["Component", "a short one"],
+            ["short\nlonger line here", "unbreakable"],
+        ]
+        # Natural widths total 310, minimums 240 - squeezing happens between
+        available = 280.0
+        widths = self._measure(table_data, available)
+        assert sum(widths) == pytest.approx(available)
+        # Column 1 must never wrap inside 'unbreakable', its longest word
+        assert widths[1] >= len("unbreakable") * 10.0 + 20
+        # Column 0's longest line drove its natural width, and it gave ground
+        assert widths[0] < len("longer line here") * 10.0 + 20
+
+    def test_measured_widths_floor_empty_columns(self):
+        """An empty column keeps an empty cell's width even when squeezed."""
+        table_data = [
+            ["x" * 40, "", "y" * 40],
+            ["x" * 40, "", "y" * 40],
+        ]
+        available = 300.0
+        widths = self._measure(table_data, available)
+        assert sum(widths) == pytest.approx(available)
+        assert widths[1] >= 20, "an empty column collapsed to nothing"
+
+    def test_every_column_capped_at_fair_share_gives_equal_columns(self):
+        """No floor may exceed an equal share, or one column starves the rest."""
+        table_data = [["x" * 60, "y" * 60, "z" * 60]]
+        available = 300.0
+        # Floors far past the page must not push the total over it
+        widths = self._measure(table_data, available, floors=[500.0, 0.0, 0.0])
+        assert sum(widths) == pytest.approx(available)
+        assert widths[0] <= available / 3 + 1e-6
+
+    def test_pdf_column_layout_never_exceeds_the_frame(self):
+        """Padding shrinks with column count instead of blowing the budget.
+
+        reportlab does not raise on width overflow - it just draws the table
+        off the sheet - so nothing downstream would catch a broken budget.
+        """
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        available = pdf_frame_width()
+
+        def string_width(text, _row_index):
+            return len(text) * 5.0
+
+        cases = {
+            "empty middle column": [["a", "", "b"], ["x", "", "y"]],
+            "two empty columns": [["a", "", "b", ""], ["x", "", "y", ""]],
+        }
+        for ncols in (6, 20, 34, 40, 60, 100, 120, 200, 300, 528, 900):
+            cases[f"{ncols} columns"] = [
+                [f"h{i}" for i in range(ncols)],
+                [f"v{i}" for i in range(ncols)],
+            ]
+
+        for name, table_data in cases.items():
+            padding, widths = ExportHandlerBase.pdf_table_column_layout(
+                table_data, available, string_width)
+            assert sum(widths) <= available + 1e-6, f"{name} runs off the page"
+            assert min(widths) > 2 * padding, f"{name} has no content area"

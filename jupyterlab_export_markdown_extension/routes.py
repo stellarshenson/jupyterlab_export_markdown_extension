@@ -183,6 +183,18 @@ class PlaywrightSvgRenderer:
 class ExportHandlerBase(APIHandler):
     """Base class for export handlers with common functionality."""
 
+    #: w:tblCellMar of the 'Light List Accent 1' style applied to every content
+    #: table, 108 twips each side. Column widths are outer widths, so this much
+    #: of each is margin rather than content.
+    DOCX_CELL_MARGIN_TWIPS = 216
+
+    #: Padding SimpleDocTemplate puts inside its frame on every side, so a
+    #: flowable has this much less room than the page margins suggest.
+    PDF_FRAME_PADDING = 6
+
+    #: Page margin of the exported PDF, every side.
+    PDF_PAGE_MARGIN = 36
+
     def get_absolute_path(self, relative_path: str) -> Path:
         """Convert a relative path to an absolute path within the server root."""
         root_dir = self.contents_manager.root_dir
@@ -928,6 +940,44 @@ class ExportHandlerBase(APIHandler):
             html = html.replace('\u200b', '')
         return html
 
+    def wrap_html_tables(self, html: str) -> str:
+        """Put every table in a horizontal scroll box.
+
+        Cell wrapping cannot shrink a table below one character per column, so
+        a table with very many columns would push the whole document sideways.
+        The box has to be a wrapper element: `overflow-x` on the table itself
+        only takes effect with `display: block`, which turns the grid into a
+        shrink-to-fit anonymous box and voids its width.
+
+        Only outermost tables are wrapped, and a table's attributes are kept:
+        a non-greedy regex would close the wrapper at a nested table's end tag,
+        and browser error recovery then stretches the box over the rest of the
+        document, scrolling every element that follows.
+
+        HTML export only - the DOCX and PDF paths parse this markup with
+        htmldocx and have their own page fitting.
+        """
+        out = []
+        depth = 0
+        start = 0
+        for tag in re.finditer(r'<table\b[^>]*>|</table\s*>', html):
+            if tag.group().startswith('</'):
+                if depth == 0:
+                    continue
+                depth -= 1
+                if depth == 0:
+                    out.append(html[start:tag.end()])
+                    out.append('</div>')
+                    start = tag.end()
+            else:
+                if depth == 0:
+                    out.append(html[start:tag.start()])
+                    out.append('<div class="table-scroll">')
+                    start = tag.start()
+                depth += 1
+        out.append(html[start:])
+        return ''.join(out)
+
     def style_html_alert_boxes(self, html: str, show_labels: bool = False) -> str:
         """Replace alert markers in HTML with styled div elements.
 
@@ -1265,7 +1315,7 @@ class ExportHandlerBase(APIHandler):
 
                     break  # Only one marker per run expected
 
-    def style_docx_alert_boxes(self, document, show_labels: bool = False):
+    def style_docx_alert_boxes(self, document, show_labels: bool = False) -> list:
         """Replace alert paragraphs with styled single-cell tables.
 
         Scans for zero-width space markers inserted by preprocess_github_alerts()
@@ -1273,12 +1323,16 @@ class ExportHandlerBase(APIHandler):
         background shading, and cell margins for padding control.
         Moves the original paragraph XML (preserving hyperlinks, bold, etc.)
         into the table cell rather than rebuilding it.
+
+        Returns the ``w:tbl`` elements created, which carry their own styling
+        and must be left out of the content-table pass.
         """
         from docx.oxml.ns import qn
         from docx.oxml import OxmlElement
         import copy
 
         # Collect paragraphs to replace (can't modify while iterating)
+        alert_tables = []
         replacements = []
         for paragraph in document.paragraphs:
             text = paragraph.text
@@ -1383,6 +1437,9 @@ class ExportHandlerBase(APIHandler):
 
             # Remove the original paragraph
             parent.remove(paragraph._p)
+            alert_tables.append(tbl)
+
+        return alert_tables
 
     def remove_empty_paragraphs_before_images(self, document):
         """Remove empty paragraphs that immediately precede image paragraphs.
@@ -1751,6 +1808,185 @@ class ExportHandlerBase(APIHandler):
             if (rfonts.get(qn('w:ascii')) or '') in MONOSPACE_FONTS:
                 rpr.remove(rfonts)
 
+    @staticmethod
+    def fit_column_widths(natural: list, minimums: list, available: float) -> list:
+        """Scale natural column widths down so the row fits ``available``.
+
+        ``natural`` holds the width each column would take on a single line and
+        ``minimums`` the width of its longest unbreakable word. When the natural
+        widths already fit they are returned untouched. Otherwise every column
+        keeps its minimum - so wrapping falls on word boundaries rather than
+        mid-word - and the remaining space is shared in proportion to the
+        excess, keeping wide columns wide. Falls back to equal columns when
+        every column is already capped at its fair share.
+        """
+        ncols = len(natural)
+        if ncols == 0:
+            return []
+        if sum(natural) <= available:
+            return natural
+        # No single column may claim more than its fair share as a minimum,
+        # otherwise one very long word starves every other column.
+        fair_share = available / ncols
+        minimums = [min(m, fair_share) for m in minimums]
+        slack = available - sum(minimums)
+        excess = [max(0.0, n - m) for n, m in zip(natural, minimums)]
+        if slack == 0 or sum(excess) == 0:
+            return [fair_share] * ncols
+        scale = slack / sum(excess)
+        return [m + e * scale for m, e in zip(minimums, excess)]
+
+    @classmethod
+    def measured_column_widths(cls, table_data: list, available: float,
+                               measure, floors: list | None = None) -> list:
+        """Column widths for a table of cell strings that fit ``available``.
+
+        ``measure(text, row_index)`` returns the rendered width of one string,
+        letting the caller supply the font metrics. A cell's natural width is
+        its longest line, its minimum the longest word it cannot break, and
+        ``floors`` adds a per-column lower bound for content this cannot see
+        (an image - only the DOCX path has any, since the PDF one drops
+        table-cell images). Every column keeps at least the width of an empty
+        cell, so none comes back zero-width, unless an equal share of
+        ``available`` is itself smaller than that.
+        """
+        ncols = max((len(row) for row in table_data), default=0)
+        natural, minimums = [], []
+        for c in range(ncols):
+            cells = [(r, row[c]) for r, row in enumerate(table_data)
+                     if c < len(row)]
+            # No floor may exceed an equal share, or one column starves the rest
+            floor = min(max(floors[c] if floors else 0.0, measure('', 0)),
+                        available / ncols)
+            natural.append(max(
+                [measure(line, r) for r, t in cells for line in t.split('\n')]
+                + [floor]))
+            minimums.append(max(
+                [measure(word, r) for r, t in cells for word in t.split()]
+                + [floor]))
+        return cls.fit_column_widths(natural, minimums, available)
+
+    @classmethod
+    def pdf_table_column_layout(cls, table_data: list, available: float,
+                                string_width) -> tuple:
+        """Cell padding and column widths for a PDF table of ``available`` width.
+
+        ``string_width(text, row_index)`` measures rendered text. reportlab
+        raises rather than rendering when a column is no wider than its own
+        padding, so a table with very many columns gets a tighter padding
+        instead of a width floor that would push it back off the page. The
+        widths always sum to at most ``available``.
+
+        Past roughly 150 columns a column is narrower than a single wide glyph
+        at any font size used here, and reportlab paints such a glyph past its
+        column - the borders stay inside the margin but the ink can pass it by
+        a point or two. Such a table is unreadable regardless.
+        """
+        ncols = max((len(row) for row in table_data), default=1) or 1
+        fair_share = available / ncols
+        side_padding = 6 if fair_share >= 16 else (1 if fair_share >= 3 else 0)
+        # Both paddings, plus rounding slack so a word whose width matches its
+        # column is not split mid-word
+        cell_padding = 2 * side_padding + 2
+
+        def measure(text, row_index):
+            return string_width(text, row_index) + cell_padding
+
+        # The empty-cell floor already keeps every width above the padding
+        return side_padding, cls.measured_column_widths(
+            table_data, available, measure)
+
+    def style_docx_table(self, table) -> None:
+        """Apply the banded style and 100% page width to a content table."""
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+
+        table.style = 'Light List Accent 1'
+        tblPr = table._tbl.tblPr
+        if tblPr is None:
+            return
+        # Disable first column emphasis
+        tblLook = tblPr.find(qn('w:tblLook'))
+        if tblLook is not None:
+            tblLook.set(qn('w:firstColumn'), '0')
+        # Set table to 100% page width. Update in place, or insert at the slot
+        # w:tblPr's schema sequence gives it - appending would put it after
+        # w:tblLook, and a validating reader may then drop the width entirely
+        tblW = tblPr.find(qn('w:tblW'))
+        if tblW is None:
+            tblW = OxmlElement('w:tblW')
+            tblPr.insert_element_before(
+                tblW, 'w:jc', 'w:tblCellSpacing', 'w:tblInd', 'w:tblBorders',
+                'w:shd', 'w:tblLayout', 'w:tblCellMar', 'w:tblLook',
+                'w:tblCaption', 'w:tblDescription', 'w:tblPrChange')
+        tblW.set(qn('w:w'), '5000')
+        tblW.set(qn('w:type'), 'pct')
+
+    def fit_docx_table_to_page(self, table, available_twips: int) -> None:
+        """Pin an over-wide table to the page with proportional columns.
+
+        Word's default autofit layout widens a table past the right margin when
+        a cell holds an unbreakable token (a long URL, a code identifier). A
+        fixed layout with an explicit grid keeps the table inside the margins
+        and wraps the cell text instead. A table that already fits is left on
+        autofit, where Word's own font metrics beat the estimate below.
+        """
+        from docx.oxml.ns import qn
+        from docx.shared import Emu, Twips
+
+        ncols = len(table.columns)
+        if ncols == 0:
+            return
+
+        # Nominal width of one character of 11pt Calibri body text - a stand-in
+        # for the text measurement only Word itself can make.
+        char_twips = 120
+        cell_margin_twips = self.DOCX_CELL_MARGIN_TWIPS
+        def measure(text, row_index):
+            # The header row carries the table style's bold face
+            width = len(text) * char_twips
+            return (width * 1.08 if row_index == 0 else width) + cell_margin_twips
+
+        # Walk the grid once, by row: _Column.cells rebuilds the whole cell
+        # list on every access, which turns this into O(rows x cols x cols)
+        grid = [list(row.cells) for row in table.rows]
+        table_data = [[cell.text for cell in row] for row in grid]
+
+        def image_twips(cell):
+            """Width the widest inline image in a cell asks for, 0 if none.
+
+            measured_column_widths caps this at an equal share, so an oversized
+            image - it is scaled to whatever column it lands in - cannot starve
+            the text columns beside it.
+            """
+            widest = max((Emu(int(ext.get('cx') or 0)).twips
+                          for ext in cell._tc.iter(qn('wp:extent'))), default=0)
+            return widest + cell_margin_twips if widest else 0.0
+
+        image_floors = [0.0] * ncols
+        for row in grid:
+            for index, cell in enumerate(row[:ncols]):
+                image_floors[index] = max(image_floors[index], image_twips(cell))
+
+        widths = self.measured_column_widths(
+            table_data, float(available_twips), measure, image_floors)
+
+        # Under the page width the estimate is not worth imposing - autofit
+        # lays the table out with real metrics and it cannot overflow anyway.
+        # The tolerance matters: a fitted result sums to `available` in float
+        # arithmetic, which lands a hair under it often enough to matter
+        if sum(widths) < available_twips - 1:
+            return
+
+        for col, width in zip(table.columns, widths):
+            col.width = Twips(int(width))
+        for row in grid:
+            for index, cell in enumerate(row[:ncols]):
+                cell.width = Twips(int(widths[index]))
+
+        # autofit=False writes w:tblLayout type="fixed" in its schema-mandated
+        # position; appending the element by hand puts it out of sequence.
+        table.autofit = False
 
     def markdown_to_html(self, content: str, title: str = 'Exported Document',
                          compact: bool = False, math_support: bool = False,
@@ -1964,10 +2200,29 @@ class ExportHandlerBase(APIHandler):
             width: 100%;
             margin: 1em 0;
         }}
+        .table-scroll {{
+            /* Wrapping alone cannot shrink a table past one character per
+               column, so a table with very many columns scrolls inside this
+               box rather than pushing the document sideways. It has to be a
+               wrapper: overflow-x on the table itself needs display:block,
+               which makes the grid shrink-to-fit and voids its width */
+            overflow-x: auto;
+        }}
+        @media print {{
+            /* Paper cannot scroll, so a scroll box crops what it hides -
+               fewer columns than the unwrapped table would have printed */
+            .table-scroll {{
+                overflow-x: visible;
+            }}
+        }}
         th, td {{
             border: 1px solid {border_color};
             padding: 8px;
             text-align: left;
+            overflow-wrap: anywhere;
+            /* anywhere, not break-word: only anywhere shrinks a column's
+               min-content width, which is what keeps a table with a long
+               unbreakable token inside the page */
         }}
         th {{
             background: {th_bg};
@@ -2212,10 +2467,10 @@ class ExportHandlerBase(APIHandler):
         pdf_doc = SimpleDocTemplate(
             pdf_buffer,
             pagesize=letter,
-            rightMargin=36,
-            leftMargin=36,
-            topMargin=36,
-            bottomMargin=36
+            rightMargin=self.PDF_PAGE_MARGIN,
+            leftMargin=self.PDF_PAGE_MARGIN,
+            topMargin=self.PDF_PAGE_MARGIN,
+            bottomMargin=self.PDF_PAGE_MARGIN
         )
 
         # Get default styles
@@ -2308,6 +2563,22 @@ class ExportHandlerBase(APIHandler):
             spaceAfter=3,
             spaceBefore=6,
             textColor=colors.HexColor('#4F81BD')
+        )
+
+        # Table cells are Paragraphs so their text wraps inside the column
+        table_cell_style = ParagraphStyle(
+            'CustomTableCell',
+            parent=styles['Normal'],
+            fontName=font_name,
+            fontSize=9,
+            leading=11
+        )
+
+        table_header_style = ParagraphStyle(
+            'CustomTableHeader',
+            parent=table_cell_style,
+            fontName=font_name_bold,
+            textColor=colors.HexColor('#365F91')
         )
 
         # Build the story (content) - iterate body elements in document order
@@ -2508,25 +2779,48 @@ class ExportHandlerBase(APIHandler):
 
         def process_table(tbl):
             """Process a single table and return reportlab elements."""
-            table_data = []
-            for row in tbl.rows:
-                row_data = []
-                for cell in row.cells:
-                    cell_text = cell.text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                    row_data.append(cell_text)
-                table_data.append(row_data)
+            # Raw text, so the widths below are measured on what is rendered
+            # rather than on the XML entities that stand in for it
+            table_data = [[cell.text for cell in row.cells] for row in tbl.rows]
 
             if not table_data:
                 return []
 
-            t = Table(table_data, hAlign='LEFT')
+            def cell_markup(text):
+                markup = (text.replace('&', '&amp;')
+                              .replace('<', '&lt;').replace('>', '&gt;'))
+                # A Paragraph collapses newlines that a string cell honoured
+                return markup.replace('\n', '<br/>')
+
+            def string_width(text, row_index):
+                font = font_name_bold if row_index == 0 else font_name
+                return pdfmetrics.stringWidth(
+                    text, font, table_cell_style.fontSize)
+
+            # SimpleDocTemplate's frame pads 6pt each side, so the flowable
+            # area is narrower than pdf_doc.width - sizing to the latter puts
+            # the table's right border outside the page margin
+            frame_width = pdf_doc.width - 2 * self.PDF_FRAME_PADDING
+            side_padding, col_widths = self.pdf_table_column_layout(
+                table_data, frame_width, string_width)
+
+            # Paragraph cells wrap across lines; plain strings never do.
+            wrapped = [
+                [Paragraph(cell_markup(text),
+                           table_header_style if r == 0 else table_cell_style)
+                 for text in row]
+                for r, row in enumerate(table_data)
+            ]
+
+            # splitInRow lets a single row taller than the page carry over to
+            # the next one - without it reportlab raises LayoutError and the
+            # whole export fails, which wrapping made reachable.
+            t = Table(wrapped, colWidths=col_widths, hAlign='LEFT', splitInRow=1)
             t.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dbe5f1')),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#365F91')),
-                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                ('FONTNAME', (0, 0), (-1, 0), font_name_bold),
-                ('FONTNAME', (0, 1), (-1, -1), font_name),
-                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), side_padding),
+                ('RIGHTPADDING', (0, 0), (-1, -1), side_padding),
                 ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
                 ('TOPPADDING', (0, 0), (-1, -1), 4),
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc'))
@@ -2695,26 +2989,9 @@ class ExportPdfHandler(ExportHandlerBase):
                 # Style GitHub alert boxes with colored borders and shading
                 self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
 
-                for table in document.tables:
-                    # Skip single-cell alert tables
-                    if len(table.rows) == 1 and len(table.columns) == 1:
-                        continue
-                    table.style = 'Light List Accent 1'
-                    tblPr = table._tbl.tblPr
-                    if tblPr is not None:
-                        from docx.oxml.ns import qn
-                        from docx.oxml import OxmlElement
-                        tblLook = tblPr.find(qn('w:tblLook'))
-                        if tblLook is not None:
-                            tblLook.set(qn('w:firstColumn'), '0')
-                        # Set table to 100% page width
-                        existing_w = tblPr.find(qn('w:tblW'))
-                        if existing_w is not None:
-                            tblPr.remove(existing_w)
-                        tblW = OxmlElement('w:tblW')
-                        tblW.set(qn('w:w'), '5000')
-                        tblW.set(qn('w:type'), 'pct')
-                        tblPr.append(tblW)
+                # No table styling or fitting here: this DOCX is only an
+                # intermediate for convert_docx_to_pdf, which reads cell text
+                # and applies its own style and column widths
 
                 while document.paragraphs and not document.paragraphs[0].text.strip():
                     p_elem = document.paragraphs[0]._element
@@ -2805,7 +3082,7 @@ class ExportDocxHandler(ExportHandlerBase):
 
             from htmldocx import HtmlToDocx
             from docx import Document
-            from docx.shared import Inches
+            from docx.shared import Emu, Inches, Twips
 
             # Extract just the body content for DOCX conversion
             body_match = re.search(r'<body>(.*?)</body>', html, re.DOTALL)
@@ -2856,30 +3133,22 @@ class ExportDocxHandler(ExportHandlerBase):
                 self.style_docx_color_runs(document)
 
                 # Style GitHub alert boxes with colored borders and shading
-                self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
+                alert_tables = self.style_docx_alert_boxes(
+                    document, show_labels=show_alert_labels)
 
                 # Style tables: banded rows (pale blue), no first column emphasis
+                # Usable page area - one source for both the table grid below
+                # and the image scaling further down
+                section = document.sections[0]
+                page_width = Emu(section.page_width - section.left_margin
+                                 - section.right_margin)
+                page_height = Emu(section.page_height - section.top_margin
+                                  - section.bottom_margin)
                 for table in document.tables:
-                    # Skip single-cell alert tables
-                    if len(table.rows) == 1 and len(table.columns) == 1:
+                    if table._tbl in alert_tables:
                         continue
-                    table.style = 'Light List Accent 1'
-                    # Disable first column emphasis via XML properties
-                    tblPr = table._tbl.tblPr
-                    if tblPr is not None:
-                        from docx.oxml.ns import qn
-                        from docx.oxml import OxmlElement
-                        tblLook = tblPr.find(qn('w:tblLook'))
-                        if tblLook is not None:
-                            tblLook.set(qn('w:firstColumn'), '0')
-                        # Set table to 100% page width
-                        existing_w = tblPr.find(qn('w:tblW'))
-                        if existing_w is not None:
-                            tblPr.remove(existing_w)
-                        tblW = OxmlElement('w:tblW')
-                        tblW.set(qn('w:w'), '5000')
-                        tblW.set(qn('w:type'), 'pct')
-                        tblPr.append(tblW)
+                    self.style_docx_table(table)
+                    self.fit_docx_table_to_page(table, page_width.twips)
 
                 # Remove empty paragraphs at the beginning
                 while document.paragraphs and not document.paragraphs[0].text.strip():
@@ -2896,10 +3165,6 @@ class ExportDocxHandler(ExportHandlerBase):
 
                 # Remove empty paragraphs before images
                 self.remove_empty_paragraphs_before_images(document)
-
-                # Page dimensions (Letter/A4 width minus margins)
-                page_width = Inches(8.5) - Inches(1.0)  # 7.5 inches usable
-                page_height = Inches(11) - Inches(1.0)  # 10 inches usable
 
                 from docx.oxml.ns import qn as _qn
 
@@ -2923,19 +3188,35 @@ class ExportDocxHandler(ExportHandlerBase):
                     tbl = tc.getparent()
                     while tbl is not None and tbl.tag != _qn('w:tbl'):
                         tbl = tbl.getparent()
-                    ncols = 1
+                    cell_width = None
                     if tbl is not None:
                         grid = tbl.find(_qn('w:tblGrid'))
-                        if grid is not None:
-                            ncols = len(grid.findall(_qn('w:gridCol')))
-                        if ncols < 1:
-                            row = tbl.find(_qn('w:tr'))
-                            if row is not None:
-                                ncols = len(row.findall(_qn('w:tc')))
-                    ncols = max(1, ncols)
-                    # Per-cell content width, less an allowance for cell padding
+                        cols = grid.findall(_qn('w:gridCol')) if grid is not None else []
+                        # Only a fitted table's grid states the real column
+                        # widths. Elsewhere (the alert boxes, whose single
+                        # gridCol is decorative next to their 100% tblW) the
+                        # grid is fiction, so fall back to an equal share.
+                        tbl_pr = tbl.find(_qn('w:tblPr'))
+                        fitted = (tbl_pr is not None
+                                  and tbl_pr.find(_qn('w:tblLayout')) is not None)
+                        row = tc.getparent()
+                        index = list(row.findall(_qn('w:tc'))).index(tc)
+                        if fitted and index < len(cols):
+                            # A fitted grid width is an outer width, so the
+                            # allowance due is exactly the cell margin baked
+                            # into it. No lower bound here: the column really
+                            # is that narrow, and an image wider than its cell
+                            # would push the fixed grid past the margin
+                            outer = int(cols[index].get(_qn('w:w')) or 0)
+                            return Twips(max(
+                                1, outer - self.DOCX_CELL_MARGIN_TWIPS))
+                        elif cols:
+                            cell_width = int(page_width / len(cols))
+                    if cell_width is None:
+                        cell_width = page_width
+                    # Per-cell content width, less the cell margin allowance
                     return max(Inches(0.5),
-                               int(page_width / ncols) - Inches(0.2))
+                               cell_width - Twips(self.DOCX_CELL_MARGIN_TWIPS))
 
                 # Process images: scale every image down to fit its container
                 # (page width, or table cell width when nested in a table).
@@ -2951,8 +3232,11 @@ class ExportDocxHandler(ExportHandlerBase):
                         ratio = min(ratio, page_height / orig_height)
 
                     if ratio < 1.0:
-                        shape.width = int(orig_width * ratio)
-                        shape.height = int(orig_height * ratio)
+                        # A column no wider than its own cell margin scales the
+                        # image to a fraction of an EMU; truncating either side
+                        # to zero writes a degenerate wp:extent
+                        shape.width = max(1, int(orig_width * ratio))
+                        shape.height = max(1, int(orig_height * ratio))
 
                 docx_buffer = io.BytesIO()
                 document.save(docx_buffer)
@@ -3023,6 +3307,7 @@ class ExportHtmlHandler(ExportHandlerBase):
 
             # Style GitHub alert boxes with colored borders and shading
             html = self.style_html_alert_boxes(html, show_labels=show_alert_labels)
+            html = self.wrap_html_tables(html)
 
             self.set_header('Content-Type', 'text/html; charset=utf-8')
             self.set_header('Content-Disposition',
