@@ -2,6 +2,7 @@
 
 import json
 import io
+import re
 import tempfile
 import zipfile
 from pathlib import Path
@@ -1280,6 +1281,276 @@ class TestTableImageScaling:
                 f"2-column cell (< 4 in), not span the page"
             )
 
+    async def test_pdf_table_image_is_rendered(self, jp_fetch, test_table_image_file):
+        """DEF-6: an image inside a table cell must render in the PDF, not be
+        dropped (process_table used to read cell text only)."""
+        import fitz
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "test_table_image.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        n_images = sum(len(page.get_images()) for page in doc)
+        # The cell image must not overflow the page frame width
+        widest = max(
+            (rect.width for page in doc for rect in
+             [r for xref in {i[0] for i in page.get_images()}
+              for r in page.get_image_rects(xref)]),
+            default=0,
+        )
+        doc.close()
+        assert n_images >= 1, "table-cell image was dropped from the PDF"
+        assert widest <= pdf_frame_width() + 1, (
+            "table-cell image overflows the page frame"
+        )
+
+    async def test_pdf_cell_image_and_caption_both_render(self, jp_fetch, jp_root_dir):
+        """A cell holding both a caption and an image keeps both in the PDF."""
+        from PIL import Image as PILImage
+        import fitz
+
+        images_dir = jp_root_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        PILImage.new("RGB", (300, 200), color=(20, 60, 180)).save(
+            images_dir / "shot.png"
+        )
+        (jp_root_dir / "cap.md").write_text(
+            "# Grid\n\n| A | B |\n|---|---|\n"
+            '| **Caption One**<br><img src="images/shot.png" alt="s"> | plain |\n',
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "cap.md"}), raise_error=False,
+        )
+        assert response.code == 200
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        n_images = sum(len(page.get_images()) for page in doc)
+        text = "".join(page.get_text() for page in doc)
+        doc.close()
+        assert n_images >= 1, "cell image dropped"
+        assert "Caption One" in text, "cell caption text dropped when the image rendered"
+
+    async def test_pdf_page_tall_cell_image_does_not_crash(self, jp_fetch, jp_root_dir):
+        """A cell image taller than a page after width-scaling must be capped
+        below the frame - an atomic RLImage plus cell padding would otherwise
+        exceed one page and raise LayoutError (HTTP 500)."""
+        from PIL import Image as PILImage
+        import fitz
+
+        images_dir = jp_root_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        # Tall, narrow - stays taller than a page even after width scaling
+        PILImage.new("RGB", (200, 5000), color=(180, 40, 40)).save(
+            images_dir / "tall.png"
+        )
+        (jp_root_dir / "tall.md").write_text(
+            "# Tall\n\n| Shot |\n|------|\n"
+            '| <img src="images/tall.png" alt="t"> |\n',
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "tall.md"}), raise_error=False,
+        )
+        assert response.code == 200, (
+            f"tall cell image raised {response.code} (LayoutError?)"
+        )
+        assert response.body.startswith(b"%PDF-")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        n_images = sum(len(page.get_images()) for page in doc)
+        doc.close()
+        assert n_images >= 1, "tall cell image was dropped"
+
+    async def test_pdf_tall_image_in_header_cell_does_not_crash(self, jp_fetch, jp_root_dir):
+        """The header row overrides its bottom padding to 8pt (12pt total, vs
+        8pt for a body row), so a near-page-tall image in a HEADER cell must be
+        capped by that larger padding. Capping at `frame_height - 8` leaves the
+        header row 4pt too tall and reopens the atomic-RLImage LayoutError the
+        cell-image fix closed."""
+        from PIL import Image as PILImage
+        import fitz
+
+        images_dir = jp_root_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        PILImage.new("RGB", (200, 5000), color=(40, 140, 60)).save(
+            images_dir / "htall.png"
+        )
+        # Row 0 is the header (its second cell carries text -> has_header) and
+        # it holds the tall image, so the image lands in a 12pt-padded row.
+        (jp_root_dir / "htall.md").write_text(
+            "# Tall header\n\n"
+            '| <img src="images/htall.png" alt="t"> | Header |\n'
+            "|------|------|\n"
+            "| body a | body b |\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "htall.md"}), raise_error=False,
+        )
+        assert response.code == 200, (
+            f"tall header-cell image raised {response.code} (LayoutError?)"
+        )
+        assert response.body.startswith(b"%PDF-")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        n_images = sum(len(page.get_images()) for page in doc)
+        doc.close()
+        assert n_images >= 1, "tall header-cell image was dropped"
+
+    async def test_pdf_tall_image_body_row_under_repeating_header_does_not_crash(
+        self, jp_fetch, jp_root_dir
+    ):
+        """A real (text) header repeats on every continuation page. A tall-image
+        BODY row then needs `header + image + padding`, which cannot fit while
+        the header repeats - so the repeat must be dropped. The guard must key
+        off the TALLEST body row, not the shortest: a short row alongside the
+        tall one must not mask the overflow."""
+        from PIL import Image as PILImage
+        import fitz
+
+        images_dir = jp_root_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        PILImage.new("RGB", (200, 5000), color=(60, 40, 160)).save(
+            images_dir / "btall.png"
+        )
+        # Row 0 is a small text header (-> repeatRows). One body row holds the
+        # tall image; a second, short body row is the shortest - if the guard
+        # checks min(body) it keeps the repeat and the tall row never lays out.
+        (jp_root_dir / "btall.md").write_text(
+            "# Body tall\n\n"
+            "| Name | Diagram |\n"
+            "|------|---------|\n"
+            '| A | <img src="images/btall.png" alt="d"> |\n'
+            "| B | short text |\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "btall.md"}), raise_error=False,
+        )
+        assert response.code == 200, (
+            f"tall body-row image under a repeating header raised {response.code} "
+            f"(LayoutError?)"
+        )
+        assert response.body.startswith(b"%PDF-")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        n_images = sum(len(page.get_images()) for page in doc)
+        doc.close()
+        assert n_images >= 1, "tall body-row image was dropped"
+
+    async def test_pdf_tall_text_table_keeps_repeating_header(self, jp_fetch, jp_root_dir):
+        """A tall TEXT row splits fine under a repeated header, so the header
+        must keep repeating across pages - the repeat-drop guard is only for
+        atomic image rows. Dropping it for a tall text row regresses the
+        keep-header-on-the-page feature. Asserted by the header appearing on
+        more than one page."""
+        import fitz
+
+        big = ("This is a long paragraph sentence that wraps across many lines. "
+               * 240)  # ~15k chars in one cell -> spans multiple pages
+        (jp_root_dir / "ttt.md").write_text(
+            "# Long text table\n\n"
+            "| HEADERALPHA | HEADERBETA |\n"
+            "|-------------|------------|\n"
+            f"| {big} | side note |\n"
+            "| second row a | second row b |\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "ttt.md"}), raise_error=False,
+        )
+        assert response.code == 200, f"tall text table raised {response.code}"
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        n_pages = doc.page_count
+        header_pages = sum(
+            1 for page in doc if "HEADERALPHA" in page.get_text()
+        )
+        doc.close()
+        assert n_pages >= 2, (
+            f"test premise broken: table did not span multiple pages ({n_pages})"
+        )
+        assert header_pages >= 2, (
+            f"repeating header appears on only {header_pages} page(s); the guard "
+            f"dropped the repeat for a splittable text row"
+        )
+
+    async def test_pdf_near_full_page_header_does_not_crash(self, jp_fetch, jp_root_dir):
+        """A header row that nearly (but not quite) fills the page leaves less
+        than one body line under a repeated header, so a one-line body row can
+        never fit on a continuation page -> LayoutError. The guard must drop the
+        repeat when the header leaves under one body line, not only when it
+        overflows the frame outright. The 150x3160 image lands the header row a
+        few points below the frame (just under the 696pt cap), inside that
+        window."""
+        from PIL import Image as PILImage
+        import fitz
+
+        images_dir = jp_root_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        PILImage.new("RGB", (150, 3160), color=(150, 60, 40)).save(
+            images_dir / "nfp.png"
+        )
+        (jp_root_dir / "nfp.md").write_text(
+            "# Near full header\n\n"
+            '| <img src="images/nfp.png" alt="t"> | HeadTwo |\n'
+            "|---|---|\n"
+            "| body a | body b |\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "nfp.md"}), raise_error=False,
+        )
+        assert response.code == 200, (
+            f"near-full-page header raised {response.code} (LayoutError?)"
+        )
+        assert response.body.startswith(b"%PDF-")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        n_images = sum(len(page.get_images()) for page in doc)
+        doc.close()
+        assert n_images >= 1, "near-full-page header image was dropped"
+
+    async def test_pdf_image_only_grid_columns_size_to_images(self, jp_fetch, jp_root_dir):
+        """An image-only grid (empty header, no captions - the borderless layout
+        idiom the mockup docs use) earns no column width from text, so without an
+        image floor each column collapses and its cell image renders a few points
+        wide. The column must floor to the image so the grid renders usably."""
+        from PIL import Image as PILImage
+        import fitz
+
+        images_dir = jp_root_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        PILImage.new("RGB", (800, 1600), color=(30, 90, 200)).save(
+            images_dir / "g.png"
+        )
+        (jp_root_dir / "grid.md").write_text(
+            "# Grid\n\n|  |  |  |\n|---|---|---|\n"
+            '| ![a](images/g.png) | ![b](images/g.png) | ![c](images/g.png) |\n',
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "grid.md"}), raise_error=False,
+        )
+        assert response.code == 200
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        widths = [rc.width for pg in doc for xref in {i[0] for i in pg.get_images()}
+                  for rc in pg.get_image_rects(xref)]
+        doc.close()
+        assert len(widths) == 3, f"expected 3 grid images, got {len(widths)}"
+        assert min(widths) > 100, (
+            f"image-only grid columns collapsed - images render {min(widths):.0f}pt "
+            f"wide; the column must floor to the image"
+        )
+
 
 SIZE_BADGE_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 40" '
@@ -2368,3 +2639,575 @@ class TestColumnWidthFitting:
                 table_data, available, string_width)
             assert sum(widths) <= available + 1e-6, f"{name} runs off the page"
             assert min(widths) > 2 * padding, f"{name} has no content area"
+
+
+# --------------------------------------------------------------------------
+# Defect regressions (docs/defects.md)
+# --------------------------------------------------------------------------
+
+def _pdf_fill_colors(page):
+    """RGB (0..1) fill colours of every vector drawing on a fitz page."""
+    return [tuple(round(c, 3) for c in d["fill"])
+            for d in page.get_drawings() if d.get("fill") is not None]
+
+
+def _pdf_stroke_colors(page):
+    """RGB (0..1) stroke colours of every vector drawing on a fitz page."""
+    return [tuple(round(c, 3) for c in d["color"])
+            for d in page.get_drawings() if d.get("color") is not None]
+
+
+def _color_near(colors, target, tol=0.02):
+    return any(all(abs(c - t) <= tol for c, t in zip(col, target))
+               for col in colors if len(col) == len(target))
+
+
+TEST_MARKDOWN_TASK_LIST = """# Tasks
+
+- [x] finished item
+- [ ] pending item
+- [X] also finished
+"""
+
+
+@pytest.fixture
+def test_task_list_file(jp_root_dir):
+    md_file = jp_root_dir / "test_task_list.md"
+    md_file.write_text(TEST_MARKDOWN_TASK_LIST, encoding="utf-8")
+    return md_file
+
+
+class TestTaskListCheckboxes:
+    """DEF-1: `- [x]` / `- [ ]` render as checkbox glyphs (☒/☐), not literal
+    text; DOCX draws them in MS Gothic (Word's own checkbox font)."""
+
+    async def test_html_renders_checkbox_glyphs(self, jp_fetch, test_task_list_file):
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "test_task_list.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert "☒" in html, "checked checkbox glyph missing from HTML"
+        assert "☐" in html, "empty checkbox glyph missing from HTML"
+        assert "[x] finished" not in html and "[ ] pending" not in html, (
+            "literal task markers leaked into HTML"
+        )
+
+    async def test_docx_renders_checkbox_glyphs(self, jp_fetch, test_task_list_file):
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "test_task_list.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        doc = Document(io.BytesIO(response.body))
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "☒" in text and "☐" in text, "checkbox glyphs missing from DOCX"
+        assert "[x] finished" not in text and "[ ] pending" not in text, (
+            "literal task markers leaked into DOCX"
+        )
+        # The glyph must sit in its own run tagged MS Gothic (Word's checkbox font)
+        gothic_glyph_runs = 0
+        for r in doc.element.body.iter(qn("w:r")):
+            t = r.find(qn("w:t"))
+            if t is None or not t.text or t.text not in ("☒", "☐"):
+                continue
+            rFonts = r.find(qn("w:rPr") + "/" + qn("w:rFonts")) \
+                if r.find(qn("w:rPr")) is not None else None
+            assert rFonts is not None and rFonts.get(qn("w:ascii")) == "MS Gothic", (
+                "checkbox glyph run is not tagged MS Gothic"
+            )
+            gothic_glyph_runs += 1
+        assert gothic_glyph_runs >= 3, "expected each checkbox glyph in its own MS Gothic run"
+
+    async def test_pdf_renders_checkbox_glyphs(self, jp_fetch, test_task_list_file):
+        import fitz
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "test_task_list.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        text = "".join(page.get_text() for page in doc)
+        doc.close()
+        assert "☒" in text and "☐" in text, "checkbox glyphs missing from PDF"
+        assert "[x] finished" not in text and "[ ] pending" not in text, (
+            "literal task markers leaked into PDF"
+        )
+
+    async def test_task_marker_in_code_block_not_converted(self, jp_fetch, jp_root_dir):
+        """A `- [ ]` written inside a fenced code block is code, not a task."""
+        (jp_root_dir / "cb.md").write_text(
+            "# C\n\n```\n- [ ] not a task, just code\n- [x] also code\n```\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "cb.md"}), raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert "☒" not in html and "☐" not in html, (
+            "a task marker inside a code block was converted to a checkbox"
+        )
+        # Pygments wraps each token in a span; strip tags before checking the text
+        plain = re.sub(r"<[^>]+>", "", html)
+        assert "[ ] not a task" in plain, "code block content was altered"
+
+    async def test_link_list_item_not_converted(self, jp_fetch, jp_root_dir):
+        """`- [text](url)` is a link, not a checkbox - only `[ ]`/`[x]` match."""
+        (jp_root_dir / "lk.md").write_text(
+            "- [a link](https://example.com)\n- [x] done\n", encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "lk.md"}), raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert 'href="https://example.com"' in html, "link item was mangled"
+        assert html.count("☒") + html.count("☐") == 1, (
+            "only the real task item should become a checkbox"
+        )
+
+    async def test_star_and_plus_markers_convert(self, jp_fetch, jp_root_dir):
+        """`*` and `+` list markers carry task boxes too, not just `-`."""
+        (jp_root_dir / "sp.md").write_text(
+            "* [x] star done\n+ [ ] plus open\n", encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "sp.md"}), raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert "☒" in html and "☐" in html, "* / + task markers not converted"
+
+    async def test_empty_task_item_converts(self, jp_fetch, jp_root_dir):
+        """A bare task item with no label (`- [x]` / `- [ ]`, nothing trailing)
+        still becomes a checkbox - the marker match must not require text after
+        the bracket, or GitHub's empty-checkbox idiom leaks through as literal
+        `[x]` / `[ ]`."""
+        (jp_root_dir / "empty.md").write_text(
+            "- [x]\n- [ ]\n", encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "empty.md"}), raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert "☒" in html and "☐" in html, (
+            "bare task items were left as literal [x] / [ ]"
+        )
+
+    async def test_task_marker_in_nested_longer_fence_not_converted(self, jp_fetch, jp_root_dir):
+        """A shorter ``` line inside a longer ```` block is content, not the
+        closing fence (CommonMark: a closing fence is at least as long as the
+        opener). A `- [ ]` after it is still code and must not become a glyph."""
+        (jp_root_dir / "nf.md").write_text(
+            "# N\n\n````\n```\n- [ ] still inside the code block\n````\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "nf.md"}), raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert "☒" not in html and "☐" not in html, (
+            "a task marker inside a nested longer fence was converted to a checkbox"
+        )
+
+    async def test_task_marker_after_info_string_fence_not_converted(self, jp_fetch, jp_root_dir):
+        """A ```lang line inside a fenced block is a nested opener, not a
+        closer (CommonMark: a closing fence carries no info string), so a
+        `- [ ]` after it is still code and must not become a glyph."""
+        (jp_root_dir / "infofence.md").write_text(
+            "# I\n\n```\nsome code\n```python\n- [ ] still code\n```\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "infofence.md"}), raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert "☒" not in html and "☐" not in html, (
+            "a task marker after an info-string fence line was converted"
+        )
+
+
+class TestBlockquotePdfCallout:
+    """DEF-2: blockquotes render in PDF with a left bar, shading and indent."""
+
+    async def test_pdf_blockquote_has_bar_shading_and_indent(
+        self, jp_fetch, test_quotes_in_list_file
+    ):
+        import fitz
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "test_quotes_in_list.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        page = doc[0]
+
+        assert _color_near(_pdf_fill_colors(page), (0.957, 0.957, 0.957)), (
+            "blockquote background shading (F4F4F4) missing from PDF"
+        )
+        assert _color_near(_pdf_stroke_colors(page), (0.733, 0.733, 0.733)), (
+            "blockquote left bar (BBBBBB) missing from PDF"
+        )
+
+        body_x, quote_x = [], []
+        for b in page.get_text("dict")["blocks"]:
+            for line in b.get("lines", []):
+                for s in line["spans"]:
+                    if "Two ideas" in s["text"]:
+                        body_x.append(s["bbox"][0])
+                    if "quoted note" in s["text"]:
+                        quote_x.append(s["bbox"][0])
+        doc.close()
+        assert body_x and quote_x, "expected body and quote text in the PDF"
+        assert min(quote_x) > min(body_x) + 15, (
+            "blockquote text is not indented relative to body text"
+        )
+
+    async def test_pdf_multi_paragraph_quote_is_one_callout(self, jp_fetch, jp_root_dir):
+        """Consecutive blockquote paragraphs render as a single shaded box with
+        one continuous bar, not a stack of separate boxes with gaps."""
+        import fitz
+
+        (jp_root_dir / "mq.md").write_text(
+            "# Q\n\n> line one\n>\n> line two\n>\n> line three\n\nAfter.\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "mq.md"}), raise_error=False,
+        )
+        assert response.code == 200
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        # Count the blockquote shading fills (F4F4F4) - one per callout box
+        shade_boxes = sum(
+            1 for page in doc for c in _pdf_fill_colors(page)
+            if len(c) == 3 and all(abs(x - 0.957) < 0.02 for x in c)
+        )
+        text = "".join(page.get_text() for page in doc)
+        doc.close()
+        assert "line one" in text and "line three" in text, "quote text missing"
+        assert shade_boxes == 1, (
+            f"a 3-paragraph quote rendered as {shade_boxes} boxes, expected 1"
+        )
+
+
+class TestAlertPdfCallout:
+    """DEF-3: alerts render in PDF as a coloured-bar callout, not a table header."""
+
+    async def test_pdf_alert_renders_as_callout_not_header(
+        self, jp_fetch, test_rich_alerts_file
+    ):
+        import fitz
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "test_rich_alerts.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        fills, strokes, spans = [], [], []
+        for page in doc:
+            fills += _pdf_fill_colors(page)
+            strokes += _pdf_stroke_colors(page)
+            for b in page.get_text("dict")["blocks"]:
+                for line in b.get("lines", []):
+                    spans += line["spans"]
+        doc.close()
+
+        # IMPORTANT alert: purple shading (F4EDFF) + purple left bar (8250DF)
+        assert _color_near(fills, (0.957, 0.929, 1.0)), (
+            "alert purple shading missing - not rendered as a callout"
+        )
+        assert _color_near(strokes, (0.510, 0.314, 0.875)), (
+            "alert purple left bar missing"
+        )
+        # Alert body text must not use the content-table header colour (#365F91)
+        alert_spans = [s for s in spans if "porosity" in s["text"]]
+        assert alert_spans, "expected alert body text in the PDF"
+        for s in alert_spans:
+            assert s["color"] != 0x365F91, (
+                "alert text still rendered in the table-header colour"
+            )
+
+    async def test_pdf_data_table_still_header_styled(
+        self, jp_fetch, test_rich_alerts_file
+    ):
+        """The real data table must keep its header fill - alert detection
+        must not misfire on an ordinary content table."""
+        import fitz
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "test_rich_alerts.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        fills = [c for page in doc for c in _pdf_fill_colors(page)]
+        doc.close()
+        assert _color_near(fills, (0.859, 0.898, 0.945)), (
+            "data-table header fill (dbe5f1) missing - alert detection over-matched"
+        )
+
+    async def test_pdf_alert_colors_per_type(self, jp_fetch, test_rich_alerts_file):
+        """Each alert type keeps its own callout shading in the PDF (the fixture
+        carries IMPORTANT/purple, NOTE/blue, WARNING/amber)."""
+        import fitz
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "test_rich_alerts.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        fills = [c for page in doc for c in _pdf_fill_colors(page)]
+        doc.close()
+        assert _color_near(fills, (0.957, 0.929, 1.0)), "IMPORTANT purple shading missing"
+        assert _color_near(fills, (0.929, 0.961, 0.992)), "NOTE blue shading missing"
+        assert _color_near(fills, (0.996, 0.976, 0.906)), "WARNING amber shading missing"
+
+
+class TestMermaidViewBoxCrop:
+    """DEF-4: an SVG whose declared viewBox dwarfs its content is cropped
+    to the real content bounding box before rasterizing."""
+
+    async def test_oversized_viewbox_is_cropped_to_content(self):
+        from jupyterlab_export_markdown_extension.routes import (
+            PlaywrightSvgRenderer,
+        )
+        from PIL import Image as PILImage
+
+        # A 120x60 shape sitting inside an 800x800 viewBox.
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" '
+            'width="100%"><rect x="10" y="10" width="120" height="60" '
+            'fill="black"/></svg>'
+        ).encode("utf-8")
+
+        async with PlaywrightSvgRenderer(color_scheme="light") as renderer:
+            png = await renderer.render(svg, width=600)
+
+        img = PILImage.open(io.BytesIO(png)).convert("RGBA")
+        w, h = img.size
+        bbox = img.getbbox()
+        assert bbox is not None, "rasterized diagram is entirely blank"
+        cw, ch = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        assert cw / w > 0.7, (
+            f"diagram fills only {100 * cw / w:.0f}% of canvas width - "
+            f"view window is larger than the shape"
+        )
+        assert ch / h > 0.7, (
+            f"diagram fills only {100 * ch / h:.0f}% of canvas height - "
+            f"view window is larger than the shape"
+        )
+
+    async def test_unmeasurable_svg_falls_back_to_declared_viewbox(self):
+        """When getBBox yields no geometry (e.g. an empty SVG), render must
+        fall back to the declared viewBox rather than crash or size to zero."""
+        from jupyterlab_export_markdown_extension.routes import (
+            PlaywrightSvgRenderer,
+        )
+        from PIL import Image as PILImage
+
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100">'
+            '<defs></defs></svg>'
+        ).encode("utf-8")
+        async with PlaywrightSvgRenderer(color_scheme="light") as renderer:
+            png = await renderer.render(svg, width=400)
+        img = PILImage.open(io.BytesIO(png))
+        # Declared viewBox aspect 2:1 -> 400x200; the fallback must hold
+        assert img.size == (400, 200), (
+            f"fallback viewBox produced {img.size}, expected (400, 200)"
+        )
+
+    async def test_well_framed_diagram_is_not_cropped(self):
+        """DEF-4 regression (adversarial #4): a diagram that already fills its
+        declared viewBox must be left alone. getBBox reports geometry only - no
+        stroke, markers or filters - so re-cropping a well-framed diagram would
+        clip node borders and arrowheads. The declared viewBox aspect must
+        survive even when the content's own geometry aspect differs slightly."""
+        from jupyterlab_export_markdown_extension.routes import (
+            PlaywrightSvgRenderer,
+        )
+        from PIL import Image as PILImage
+
+        # Content fills the 3:1 viewBox in both axes (fill_w 0.97, fill_h 0.90),
+        # so it must NOT be tightened; a tightened box would be ~2.8:1 (h~217).
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 100" '
+            'width="100%"><rect x="5" y="5" width="290" height="90" '
+            'fill="black"/></svg>'
+        ).encode("utf-8")
+
+        async with PlaywrightSvgRenderer(color_scheme="light") as renderer:
+            png = await renderer.render(svg, width=600)
+
+        img = PILImage.open(io.BytesIO(png))
+        assert img.size == (600, 200), (
+            f"well-framed diagram was re-cropped to {img.size}; the declared "
+            f"3:1 viewBox (600x200) must be honoured, not tightened to content"
+        )
+
+    async def test_nonzero_viewbox_origin_is_preserved(self):
+        """DEF-4 regression (adversarial #7): when the diagram is not cropped,
+        the SVG's own viewBox - including a non-zero origin - must be kept. A
+        mermaid viewBox like `-100 -50 200 100` places content around a negative
+        origin; zeroing it would shift the drawing off-canvas and blank most of
+        the render."""
+        from jupyterlab_export_markdown_extension.routes import (
+            PlaywrightSvgRenderer,
+        )
+        from PIL import Image as PILImage
+
+        # Well-framed content drawn around a negative origin. With the viewBox
+        # kept, the rect nearly fills the canvas; a zeroed viewBox would push it
+        # into the top-left corner, leaving most of the canvas blank.
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" '
+            'viewBox="-100 -50 200 100" width="100%">'
+            '<rect x="-95" y="-45" width="190" height="90" fill="black"/></svg>'
+        ).encode("utf-8")
+
+        async with PlaywrightSvgRenderer(color_scheme="light") as renderer:
+            png = await renderer.render(svg, width=400)
+
+        img = PILImage.open(io.BytesIO(png)).convert("RGBA")
+        w, h = img.size
+        bbox = img.getbbox()
+        assert bbox is not None, "rasterized diagram is entirely blank"
+        cw = bbox[2] - bbox[0]
+        assert cw / w > 0.8, (
+            f"content fills only {100 * cw / w:.0f}% of width - the non-zero "
+            f"viewBox origin was dropped, shifting the drawing off-canvas"
+        )
+
+
+TEST_MARKDOWN_EMPTY_HEADER_GRID = """# Grid
+
+|  |  |
+|:---:|:---:|
+| cell one | cell two |
+| cell three | cell four |
+"""
+
+
+@pytest.fixture
+def test_empty_header_grid_file(jp_root_dir):
+    md_file = jp_root_dir / "test_empty_header_grid.md"
+    md_file.write_text(TEST_MARKDOWN_EMPTY_HEADER_GRID, encoding="utf-8")
+    return md_file
+
+
+class TestEmptyHeaderGrid:
+    """DEF-5: a Markdown grid written with an empty header row (`|  |  |`) must
+    not treat that row as a repeating, styled header - it would detach a blank
+    header bar from its rows across a page break."""
+
+    async def test_docx_empty_header_not_marked_repeating(
+        self, jp_fetch, test_empty_header_grid_file
+    ):
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "test_empty_header_grid.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        doc = Document(io.BytesIO(response.body))
+        assert doc.tables, "expected a table in the export"
+        table = doc.tables[0]
+        assert not any(c.text.strip() for c in table.rows[0].cells), (
+            "fixture's first row should be empty"
+        )
+        trPr = table.rows[0]._tr.find(qn("w:trPr"))
+        has_header = trPr is not None and trPr.find(qn("w:tblHeader")) is not None
+        assert not has_header, (
+            "empty header row must not be marked as a repeating header"
+        )
+        tblLook = table._tbl.tblPr.find(qn("w:tblLook"))
+        assert tblLook is not None and tblLook.get(qn("w:firstRow")) == "0", (
+            "empty header row must not carry first-row header emphasis"
+        )
+
+    async def test_pdf_empty_header_grid_has_no_header_bar(
+        self, jp_fetch, test_empty_header_grid_file
+    ):
+        import fitz
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "test_empty_header_grid.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        fills = [c for page in doc for c in _pdf_fill_colors(page)]
+        text = "".join(page.get_text() for page in doc)
+        doc.close()
+        assert "cell one" in text, "grid content missing from PDF"
+        assert not _color_near(fills, (0.859, 0.898, 0.945)), (
+            "empty header row painted a blue header bar (dbe5f1) in the PDF"
+        )
+
+    async def test_partial_first_row_is_still_a_header(self, jp_fetch, jp_root_dir):
+        """A first row with *any* text is a real header - the empty-header rule
+        must only fire when the whole first row is blank."""
+        import fitz
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        (jp_root_dir / "ph.md").write_text(
+            "# P\n\n| Name |  |\n|------|--|\n| a | 1 |\n| b | 2 |\n",
+            encoding="utf-8",
+        )
+        docx = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "ph.md"}), raise_error=False,
+        )
+        assert docx.code == 200
+        table = Document(io.BytesIO(docx.body)).tables[0]
+        trPr = table.rows[0]._tr.find(qn("w:trPr"))
+        assert trPr is not None and trPr.find(qn("w:tblHeader")) is not None, (
+            "a partially-filled first row must still be a repeating header"
+        )
+
+        pdf = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "ph.md"}), raise_error=False,
+        )
+        assert pdf.code == 200
+        doc = fitz.open(stream=pdf.body, filetype="pdf")
+        fills = [c for page in doc for c in _pdf_fill_colors(page)]
+        doc.close()
+        assert _color_near(fills, (0.859, 0.898, 0.945)), (
+            "a real header lost its blue bar in the PDF"
+        )

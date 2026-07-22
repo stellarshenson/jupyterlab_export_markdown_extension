@@ -2,6 +2,15 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.17
+
+- Fix task-list checkboxes exporting as literal `[x]` / `[ ]` text - `- [x]` and `- [ ]` now render as checkbox glyphs (checked and empty) in HTML, DOCX and PDF
+- Fix blockquotes losing their indent, left bar and shading in PDF - `>` quotes now render as an indented, left-barred, shaded callout matching the DOCX output
+- Fix GitHub alert boxes rendering as a plain table header in PDF - alerts now render as a colored-left-bar shaded callout matching the DOCX output
+- Fix mermaid diagrams rasterized inside a view window far larger than the diagram - the diagram is now cropped to its content so it fills the image instead of floating in whitespace
+- Fix a borderless image/layout grid (empty header row) stranding a blank header across a page break in DOCX and PDF
+- Fix table-cell images being dropped from PDF export - images inside table cells now render, sized to fit their column, including image-only grids where the cell has no caption text
+
 ## 1.6.16
 
 - Fix a table header being stranded alone at a page break - a table whose header row would land at the bottom of a page now moves to the next page, and the header repeats on each continuation page, in PDF, DOCX and HTML

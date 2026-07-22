@@ -43,6 +43,7 @@ dev = [
 ]
 test = [
     "coverage",
+    "pymupdf",
     "pypdf",
     "pytest",
     "pytest-asyncio",

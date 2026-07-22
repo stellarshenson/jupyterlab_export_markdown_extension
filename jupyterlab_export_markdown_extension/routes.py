@@ -136,31 +136,87 @@ class PlaywrightSvgRenderer:
         if svg_start > 0:
             svg_text = svg_text[svg_start:]
 
-        vb_w, vb_h = self._viewbox_dims(svg_text)
-
-        nominal_w = max(1, int(width))
-        nominal_h = max(1, round(vb_h * nominal_w / vb_w))
-        target_w = max(1, nominal_w * supersample)
-        target_h = max(1, nominal_h * supersample)
-
-        html = (
-            "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
-            "*{margin:0;padding:0}"
-            f"html,body{{background:transparent;overflow:hidden;"
-            f"width:{target_w}px;height:{target_h}px}}"
-            f"svg{{width:{target_w}px;height:{target_h}px;display:block}}"
-            "</style></head><body>"
-            f"{svg_text}"
-            "</body></html>"
-        )
+        # Many mermaid outputs declare a viewBox far larger than the drawn
+        # shape, rasterizing the diagram tiny inside a mostly-empty canvas.
+        # Load the SVG, measure the content bounding box with getBBox(), and -
+        # ONLY when the declared viewBox has real excess whitespace - tighten
+        # the viewBox to it. A viewBox that already frames the content is left
+        # alone: getBBox reports geometry only (no stroke, markers or filters),
+        # so cropping a well-framed diagram would clip node borders and
+        # arrowheads that its own padding is there to hold.
+        declared_w, declared_h = self._viewbox_dims(svg_text)
+        probe = max(1, int(width))
 
         ctx = await self._browser.new_context(
             color_scheme=self.color_scheme,
-            viewport={'width': target_w, 'height': target_h},
+            viewport={'width': probe, 'height': probe},
         )
         try:
             page = await ctx.new_page()
-            await page.set_content(html, wait_until='load')
+            probe_html = (
+                "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
+                "*{margin:0;padding:0}"
+                "html,body{background:transparent;overflow:hidden}"
+                "svg{display:block}"
+                "</style></head><body>"
+                f"{svg_text}"
+                "</body></html>"
+            )
+            await page.set_content(probe_html, wait_until='load')
+
+            # Real content bounds in the SVG's own (viewBox) coordinate space.
+            bbox = await page.evaluate(
+                """() => {
+                    const svg = document.querySelector('svg');
+                    if (!svg) return null;
+                    try {
+                        const b = svg.getBBox();
+                        if (!b || b.width <= 0 || b.height <= 0) return null;
+                        return {x: b.x, y: b.y, width: b.width, height: b.height};
+                    } catch (e) { return null; }
+                }"""
+            )
+
+            tighten = None  # (x, y, w, h) when we crop the viewBox, else keep it
+            if bbox:
+                fill_w = bbox['width'] / declared_w if declared_w > 0 else 0.0
+                fill_h = bbox['height'] / declared_h if declared_h > 0 else 0.0
+                if min(fill_w, fill_h) < 0.8:  # >20% empty in some dimension
+                    pad = max(6.0, 0.04 * max(bbox['width'], bbox['height']))
+                    tighten = (bbox['x'] - pad, bbox['y'] - pad,
+                               bbox['width'] + 2 * pad, bbox['height'] + 2 * pad)
+
+            # Size from the box we will render: the tightened box if cropping,
+            # otherwise the declared viewBox (which we leave in place).
+            vb_w, vb_h = (tighten[2], tighten[3]) if tighten else (declared_w, declared_h)
+            nominal_w = probe
+            nominal_h = max(1, round(vb_h * nominal_w / vb_w)) if vb_w > 0 else nominal_w
+            target_w = max(1, nominal_w * supersample)
+            target_h = max(1, nominal_h * supersample)
+
+            # Rewrite the viewBox only when cropping; otherwise keep the SVG's
+            # own (honouring a non-zero origin). Size the element either way.
+            await page.evaluate(
+                """({vb, w, h}) => {
+                    const svg = document.querySelector('svg');
+                    if (!svg) return;
+                    if (vb) svg.setAttribute('viewBox', vb);
+                    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+                    svg.setAttribute('width', w);
+                    svg.setAttribute('height', h);
+                    svg.style.width = w + 'px';
+                    svg.style.height = h + 'px';
+                    for (const el of [document.documentElement, document.body]) {
+                        el.style.width = w + 'px';
+                        el.style.height = h + 'px';
+                    }
+                }""",
+                {'vb': (f'{tighten[0]} {tighten[1]} {tighten[2]} {tighten[3]}'
+                        if tighten else None),
+                 'w': target_w, 'h': target_h},
+            )
+            await page.set_viewport_size({'width': target_w, 'height': target_h})
+
             png_bytes = await page.screenshot(
                 type='png',
                 omit_background=True,
@@ -904,6 +960,54 @@ class ExportHandlerBase(APIHandler):
         'CAUTION':   {'border': 'CF222E', 'shading': 'FEF0F0'},  # Red
     }
 
+    #: Task-list checkbox glyphs - Word's own checkbox defaults (U+2612 ballot
+    #: box with X for done, U+2610 empty box), which DejaVu (PDF) and every
+    #: browser (HTML) also carry. In DOCX they are tagged MS Gothic - the font
+    #: Word draws its native checkboxes in - by style_docx_task_checkboxes().
+    TASK_CHECKBOX_DONE = '☒'
+    TASK_CHECKBOX_OPEN = '☐'
+
+    def preprocess_task_lists(self, content: str) -> str:
+        """Render GitHub task-list markers as Unicode checkbox glyphs.
+
+        The markdown converter carries no task-list extension, so ``- [x]`` /
+        ``- [ ]`` would pass through as literal ``[x]`` / ``[ ]`` text. Swapping
+        the marker for a ballot glyph (done U+2612, open U+2610) renders a
+        checkbox in every export format, since the glyph flows through as plain
+        list text - HTML, DOCX and PDF all carry it in their body font.
+
+        Fenced code blocks are skipped so a ``- [ ]`` written inside a code
+        sample is not rewritten. Only a real list item (``[x]`` / ``[ ]`` / a
+        space) matches, so ``- [link](url)`` is left alone.
+        """
+        task_re = re.compile(r'^(\s*[-*+]\s+)\[([ xX])\](?:\s+|$)')
+        fence_re = re.compile(r'^\s*(`{3,}|~{3,})')
+
+        def replace(match):
+            box = (self.TASK_CHECKBOX_DONE if match.group(2) in 'xX'
+                   else self.TASK_CHECKBOX_OPEN)
+            return f'{match.group(1)}{box} '
+
+        # Track the fence character and length so a ``` inside a ~~~ block (or a
+        # shorter ``` inside a ```` block) is treated as content. Per CommonMark
+        # a block closes only on a same-char fence at least as long as the
+        # opener AND carrying no info string (a ```lang line is a nested opener,
+        # never a closer), while the opening fence itself may carry one.
+        out, fence_char, fence_len = [], None, 0
+        for line in content.split('\n'):
+            fence = fence_re.match(line)
+            if fence:
+                marker = fence.group(1)
+                bare = not line[fence.end():].strip()
+                if fence_char is None:
+                    fence_char, fence_len = marker[0], len(marker)
+                elif marker[0] == fence_char and len(marker) >= fence_len and bare:
+                    fence_char, fence_len = None, 0
+            elif fence_char is None:
+                line = task_re.sub(replace, line)
+            out.append(line)
+        return '\n'.join(out)
+
     def preprocess_github_alerts(self, content: str, show_labels: bool = False) -> str:
         """Convert GitHub-style alerts to paragraphs with markers.
 
@@ -1452,6 +1556,83 @@ class ExportHandlerBase(APIHandler):
 
         return alert_tables
 
+    def style_docx_task_checkboxes(self, document):
+        """Draw task-list checkbox glyphs in MS Gothic - the font Word uses for
+        its own checkboxes - so they render solid on Windows instead of via a
+        thin Calibri fallback. Each glyph is split into its own run and only
+        that run gets the font, leaving the item text in the body font.
+        """
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+        import copy
+
+        glyphs = (self.TASK_CHECKBOX_DONE, self.TASK_CHECKBOX_OPEN)
+
+        def set_gothic(r_elem):
+            rPr = r_elem.find(qn('w:rPr'))
+            if rPr is None:
+                rPr = OxmlElement('w:rPr')
+                r_elem.insert(0, rPr)
+            rFonts = rPr.find(qn('w:rFonts'))
+            if rFonts is None:
+                rFonts = OxmlElement('w:rFonts')
+                # rFonts must follow w:rStyle in the CT_RPr sequence
+                rStyle = rPr.find(qn('w:rStyle'))
+                if rStyle is not None:
+                    rStyle.addnext(rFonts)
+                else:
+                    rPr.insert(0, rFonts)
+            for attr in ('w:ascii', 'w:hAnsi', 'w:eastAsia', 'w:cs'):
+                rFonts.set(qn(attr), 'MS Gothic')
+
+        def segment(text):
+            out, buf, buf_glyph = [], '', None
+            for ch in text:
+                is_g = ch in glyphs
+                if buf and is_g != buf_glyph:
+                    out.append((buf, buf_glyph))
+                    buf = ''
+                buf += ch
+                buf_glyph = is_g
+            if buf:
+                out.append((buf, buf_glyph))
+            return out
+
+        for r_elem in list(document.element.body.iter(qn('w:r'))):
+            t_elem = r_elem.find(qn('w:t'))
+            if t_elem is None or not t_elem.text:
+                continue
+            if not any(g in t_elem.text for g in glyphs):
+                continue
+
+            segments = segment(t_elem.text)
+
+            # Formatting-only template: carries the run's rPr but none of its
+            # content (w:t/w:br/w:tab/w:drawing), so cloned segment runs get a
+            # fresh single w:t and never duplicate the original's breaks/tabs.
+            template = copy.deepcopy(r_elem)
+            for child in list(template):
+                if child.tag != qn('w:rPr'):
+                    template.remove(child)
+
+            first_text, first_glyph = segments[0]
+            t_elem.text = first_text
+            t_elem.set(qn('xml:space'), 'preserve')
+            if first_glyph:
+                set_gothic(r_elem)
+
+            anchor = r_elem
+            for seg_text, seg_glyph in segments[1:]:
+                new_r = copy.deepcopy(template)
+                nt = OxmlElement('w:t')
+                nt.text = seg_text
+                nt.set(qn('xml:space'), 'preserve')
+                new_r.append(nt)
+                if seg_glyph:
+                    set_gothic(new_r)
+                anchor.addnext(new_r)
+                anchor = new_r
+
     def remove_empty_paragraphs_before_images(self, document):
         """Remove empty paragraphs that immediately precede image paragraphs.
 
@@ -1856,9 +2037,10 @@ class ExportHandlerBase(APIHandler):
         letting the caller supply the font metrics. A cell's natural width is
         its longest line, its minimum the longest word it cannot break, and
         ``floors`` adds a per-column lower bound for content this cannot see
-        (an image - only the DOCX path has any, since the PDF one drops
-        table-cell images). Every column keeps at least the width of an empty
-        cell, so none comes back zero-width, unless an equal share of
+        (an image - only the DOCX path passes any; the PDF path renders a cell
+        image but scales it to whatever column its text earns rather than
+        flooring the column to it). Every column keeps at least the width of an
+        empty cell, so none comes back zero-width, unless an equal share of
         ``available`` is itself smaller than that.
         """
         ncols = max((len(row) for row in table_data), default=0)
@@ -1879,7 +2061,7 @@ class ExportHandlerBase(APIHandler):
 
     @classmethod
     def pdf_table_column_layout(cls, table_data: list, available: float,
-                                string_width) -> tuple:
+                                string_width, image_widths: list | None = None) -> tuple:
         """Cell padding and column widths for a PDF table of ``available`` width.
 
         ``string_width(text, row_index)`` measures rendered text. reportlab
@@ -1887,6 +2069,12 @@ class ExportHandlerBase(APIHandler):
         padding, so a table with very many columns gets a tighter padding
         instead of a width floor that would push it back off the page. The
         widths always sum to at most ``available``.
+
+        ``image_widths`` is a per-column content width (points) for the widest
+        cell image, so an image-only cell - which earns no width from its empty
+        text - floors its column to the image instead of collapsing to a few
+        points (the DOCX path floors the same way). measured_column_widths caps
+        each floor at a fair share so an image cannot starve its text neighbours.
 
         Past roughly 150 columns a column is narrower than a single wide glyph
         at any font size used here, and reportlab paints such a glyph past its
@@ -1907,9 +2095,15 @@ class ExportHandlerBase(APIHandler):
         def measure(text, row_index):
             return string_width(text, row_index) + cell_padding
 
+        # An image floor is the image content width plus the same padding a
+        # text measurement carries, so the column holds the image at full size
+        floors = None
+        if image_widths and any(image_widths):
+            floors = [w + cell_padding if w else 0.0 for w in image_widths]
+
         # The empty-cell floor already keeps every width above the padding
         return side_padding, cls.measured_column_widths(
-            table_data, available, measure)
+            table_data, available, measure, floors)
 
     def style_docx_table(self, table) -> None:
         """Apply the banded style and 100% page width to a content table."""
@@ -1920,10 +2114,24 @@ class ExportHandlerBase(APIHandler):
         tblPr = table._tbl.tblPr
         if tblPr is None:
             return
-        # Disable first column emphasis
+
+        # A Markdown table needs a header row, so a borderless image/layout
+        # grid is written with an empty one (`|  |  |  |`). That empty row must
+        # not be treated as a header: styled and marked repeating, it becomes a
+        # blank banded bar that repeats and detaches from its image rows across
+        # a page break.
+        first_row_empty = (
+            len(table.rows) >= 1
+            and not any(c.text.strip() for c in table.rows[0].cells)
+        )
+
+        # Disable first column emphasis (and first row emphasis for a grid whose
+        # header row is empty, so no blank header bar is drawn)
         tblLook = tblPr.find(qn('w:tblLook'))
         if tblLook is not None:
             tblLook.set(qn('w:firstColumn'), '0')
+            if first_row_empty:
+                tblLook.set(qn('w:firstRow'), '0')
         # Set table to 100% page width. Update in place, or insert at the slot
         # w:tblPr's schema sequence gives it - appending would put it after
         # w:tblLook, and a validating reader may then drop the width entirely
@@ -1938,8 +2146,9 @@ class ExportHandlerBase(APIHandler):
         tblW.set(qn('w:type'), 'pct')
         # Mark the first row as a repeating header: Word then repeats it at the
         # top of each page the table spans and does not strand it alone at a
-        # page bottom. Only a table with a body row has a header to repeat.
-        if len(table.rows) > 1:
+        # page bottom. Only a table with a real (non-empty) header row to
+        # repeat qualifies - an empty grid header would just repeat a blank bar.
+        if len(table.rows) > 1 and not first_row_empty:
             trPr = table.rows[0]._tr.get_or_add_trPr()
             if trPr.find(qn('w:tblHeader')) is None:
                 trPr.append(OxmlElement('w:tblHeader'))
@@ -2605,6 +2814,15 @@ class ExportHandlerBase(APIHandler):
             textColor=colors.HexColor('#4F81BD')
         )
 
+        # Callout body (blockquotes, alert boxes). Same size as body text but
+        # no trailing space - the surrounding callout table supplies padding.
+        callout_body_style = ParagraphStyle(
+            'CustomCalloutBody',
+            parent=normal_style,
+            spaceAfter=0,
+            spaceBefore=0,
+        )
+
         # Table cells are Paragraphs so their text wraps inside the column
         table_cell_style = ParagraphStyle(
             'CustomTableCell',
@@ -2790,6 +3008,20 @@ class ExportHandlerBase(APIHandler):
                 last_list_level = -1
                 return Paragraph(text, heading3_style)
 
+            # Blockquote: style_docx_blockquotes gave it a left border, shading
+            # and indent that process_paragraph would otherwise drop. Render it
+            # as a left-barred, shaded, indented callout so the PDF matches the
+            # DOCX. The runs already carry the muted italic colour.
+            bq = blockquote_info(para)
+            if bq is not None:
+                last_list_level = -1
+                indent_pts, bar_hex, shd_hex = bq
+                return make_callout(
+                    [Paragraph(text, callout_body_style)],
+                    bar_hex, shd_hex, left_pad=12 + max(0.0, indent_pts),
+                    trailing=0.05,
+                )
+
             # Check for list items
             list_type, level = get_list_info(para)
 
@@ -2823,8 +3055,112 @@ class ExportHandlerBase(APIHandler):
         frame_width = pdf_doc.width - 2 * self.PDF_FRAME_PADDING
         frame_height = pdf_doc.height - 2 * self.PDF_FRAME_PADDING
 
+        def make_callout(flowables, bar_hex, shd_hex, left_pad=12, trailing=0.12):
+            """A full-width box with a coloured left bar and background shading.
+
+            Shared by blockquotes and GitHub alert boxes. ``splitInRow`` lets a
+            callout taller than a page carry over instead of raising LayoutError.
+            """
+            t = Table([[flowables]], colWidths=[frame_width],
+                      hAlign='LEFT', splitInRow=1)
+            t.setStyle(TableStyle([
+                ('LINEBEFORE', (0, 0), (0, -1), 3, colors.HexColor('#' + bar_hex)),
+                ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#' + shd_hex)),
+                ('LEFTPADDING', (0, 0), (-1, -1), left_pad),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+                ('TOPPADDING', (0, 0), (-1, -1), 6),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ]))
+            return [t, Spacer(1, trailing * inch)]
+
+        def blockquote_info(para):
+            """(indent_pts, bar_hex, shd_hex) if the paragraph is a styled
+            blockquote (a left ``w:pBdr`` from style_docx_blockquotes), else None.
+            Horizontal rules use a bottom/top border and empty text, already
+            handled before this is reached."""
+            pPr = para._element.pPr
+            if pPr is None:
+                return None
+            pBdr = pPr.find(qn('w:pBdr'))
+            if pBdr is None:
+                return None
+            left = pBdr.find(qn('w:left'))
+            if left is None:
+                return None
+            bar = left.get(qn('w:color')) or 'BBBBBB'
+            if bar in ('auto', ''):
+                bar = 'BBBBBB'
+            shd = pPr.find(qn('w:shd'))
+            shd_fill = shd.get(qn('w:fill')) if shd is not None else None
+            if not shd_fill or shd_fill == 'auto':
+                shd_fill = 'F4F4F4'
+            indent_pts = 0.0
+            ind = pPr.find(qn('w:ind'))
+            if ind is not None:
+                lv = ind.get(qn('w:left'))
+                if lv:
+                    try:
+                        indent_pts = int(lv) / 20.0
+                    except ValueError:
+                        pass
+            return (indent_pts, bar, shd_fill)
+
+        def alert_info(tbl):
+            """(bar_hex, shd_hex) if the table is a GitHub alert box (a single
+            1x1 cell with a coloured left border, the other sides none, from
+            style_docx_alert_boxes), else None. The 1x1 shape is required so a
+            normal multi-row/column table that happens to share the border
+            signature is never routed to the single-cell callout (which would
+            drop every other cell)."""
+            if len(tbl.rows) != 1 or len(tbl.rows[0].cells) != 1:
+                return None
+            tblPr = tbl._tbl.find(qn('w:tblPr'))
+            if tblPr is None:
+                return None
+            borders = tblPr.find(qn('w:tblBorders'))
+            if borders is None:
+                return None
+            left = borders.find(qn('w:left'))
+            if left is None or left.get(qn('w:val')) != 'single':
+                return None
+            bar = left.get(qn('w:color'))
+            if not bar or bar in ('auto', '000000'):
+                return None
+            top = borders.find(qn('w:top'))
+            if top is not None and top.get(qn('w:val')) not in ('none', None):
+                return None
+            shd_fill = 'FFFFFF'
+            try:
+                tcPr = tbl.rows[0].cells[0]._tc.find(qn('w:tcPr'))
+                if tcPr is not None:
+                    shd = tcPr.find(qn('w:shd'))
+                    if shd is not None and shd.get(qn('w:fill')):
+                        shd_fill = shd.get(qn('w:fill'))
+            except (IndexError, AttributeError):
+                pass
+            return (bar, shd_fill)
+
+        def process_alert(tbl, bar_hex, shd_hex):
+            """Render an alert box as a coloured-left-bar shaded callout with
+            normal (not table-header) text, preserving run formatting."""
+            flow = []
+            for p in tbl.rows[0].cells[0].paragraphs:
+                markup = ''.join(format_run(run) for run in p.runs).strip()
+                if markup:
+                    flow.append(Paragraph(markup, callout_body_style))
+            if not flow:
+                flow = [Paragraph('&nbsp;', callout_body_style)]
+            return make_callout(flow, bar_hex, shd_hex, left_pad=12)
+
         def process_table(tbl):
             """Process a single table and return reportlab elements."""
+            # A GitHub alert box is a single-cell table with a coloured left
+            # bar; render it as a callout rather than a header-styled table.
+            alert = alert_info(tbl)
+            if alert is not None:
+                return process_alert(tbl, alert[0], alert[1])
+
             # Raw text, so the widths below are measured on what is rendered
             # rather than on the XML entities that stand in for it
             table_data = [[cell.text for cell in row.cells] for row in tbl.rows]
@@ -2843,46 +3179,137 @@ class ExportHandlerBase(APIHandler):
                 return pdfmetrics.stringWidth(
                     text, font, table_cell_style.fontSize)
 
-            side_padding, col_widths = self.pdf_table_column_layout(
-                table_data, frame_width, string_width)
+            # Per-column widest image (points): an image-only cell earns no
+            # column width from its empty text, so without this floor its column
+            # collapses and the cell image renders a few points wide. Mirrors the
+            # DOCX path's image_floors; the extent cx is in EMU.
+            from docx.shared import Emu
+            ncols = max((len(r) for r in table_data), default=0)
+            image_widths = [0.0] * ncols
+            for row in tbl.rows:
+                for c, cell in enumerate(row.cells):
+                    if c >= ncols:
+                        continue
+                    widest = max((Emu(int(ext.get('cx') or 0)).pt
+                                  for ext in cell._tc.iter(qn('wp:extent'))),
+                                 default=0)
+                    if widest:
+                        image_widths[c] = max(image_widths[c], widest)
 
-            # Paragraph cells wrap across lines; plain strings never do.
-            wrapped = [
-                [Paragraph(cell_markup(text),
-                           table_header_style if r == 0 else table_cell_style)
-                 for text in row]
-                for r, row in enumerate(table_data)
-            ]
+            side_padding, col_widths = self.pdf_table_column_layout(
+                table_data, frame_width, string_width, image_widths)
+
+            # A Markdown layout grid carries an empty header row (`|  |  |  |`);
+            # it must not be styled or repeated as a header, or a blank blue bar
+            # detaches from its rows across a page break. Row 0 is a real header
+            # only when it holds text.
+            has_header = any(text.strip() for text in table_data[0])
+
+            # A cell adds 4pt top + 4pt bottom padding around its content, and
+            # the header row overrides its bottom padding to 8pt (12pt total).
+            # An RLImage is atomic (never splits), so a cell image capped at the
+            # full frame height plus that padding would exceed one page and
+            # raise LayoutError. Cap below the frame by the largest per-row
+            # padding (the 12pt header row) so no row - header included - can
+            # overflow.
+            cell_image_max_height = frame_height - 12
+
+            def cell_content(cell, col_width, style):
+                """Flowables for one cell: its text plus any inline images,
+                scaled to the column so a cell image renders instead of being
+                dropped. Walks the cell's paragraphs so text and images keep
+                document order."""
+                content_width = max(1.0, col_width - 2 * side_padding)
+                flow = []
+                for p in cell.paragraphs:
+                    ptext = cell_markup(p.text)
+                    if ptext.strip():
+                        flow.append(Paragraph(ptext, style))
+                    for drawing in p._p.findall('.//' + qn('w:drawing')):
+                        img = process_image(drawing, doc, max_width=content_width,
+                                            max_height=cell_image_max_height)
+                        if img is not None:
+                            flow.append(img)
+                if not flow:
+                    flow = [Paragraph(cell_markup(cell.text), style)]
+                return flow
+
+            # Paragraph/Image cells wrap and fit inside the column.
+            wrapped = []
+            for r, row in enumerate(tbl.rows):
+                style = (table_header_style if (r == 0 and has_header)
+                         else table_cell_style)
+                wrapped.append([
+                    cell_content(cell,
+                                 col_widths[c] if c < len(col_widths) else frame_width,
+                                 style)
+                    for c, cell in enumerate(row.cells)
+                ])
 
             # splitInRow lets a single row taller than the page carry over to
             # the next one - without it reportlab raises LayoutError and the
             # whole export fails, which wrapping made reachable. repeatRows=1
-            # repeats the header on each continuation page and, as a side
+            # repeats a real header on each continuation page and, as a side
             # effect, defers the whole table to the next page rather than
             # stranding the header alone at a page bottom.
             t = Table(wrapped, colWidths=col_widths, hAlign='LEFT',
-                      splitInRow=1, repeatRows=1)
-            t.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dbe5f1')),
+                      splitInRow=1, repeatRows=1 if has_header else 0)
+            style = [
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
                 ('LEFTPADDING', (0, 0), (-1, -1), side_padding),
                 ('RIGHTPADDING', (0, 0), (-1, -1), side_padding),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
                 ('TOPPADDING', (0, 0), (-1, -1), 4),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc'))
-            ]))
-            # A repeated header must fit one page - reportlab re-emits it on
-            # every continuation and raises LayoutError if it cannot. When the
-            # header row alone is taller than the frame (a page-long alert
-            # callout in its 1x1 table, an oversized header), drop the repeat
-            # and let splitInRow carry the row across pages instead.
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
+            ]
+            if has_header:
+                style.append(
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dbe5f1')))
+                style.append(('BOTTOMPADDING', (0, 0), (-1, 0), 8))
+            t.setStyle(TableStyle(style))
+            # A repeated header re-emits on every continuation page, so each
+            # body row must fit in the space it leaves (`frame_height -
+            # header_h`). A text row splits fine under the header (splitInRow
+            # carries the overflow) but cannot shrink below one line, and an
+            # image is atomic and cannot shrink at all - either would raise
+            # LayoutError if it can't fit under the repeated header. Drop the
+            # repeat when the header leaves less than one body line (this also
+            # covers a header taller than the whole frame), or when a body
+            # row's tallest ATOMIC image can't fit. Keying off total row height
+            # would needlessly drop the header for a tall *text* table.
             t.wrap(sum(col_widths), frame_height)
-            if t._rowHeights and t._rowHeights[0] > frame_height:
-                t.repeatRows = 0
+            if has_header and t._rowHeights:
+                avail = frame_height - t._rowHeights[0]
+                one_body_line = table_cell_style.leading + 8  # + cell padding
+
+                def _atomic_floor(cells):
+                    """Smallest height a row can shrink to when split: its
+                    tallest atomic image plus cell padding, or 0 when the row
+                    is all splittable text (bounded separately by one line)."""
+                    tall = 0.0
+                    for cell_flow in cells:
+                        for f in cell_flow:
+                            if isinstance(f, RLImage):
+                                tall = max(tall, f.drawHeight)
+                    return tall + 8 if tall else 0.0
+
+                if avail < one_body_line or any(
+                    _atomic_floor(r) > avail for r in wrapped[1:]
+                ):
+                    t.repeatRows = 0
             return [t, Spacer(1, 0.15 * inch)]
 
-        def process_image(drawing_element, doc):
-            """Extract image from drawing element and return reportlab Image."""
+        def process_image(drawing_element, doc, max_width=None, max_height=None):
+            """Extract image from drawing element and return reportlab Image.
+
+            Scales to ``max_width`` then, if still too tall, ``max_height``,
+            aspect preserved. Both default to the printable frame; a table cell
+            passes its own column width so a cell image fits its column.
+            """
+            if max_width is None:
+                max_width = frame_width
+            if max_height is None:
+                max_height = frame_height
             try:
                 # Navigate to blip element containing image reference
                 blip = drawing_element.find('.//' + qn('a:blip'))
@@ -2903,17 +3330,16 @@ class ExportHandlerBase(APIHandler):
                 img_buffer = io.BytesIO(image_part.blob)
                 img = RLImage(img_buffer)
 
-                # Scale to the frame width, then - if that leaves it taller
-                # than the frame - down to the frame height, aspect preserved.
-                # A tall mermaid diagram at full width would otherwise run off
-                # the bottom of the page. Same frame as the tables above.
-                if img.drawWidth > frame_width:
-                    scale = frame_width / img.drawWidth
-                    img.drawWidth = frame_width
+                # Scale to the width, then - if that leaves it taller than the
+                # height - down to the height, aspect preserved. A tall mermaid
+                # diagram at full width would otherwise run off the bottom.
+                if max_width > 0 and img.drawWidth > max_width:
+                    scale = max_width / img.drawWidth
+                    img.drawWidth = max_width
                     img.drawHeight = img.drawHeight * scale
-                if img.drawHeight > frame_height:
-                    scale = frame_height / img.drawHeight
-                    img.drawHeight = frame_height
+                if max_height > 0 and img.drawHeight > max_height:
+                    scale = max_height / img.drawHeight
+                    img.drawHeight = max_height
                     img.drawWidth = img.drawWidth * scale
 
                 # Left-align image
@@ -2930,13 +3356,49 @@ class ExportHandlerBase(APIHandler):
             else:
                 story.append(result)
 
+        def build_blockquote_callout(paras, bq):
+            """One callout for a run of consecutive blockquote paragraphs, so a
+            multi-paragraph quote renders as a single shaded box with an
+            unbroken left bar rather than a stack of separate boxes (Word
+            merges them the same way in the DOCX)."""
+            indent_pts, bar_hex, shd_hex = bq
+            flow = []
+            for p in paras:
+                markup = ''.join(format_run(run) for run in p.runs).strip()
+                flow.append(Paragraph(markup or '&nbsp;', callout_body_style))
+            return make_callout(flow, bar_hex, shd_hex,
+                                left_pad=12 + max(0.0, indent_pts), trailing=0.12)
+
         # Iterate through body elements in document order
-        for element in doc.element.body:
+        body_elements = list(doc.element.body)
+        i = 0
+        while i < len(body_elements):
+            element = body_elements[i]
             if element.tag == qn('w:p'):  # Paragraph
                 para = DocxParagraph(element, doc)
-
-                # Check for drawings (images) in paragraph
                 drawings = element.findall('.//' + qn('w:drawing'))
+
+                # Group consecutive blockquote paragraphs (without images) into
+                # a single callout.
+                bq = blockquote_info(para) if not drawings else None
+                if bq is not None:
+                    group = [para]
+                    j = i + 1
+                    while (j < len(body_elements)
+                           and body_elements[j].tag == qn('w:p')
+                           and not body_elements[j].findall('.//' + qn('w:drawing'))):
+                        nxt = DocxParagraph(body_elements[j], doc)
+                        if blockquote_info(nxt) is None:
+                            break
+                        group.append(nxt)
+                        j += 1
+                    last_list_level = -1
+                    for _l in number_counters:
+                        number_counters[_l] = 0
+                    add_to_story(build_blockquote_callout(group, bq))
+                    i = j
+                    continue
+
                 if drawings:
                     # Process paragraph text first (if any)
                     if para.text.strip():
@@ -2952,6 +3414,7 @@ class ExportHandlerBase(APIHandler):
             elif element.tag == qn('w:tbl'):  # Table
                 tbl = DocxTable(element, doc)
                 story.extend(process_table(tbl))
+            i += 1
 
         # Build the PDF
         if not story:
@@ -2997,6 +3460,7 @@ class ExportPdfHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            content = self.preprocess_task_lists(content)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             content = self.replace_math_with_images(content, width=math_pixel_width)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
@@ -3130,6 +3594,7 @@ class ExportDocxHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            content = self.preprocess_task_lists(content)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             # Use OMML markers for DOCX (native Word equations)
             content, inline_math, display_math = self.replace_math_with_markers(content)
@@ -3195,6 +3660,9 @@ class ExportDocxHandler(ExportHandlerBase):
                 # Style GitHub alert boxes with colored borders and shading
                 alert_tables = self.style_docx_alert_boxes(
                     document, show_labels=show_alert_labels)
+
+                # Draw task-list checkbox glyphs in MS Gothic (Word's checkbox font)
+                self.style_docx_task_checkboxes(document)
 
                 # Style tables: banded rows (pale blue), no first column emphasis
                 # Usable page area - one source for both the table grid below
@@ -3355,6 +3823,7 @@ class ExportHtmlHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            content = self.preprocess_task_lists(content)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             content = self.replace_mermaid_with_images(content, mermaid_diagrams)
             content = self.embed_images_as_base64(content, file_path.parent)
