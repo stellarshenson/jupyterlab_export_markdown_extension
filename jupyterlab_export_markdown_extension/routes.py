@@ -2359,6 +2359,18 @@ class ExportHandlerBase(APIHandler):
         # position; appending the element by hand puts it out of sequence.
         table.autofit = False
 
+    #: `nl2br` turns every newline into a break, including the one that
+    #: follows a break the author wrote by hand. A line ended with `<br>` -
+    #: the idiom for a question above its answer - therefore renders with a
+    #: blank line after it, and the gap inside the pair matches the gap
+    #: between pairs, so the grouping is lost. Drop the generated tag when a
+    #: hand-written one already sits in front of it: the author asked for one
+    #: break and gets one. The generated tag is always `<br />` immediately
+    #: before the newline it replaced, and `nl2br` does not run inside a raw
+    #: HTML block, a table cell or a code block, so nothing the author wrote
+    #: in those places can match. An explicit `<br><br>` still keeps both.
+    DOUBLED_LINE_BREAK_RE = re.compile(r'(<br\s*/?>)<br />\n')
+
     def markdown_to_html(self, content: str, title: str = 'Exported Document',
                          compact: bool = False, math_support: bool = False,
                          theme: str = 'light',
@@ -2381,7 +2393,7 @@ class ExportHandlerBase(APIHandler):
             extensions=['tables', 'fenced_code', 'codehilite', 'toc', 'nl2br'],
             tab_length=2  # Support 2-space nested lists (GitHub/CommonMark convention)
         )
-        body = md.convert(content)
+        body = self.DOUBLED_LINE_BREAK_RE.sub(r'\1\n', md.convert(content))
 
         if compact:
             # PDF-optimized stylesheet with tighter spacing

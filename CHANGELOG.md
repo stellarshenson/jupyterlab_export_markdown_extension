@@ -2,6 +2,10 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.19
+
+- Fix a line ended with an explicit `<br>` rendering as two line breaks in DOCX, PDF and HTML - a question written above its answer came out with a blank line between them, so the pair sat further apart than it sat from the next pair and the grouping read backwards; a deliberate `<br><br>` still renders its blank line, and a `<br>` inside a table cell or raw HTML block is unaffected
+
 ## 1.6.18
 
 - Fix mermaid diagrams rasterizing mostly as whitespace - the inline `max-width` mermaid stamps on its SVG capped the diagram at its natural size inside a much larger canvas; diagrams now fill their image (97-99% of the width on a reference document, against 43% at worst before)

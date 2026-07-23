@@ -8,6 +8,7 @@ Acceptance criteria for the markdown export extension across PDF, DOCX and HTML.
 - [Blank grid header](#blank-grid-header)
 - [Row and callout page splitting](#row-and-callout-page-splitting)
 - [Mermaid raster framing](#mermaid-raster-framing)
+- [Line break fidelity](#line-break-fidelity)
 
 ## Export page fitting
 
@@ -151,3 +152,28 @@ A mermaid diagram is rendered to SVG in the browser and screenshotted at the con
 - [x] **A well-framed diagram is not cropped** - a diagram that already fills its viewBox is left untouched, since `getBBox` sees geometry only and would clip a boundary stroke or marker
   - log: 2026-07-23 criterion added
   - log: 2026-07-23 held - the crop is gated on a fill below 0.8; tests `test_well_framed_diagram_is_not_cropped` and `test_nonzero_viewbox_origin_is_preserved` (v1.6.18)
+
+## Line break fidelity
+
+A break the author writes must render as one break. Markdown's `nl2br` also converts the newline that follows it, which doubles any hand-written `<br>` - and a doubled break is not cosmetic: it inverts the grouping of a question above its answer, the reason the idiom is used at all.
+
+| Source             | Author's intent | Rendered breaks |
+| ------------------ | --------------- | --------------- |
+| `line<br>` + `\n`  | one break       | 1               |
+| `line` + `\n`      | one break       | 1               |
+| `line<br><br>`     | blank line      | 2               |
+| `<br>` in a cell   | one break       | 1               |
+| `<br>` in raw HTML | one break       | 1               |
+
+- [x] **One break where the author wrote one** - a line ended with `<br>` renders with a single break in HTML, DOCX and PDF
+  - log: 2026-07-23 criterion added after `DEF-10` ("question and answer ... in the docx they are spread apart, one cannot know that one q&a is separate from next q&a")
+  - log: 2026-07-23 implemented in `markdown_to_html`, so all three formats inherit it; tests `test_html_keeps_one_break`, `test_docx_pair_holds_one_break` (v1.6.19)
+- [x] **A pair reads as a pair** - a question sits closer to its own answer than to the next question
+  - log: 2026-07-23 criterion added - the measurable form of the defect, since the break count alone does not prove the reader can see the grouping
+  - log: 2026-07-23 held - PDF measures 12.0pt inside the pair against 18.0pt between pairs (24.0 against 18.0 before); DOCX gets ~13pt against the ~23pt its `w:after="200"` plus 1.15 line spacing gives a paragraph boundary. Test `test_pdf_pair_is_tighter_than_the_gap_between_pairs`, mutation-proved (v1.6.19)
+- [x] **An explicit blank line survives** - `<br><br>` is an author asking for a blank line, not a duplicate to collapse
+  - log: 2026-07-23 criterion added
+  - log: 2026-07-23 held - only the generated tag is dropped, so two hand-written breaks stay two; test `test_explicit_blank_line_is_preserved` (v1.6.19)
+- [x] **Breaks outside a paragraph are untouched** - a `<br>` in a table cell or a raw HTML block keeps its break, since `nl2br` never ran there to double it
+  - log: 2026-07-23 criterion added - a caption-above-image grid depends on exactly this break
+  - log: 2026-07-23 held - the pattern requires the generated `<br />` plus its newline, which those contexts never carry; test `test_break_in_a_table_cell_is_untouched` (v1.6.19)

@@ -3635,3 +3635,123 @@ class TestEmptyHeaderGrid:
         assert _color_near(fills, (0.859, 0.898, 0.945)), (
             "a real header lost its blue bar in the PDF"
         )
+
+
+class TestExplicitLineBreakNotDoubled:
+    """DEF-10: a line ended with an explicit `<br>` - the idiom for a question
+    above its answer - picked up a second break from the `nl2br` extension,
+    which converts the following newline too. The pair then sat further apart
+    than the paragraphs around it, so the grouping read backwards."""
+
+    FAQ = (
+        "## FAQ\n\n"
+        "**Does the system call out?**<br>\n"
+        "No. Passive - other systems push data to it.\n\n"
+        "**How does the plan arrive?**<br>\n"
+        "Upstream pulls the recorded events.\n\n"
+        "**Is the app native?**<br>\n"
+        "No. Thin web app; connectivity required.\n"
+    )
+
+    async def test_html_keeps_one_break(self, jp_fetch, jp_root_dir):
+        (jp_root_dir / "faq.md").write_text(self.FAQ, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "faq.md"}),
+            raise_error=False)
+        assert r.code == 200
+        html = r.body.decode("utf-8")
+        doubled = re.findall(r'<br\s*/?>\s*<br\s*/?>', html)
+        assert not doubled, (
+            f"{len(doubled)} doubled line break(s) survived - the author's "
+            f"`<br>` picked up a second break from nl2br"
+        )
+        assert "<br>\nNo. Passive" in html, (
+            "the author's own single break was lost"
+        )
+
+    async def test_docx_pair_holds_one_break(self, jp_fetch, jp_root_dir):
+        """One break inside the pair, and the pair is one paragraph - the
+        document's 10pt paragraph spacing then separates it from the next."""
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        (jp_root_dir / "faq.md").write_text(self.FAQ, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "faq.md"}),
+            raise_error=False)
+        assert r.code == 200
+        doc = Document(io.BytesIO(r.body))
+        pairs = [p for p in doc.paragraphs if "?" in p.text]
+        assert len(pairs) == 3, f"expected 3 Q&A paragraphs, got {len(pairs)}"
+        for p in pairs:
+            breaks = len(p._p.findall('.//' + qn('w:br')))
+            assert breaks == 1, (
+                f"Q&A pair carries {breaks} line breaks, not 1 - the gap "
+                f"inside the pair swallows the gap between pairs: {p.text[:40]!r}"
+            )
+
+    async def test_pdf_pair_is_tighter_than_the_gap_between_pairs(
+            self, jp_fetch, jp_root_dir):
+        """The measurable form of the defect: a question must sit closer to
+        its own answer than to the next question."""
+        import fitz
+
+        (jp_root_dir / "faq.md").write_text(self.FAQ, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "faq.md"}),
+            raise_error=False)
+        assert r.code == 200
+
+        pdf = fitz.open(stream=r.body, filetype="pdf")
+        tops = {}
+        for block in pdf[0].get_text("dict")["blocks"]:
+            for line in block.get("lines", []):
+                text = "".join(s["text"] for s in line["spans"]).strip()
+                if text:
+                    tops.setdefault(text[:16], line["bbox"][1])
+        pdf.close()
+
+        inside = tops["No. Passive - ot"] - tops["Does the system "]
+        between = tops["How does the pla"] - tops["No. Passive - ot"]
+        assert between > inside * 1.2, (
+            f"the pair is not grouped: {inside:.1f}pt between a question and "
+            f"its answer against {between:.1f}pt to the next question"
+        )
+
+    async def test_explicit_blank_line_is_preserved(self, jp_fetch, jp_root_dir):
+        """`<br><br>` is an author asking for a blank line, not a duplicate -
+        only the break nl2br generates on top may be dropped."""
+        (jp_root_dir / "twobr.md").write_text(
+            "one<br><br>\ntwo\n", encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "twobr.md"}),
+            raise_error=False)
+        assert r.code == 200
+        html = r.body.decode("utf-8")
+        body = html[html.find("<p>one"):html.find("</p>", html.find("<p>one"))]
+        assert len(re.findall(r'<br\s*/?>', body)) == 2, (
+            f"an explicit blank line was collapsed: {body!r}"
+        )
+
+    async def test_break_in_a_table_cell_is_untouched(
+            self, jp_fetch, jp_root_dir):
+        """nl2br never runs inside a table cell, so a caption-above-image
+        grid's `<br>` must survive - it is the only thing holding the caption
+        above its picture."""
+        (jp_root_dir / "grid.md").write_text(
+            "|  |  |\n|---|---|\n"
+            "| **cap A**<br>text A | **cap B**<br>text B |\n",
+            encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "grid.md"}),
+            raise_error=False)
+        assert r.code == 200
+        html = r.body.decode("utf-8")
+        assert html.count("<br>") == 2, (
+            f"a table cell lost its line break: {html.count('<br>')} left of 2"
+        )
