@@ -2,6 +2,13 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.21
+
+- Fix a GitHub alert with more than one paragraph rendering as two separate boxes - the blank `>` line between paragraphs ended the alert, leaving the rest below it as a plain grey blockquote; the whole alert now stays in one coloured box with its paragraphs intact
+- Fix PDF export drawing Heading 4, 5 and 6 identically to Heading 3, so a sub-subsection read as a sibling of its parent - the three levels now carry the same distinct faces the DOCX export gives them
+- Fix a long line in a fenced code block running past the right margin in PDF, with the text beyond the page edge not drawn at all - long lines now wrap inside the code block
+- Change the `exportFontSize` large option from 14pt to 13pt
+
 ## 1.6.20
 
 ### Added

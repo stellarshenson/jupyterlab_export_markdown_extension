@@ -2709,6 +2709,12 @@ def _color_near(colors, target, tol=0.02):
                for col in colors if len(col) == len(target))
 
 
+def _is_italic_font(font_name):
+    """Slanted faces are named Italic or Oblique depending on the family that
+    was found on the box - DejaVu ships Oblique, Liberation ships Italic."""
+    return "Italic" in font_name or "Oblique" in font_name
+
+
 TEST_MARKDOWN_TASK_LIST = """# Tasks
 
 - [x] finished item
@@ -3987,7 +3993,7 @@ class TestExplicitLineBreakNotDoubled:
 
 class TestExportFontSize:
     """The `exportFontSize` setting picks a base body size - small 10pt,
-    medium 12pt (default), large 14pt - and every other size in every format
+    medium 12pt (default), large 13pt - and every other size in every format
     is a fixed proportion of it, so the whole document scales together."""
 
     DOC = "# Title\n\nBody paragraph text.\n\n## Section\n\nMore body text.\n"
@@ -4021,7 +4027,7 @@ class TestExportFontSize:
         return sizes
 
     async def test_pdf_base_size_follows_the_setting(self, jp_fetch, jp_root_dir):
-        for size, expected in (("small", 10.0), ("medium", 12.0), ("large", 14.0)):
+        for size, expected in (("small", 10.0), ("medium", 12.0), ("large", 13.0)):
             sizes = self._pdf_sizes(
                 await self._export(jp_fetch, jp_root_dir, "pdf", size))
             assert sizes.get("body") == expected, (
@@ -4045,7 +4051,7 @@ class TestExportFontSize:
     async def test_docx_base_size_follows_the_setting(self, jp_fetch, jp_root_dir):
         from docx import Document
 
-        for size, expected in (("small", 10.0), ("medium", 12.0), ("large", 14.0)):
+        for size, expected in (("small", 10.0), ("medium", 12.0), ("large", 13.0)):
             doc = Document(io.BytesIO(
                 await self._export(jp_fetch, jp_root_dir, "docx", size)))
             normal = doc.styles["Normal"].font.size
@@ -4061,7 +4067,7 @@ class TestExportFontSize:
 
     async def test_html_base_size_follows_the_setting(self, jp_fetch, jp_root_dir):
         for size, expected in (("small", "10pt"), ("medium", "12pt"),
-                               ("large", "14pt")):
+                               ("large", "13pt")):
             html = (await self._export(
                 jp_fetch, jp_root_dir, "html", size)).decode("utf-8")
             body_rule = html[html.find("body {"):]
@@ -4120,4 +4126,303 @@ class TestExportFontSize:
         )
         assert len({value for value, _ in widths.values()}) == 1, (
             f"the em measure should be one constant across sizes: {widths}"
+        )
+
+
+class TestMultiParagraphAlert:
+    """DEF-11: a `> [!NOTE]` whose body has two paragraphs is one alert, not a
+    coloured box followed by a stray grey blockquote."""
+
+    DOC = (
+        "# Doc\n\n"
+        "> [!NOTE]\n"
+        "> First paragraph.\n"
+        ">\n"
+        "> Second paragraph.\n\n"
+        "Closing text.\n"
+    )
+
+    async def _export(self, jp_fetch, jp_root_dir, fmt, doc=None):
+        (jp_root_dir / "alert.md").write_text(doc or self.DOC, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", f"export/{fmt}",
+            method="POST", body=json.dumps({"path": "alert.md"}),
+            raise_error=False)
+        assert r.code == 200, f"{fmt} export returned {r.code}"
+        return r.body
+
+    async def test_html_is_one_box_holding_both_paragraphs(
+            self, jp_fetch, jp_root_dir):
+        html = (await self._export(jp_fetch, jp_root_dir, "html")).decode("utf-8")
+        boxes = re.findall(r'<div style="border-left:4px solid([^>]*)>(.*?)</div>',
+                           html, re.S)
+        assert len(boxes) == 1, (
+            f"expected one alert box, got {len(boxes)}: "
+            f"{[b[0][:30] for b in boxes]}"
+        )
+        body = boxes[0][1]
+        assert "First paragraph." in body and "Second paragraph." in body, (
+            f"the alert box lost a paragraph: {body!r}"
+        )
+        # The orphaned paragraph would survive as an ordinary blockquote,
+        # rendered by the DEF-2 path as a second, grey-barred box
+        assert "<blockquote" not in html, (
+            "a plain blockquote survived - the alert still split in two"
+        )
+
+    async def test_docx_is_one_alert_table_holding_both_paragraphs(
+            self, jp_fetch, jp_root_dir):
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        doc = Document(io.BytesIO(
+            await self._export(jp_fetch, jp_root_dir, "docx")))
+        alert_tables = []
+        for table in doc.tables:
+            borders = table._tbl.find(qn('w:tblPr')).find(qn('w:tblBorders'))
+            if borders is None:
+                continue
+            left = borders.find(qn('w:left'))
+            if left is not None and left.get(qn('w:color')) == '0969DA':
+                alert_tables.append(table)
+        assert len(alert_tables) == 1, (
+            f"expected one NOTE table, got {len(alert_tables)}"
+        )
+        cell_text = alert_tables[0].rows[0].cells[0].text
+        assert "First paragraph." in cell_text, cell_text
+        assert "Second paragraph." in cell_text, (
+            f"the second paragraph is outside the alert: {cell_text!r}"
+        )
+
+    async def test_pdf_is_one_callout_with_no_stray_blockquote(
+            self, jp_fetch, jp_root_dir):
+        import fitz
+
+        doc = fitz.open(stream=await self._export(jp_fetch, jp_root_dir, "pdf"),
+                        filetype="pdf")
+        fills, strokes, text = [], [], ""
+        for page in doc:
+            fills += _pdf_fill_colors(page)
+            strokes += _pdf_stroke_colors(page)
+            text += page.get_text()
+        doc.close()
+
+        assert _color_near(fills, (0.929, 0.961, 0.992)), (
+            "NOTE blue shading missing - the alert did not render as a callout"
+        )
+        # #BBBBBB, the default blockquote bar the orphaned paragraph would draw
+        assert not _color_near(strokes, (0.733, 0.733, 0.733)), (
+            "a grey blockquote bar was drawn - the alert split into two boxes"
+        )
+        assert "First paragraph." in text and "Second paragraph." in text
+
+    async def test_source_line_breaks_inside_an_alert_are_kept(
+            self, jp_fetch, jp_root_dir):
+        """Body text turns a source newline into a break, so an alert has to
+        as well - the same two source lines must not set two different ways in
+        the same document."""
+        doc = "> [!TIP]\n> Line one\n> Line two\n"
+        html = (await self._export(
+            jp_fetch, jp_root_dir, "html", doc)).decode("utf-8")
+        box = re.search(r'<div style="border-left:4px solid.*?</div>', html, re.S)
+        assert box, "no alert box in the export"
+        assert re.search(r'Line one\s*<br', box.group(0)), (
+            f"the line break inside the alert was discarded: {box.group(0)!r}"
+        )
+
+    async def test_an_authored_break_in_an_alert_is_not_doubled(
+            self, jp_fetch, jp_root_dir):
+        """The alert joins its source lines with a break; a line that already
+        ends in one must not get a second, as it would everywhere else."""
+        doc = "> [!TIP]\n> **Question**<br>\n> Answer.\n"
+        html = (await self._export(
+            jp_fetch, jp_root_dir, "html", doc)).decode("utf-8")
+        box = re.search(r'<div style="border-left:4px solid.*?</div>', html, re.S)
+        assert box, "no alert box in the export"
+        breaks = len(BREAK_RE.findall(box.group(0)))
+        assert breaks == 1, (
+            f"expected one break between question and answer, got {breaks}: "
+            f"{box.group(0)!r}"
+        )
+
+    async def test_two_adjacent_alerts_stay_separate(
+            self, jp_fetch, jp_root_dir):
+        """Widening the continuation must not let one alert swallow the next."""
+        doc = "> [!NOTE]\n> First alert.\n\n> [!WARNING]\n> Second alert.\n"
+        html = (await self._export(
+            jp_fetch, jp_root_dir, "html", doc)).decode("utf-8")
+        assert len(re.findall(r'<div style="border-left:4px solid', html)) == 2, (
+            "two adjacent alerts did not stay two boxes"
+        )
+        assert "#0969DA" in html and "#9A6700" in html, (
+            "each alert must keep its own type colour"
+        )
+
+    async def test_a_plain_blockquote_is_still_a_blockquote(
+            self, jp_fetch, jp_root_dir):
+        """The alert rule must not capture an ordinary multi-paragraph quote."""
+        doc = "> Just a quote.\n>\n> Second quoted paragraph.\n"
+        html = (await self._export(
+            jp_fetch, jp_root_dir, "html", doc)).decode("utf-8")
+        assert '<div style="border-left:4px solid' not in html, (
+            "an ordinary blockquote was styled as an alert"
+        )
+        assert "Just a quote." in html and "Second quoted paragraph." in html
+
+
+class TestPdfMinorHeadings:
+    """DEF-12: Heading 4, 5 and 6 render distinctly in the PDF instead of all
+    collapsing onto the Heading 3 face."""
+
+    DOC = ("# One\n\ntext\n\n## Two\n\ntext\n\n### Three\n\ntext\n\n"
+           "#### Four\n\ntext\n\n##### Five\n\ntext\n\n###### Six\n\ntext\n")
+
+    async def _faces(self, jp_fetch, jp_root_dir):
+        import fitz
+
+        (jp_root_dir / "heads.md").write_text(self.DOC, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "heads.md"}),
+            raise_error=False)
+        assert r.code == 200
+        doc = fitz.open(stream=r.body, filetype="pdf")
+        faces = {}
+        for page in doc:
+            for block in page.get_text("dict")["blocks"]:
+                for line in block.get("lines", []):
+                    for span in line["spans"]:
+                        word = span["text"].strip()
+                        if word in ("One", "Two", "Three", "Four", "Five", "Six"):
+                            faces[word] = (span["font"], span["color"],
+                                           round(span["size"], 1))
+        doc.close()
+        return faces
+
+    async def test_every_heading_level_is_visually_distinct(
+            self, jp_fetch, jp_root_dir):
+        faces = await self._faces(jp_fetch, jp_root_dir)
+        assert set(faces) == {"One", "Two", "Three", "Four", "Five", "Six"}, (
+            f"a heading is missing from the PDF: {sorted(faces)}"
+        )
+        assert len(set(faces.values())) == 6, (
+            f"heading levels share a face: {faces}"
+        )
+
+    async def test_minor_headings_match_the_docx_faces(
+            self, jp_fetch, jp_root_dir):
+        """Word's own template draws H4 bold italic in the H3 blue, H5 regular
+        and H6 italic in a darker navy. The PDF must agree with the DOCX it is
+        built from, or the same document reads differently in two formats."""
+        faces = await self._faces(jp_fetch, jp_root_dir)
+        assert faces["Four"][1] == 0x4F81BD, f"H4 colour: {faces['Four']}"
+        assert faces["Five"][1] == 0x243F60, f"H5 colour: {faces['Five']}"
+        assert faces["Six"][1] == 0x243F60, f"H6 colour: {faces['Six']}"
+        h4_font, h5_font, h6_font = (faces[k][0] for k in ("Four", "Five", "Six"))
+        assert "Bold" in h4_font and _is_italic_font(h4_font), (
+            f"H4 is not bold italic: {h4_font}"
+        )
+        assert "Bold" not in h5_font and not _is_italic_font(h5_font), (
+            f"H5 is not regular: {h5_font}"
+        )
+        assert _is_italic_font(h6_font) and "Bold" not in h6_font, (
+            f"H6 is not italic: {h6_font}"
+        )
+
+    async def test_minor_headings_sit_at_body_size(self, jp_fetch, jp_root_dir):
+        """Word's H4-H6 carry no size of their own and render at body size;
+        the PDF has to do the same, or the levels it just learned to tell
+        apart are told apart by the wrong signal."""
+        import fitz
+
+        faces = await self._faces(jp_fetch, jp_root_dir)
+        (jp_root_dir / "heads.md").write_text(self.DOC, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "heads.md"}),
+            raise_error=False)
+        doc = fitz.open(stream=r.body, filetype="pdf")
+        body = [round(s["size"], 1)
+                for page in doc
+                for b in page.get_text("dict")["blocks"]
+                for line in b.get("lines", [])
+                for s in line["spans"] if s["text"].strip() == "text"]
+        doc.close()
+        assert body, "no body text found in the PDF"
+        for level in ("Four", "Five", "Six"):
+            assert faces[level][2] == body[0], (
+                f"H{level} is {faces[level][2]}pt against {body[0]}pt body"
+            )
+        sizes = [faces[k][2] for k in ("One", "Two", "Three", "Four")]
+        assert sizes == sorted(sizes, reverse=True) and sizes[2] > sizes[3], (
+            f"heading sizes do not descend into H4: {sizes}"
+        )
+
+
+class TestPdfCodeLineWrapping:
+    """DEF-13: a code line wider than the frame wraps instead of running off
+    the page."""
+
+    LONG = "a" * 300
+    DOC = (
+        "# Code\n\n"
+        "```python\n"
+        f'url = "{LONG}"\n'
+        "short = 1\n"
+        "```\n"
+    )
+
+    async def _pdf(self, jp_fetch, jp_root_dir, doc=None):
+        (jp_root_dir / "code.md").write_text(doc or self.DOC, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "code.md"}),
+            raise_error=False)
+        assert r.code == 200
+        return r.body
+
+    @staticmethod
+    def _mono_spans(pdf_bytes):
+        import fitz
+
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        spans = []
+        for page in doc:
+            for block in page.get_text("dict")["blocks"]:
+                for line in block.get("lines", []):
+                    for span in line["spans"]:
+                        if "Courier" in span["font"] or "Mono" in span["font"]:
+                            spans.append(span)
+        doc.close()
+        return spans
+
+    async def test_a_long_code_line_stays_inside_the_margin(
+            self, jp_fetch, jp_root_dir):
+        spans = self._mono_spans(await self._pdf(jp_fetch, jp_root_dir))
+        assert spans, "no monospaced code text found in the PDF"
+        edge = pdf_frame_right_edge()
+        past = [(round(s["bbox"][2], 1), s["text"][:30])
+                for s in spans if s["bbox"][2] > edge + 1]
+        assert not past, (
+            f"code drawn past the {edge:.0f}pt frame edge: {past[:3]}"
+        )
+
+    async def test_wrapping_loses_no_characters(self, jp_fetch, jp_root_dir):
+        spans = self._mono_spans(await self._pdf(jp_fetch, jp_root_dir))
+        drawn = "".join(s["text"] for s in spans)
+        assert drawn.count("a") == 300, (
+            f"the wrapped line lost characters: {drawn.count('a')} of 300"
+        )
+        assert "short = 1" in drawn.replace("\n", ""), (
+            "the following code line disappeared"
+        )
+
+    async def test_a_short_code_line_is_not_broken(self, jp_fetch, jp_root_dir):
+        """Only an overflowing line may wrap - a line that fits keeps its
+        shape, or every code sample gains phantom breaks."""
+        doc = "# C\n\n```python\ndef f(x):\n    return x + 1\n```\n"
+        spans = self._mono_spans(await self._pdf(jp_fetch, jp_root_dir, doc))
+        tops = sorted({round(s["bbox"][1], 1) for s in spans})
+        assert len(tops) == 2, (
+            f"a two-line code block rendered on {len(tops)} lines: {tops}"
         )

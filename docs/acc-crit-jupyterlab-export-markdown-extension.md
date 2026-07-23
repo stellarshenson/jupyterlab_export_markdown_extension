@@ -10,6 +10,9 @@ Acceptance criteria for the markdown export extension across PDF, DOCX and HTML.
 - [Mermaid raster framing](#mermaid-raster-framing)
 - [Line break fidelity](#line-break-fidelity)
 - [Export font size](#export-font-size)
+- [Alert box integrity](#alert-box-integrity)
+- [Heading level fidelity](#heading-level-fidelity)
+- [Code line wrapping](#code-line-wrapping)
 
 ## Export page fitting
 
@@ -215,3 +218,64 @@ One setting picks the base body size and everything else follows from it, so a d
 - [x] **A malformed setting cannot fail an export** - the size is cosmetic, so a value of the wrong type or an absurd number falls back or clamps rather than returning a 500
   - log: 2026-07-23 criterion added after review found a plain dict lookup raises `TypeError` on an unhashable value, and that an explicit 0 builds zero-height flowables
   - log: 2026-07-23 implemented - non-string, non-number values take the default; a number is clamped to 6-32pt. Test `test_a_malformed_setting_cannot_fail_an_export`, mutation-proved (500 without the guard) (v1.6.20)
+
+## Alert box integrity
+
+A `> [!NOTE]` block is one callout however many paragraphs it holds. The marker the DOCX and HTML passes key on has to live in a single paragraph, so the body's own structure is carried by explicit breaks rather than by several paragraphs.
+
+- [x] **A multi-paragraph alert is one box** - a bare `>` separating two paragraphs of an alert does not end it
+  - log: 2026-07-23 criterion added with DEF-11; the continuation group required `"> "` with a space, so the bare `>` terminated the match and the rest of the alert fell out as a plain blockquote - a coloured box followed by a grey one
+  - log: 2026-07-23 held in all three formats - tests `test_html_is_one_box_holding_both_paragraphs`, `test_docx_is_one_alert_table_holding_both_paragraphs`, `test_pdf_is_one_callout_with_no_stray_blockquote`; mutation-proved. The PDF needed no code change: `process_alert` already walks every paragraph in the alert cell
+- [x] **A source newline inside an alert breaks the line, as it does everywhere else** - `nl2br` gives body text a break per newline; an alert joined its lines with a space, so the same two source lines set two different ways in one document
+  - log: 2026-07-23 criterion added with DEF-11
+  - log: 2026-07-23 held - test `test_source_line_breaks_inside_an_alert_are_kept`, mutation-proved. Visible behaviour change for alerts whose prose is soft-wrapped across source lines
+- [x] **A break the author wrote inside an alert is not doubled** - the same rule `manual_break_aware_nl2br` applies to body text, applied where no newline survives for it to see
+  - log: 2026-07-23 criterion added - the join adds a break per line, which would land on top of one the author already typed
+  - log: 2026-07-23 held - a line already ending in a break tag counts towards the break the join owes it; test `test_an_authored_break_in_an_alert_is_not_doubled`
+- [x] **Widening the continuation captures no more than the alert** - two adjacent alerts stay two boxes, and an ordinary multi-paragraph blockquote is still a blockquote
+  - log: 2026-07-23 criterion added - accepting a bare `>` widens what the pattern will swallow
+  - log: 2026-07-23 held - tests `test_two_adjacent_alerts_stay_separate`, `test_a_plain_blockquote_is_still_a_blockquote`
+- [ ] **Block structure inside an alert survives** - a list or a fence written in an alert body still flattens to run-on text
+  - log: 2026-07-23 criterion added and left open; pre-dates DEF-11 and needs paired markers plus a body-element sweep in two passes. Registered as DEF-14
+
+## Heading level fidelity
+
+The PDF is built from the DOCX, so the two must draw the same document the same way. Word's template tells the levels below 3 apart by weight, slant and colour rather than by size.
+
+| Level | Face        | Colour    | Size      |
+| ----- | ----------- | --------- | --------- |
+| H1    | bold        | `#365F91` | 1.4x body |
+| H2    | bold        | `#4F81BD` | 1.2x body |
+| H3    | bold        | `#4F81BD` | 1.1x body |
+| H4    | bold italic | `#4F81BD` | body      |
+| H5    | regular     | `#243F60` | body      |
+| H6    | italic      | `#243F60` | body      |
+
+- [x] **Every heading level is visually distinct in the PDF** - `####` no longer renders identically to `###`
+  - log: 2026-07-23 criterion added with DEF-12; a `startswith('Heading')` catch-all routed levels 4, 5 and 6 into the Heading 3 style, so a sub-subsection read as a sibling of its parent
+  - log: 2026-07-23 held - test `test_every_heading_level_is_visually_distinct` asserts six distinct (font, colour, size) triples; mutation-proved
+- [x] **The PDF faces are the DOCX template's own** - the same document does not read differently in the two formats
+  - log: 2026-07-23 criterion added with DEF-12
+  - log: 2026-07-23 held - `PDF_MINOR_HEADING_FACES` carries the faces read off the live python-docx template; tests `test_minor_headings_match_the_docx_faces`, `test_minor_headings_sit_at_body_size`
+- [x] **An unrecognised heading style still gets a heading face** - a style named `Heading` with no number, or beyond level 6, falls to Heading 3 as it did before
+  - log: 2026-07-23 criterion added - replacing a catch-all with a lookup is where a level quietly stops being a heading
+  - log: 2026-07-23 held - the dispatch parses the level and falls back to the Heading 3 style on any miss
+- [ ] **A heading is not stranded at the foot of a page** - no PDF heading style sets `keepWithNext`, so a page break can fall between a heading and its first paragraph
+  - log: 2026-07-23 criterion added and left open; a pagination question rather than a face question. Registered as DEF-15
+
+## Code line wrapping
+
+`XPreformatted` lays every source line out as exactly one line whatever its width - it never wraps, and no style setting changes that. A line wider than the frame is therefore drawn past the page edge, where its glyphs are not rendered at all. The code font is fixed-width, so the frame width converts to an exact column count and the line is split before the highlighting markup goes on.
+
+- [x] **No code is drawn past the frame edge** - at every font size
+  - log: 2026-07-23 criterion added with DEF-13; measured at x=614.4 against a 576pt margin
+  - log: 2026-07-23 held - test `test_a_long_code_line_stays_inside_the_margin`; mutation-proved. Verified on the reference documents: 16 / 22 / 20 runs past the margin at small / medium / large on `00-inception-poc-owt.md` before, zero after, across all four documents
+- [x] **Wrapping loses no characters** - the overflow was not merely past the margin, it was past the page, where reportlab draws nothing
+  - log: 2026-07-23 criterion added after measuring a 300-character line put 91 characters on the page and dropped 209
+  - log: 2026-07-23 held - test `test_wrapping_loses_no_characters` counts every character back out of the PDF
+- [x] **A line that fits is not broken** - only an overflowing line wraps, or every code sample gains phantom breaks
+  - log: 2026-07-23 criterion added
+  - log: 2026-07-23 held - test `test_a_short_code_line_is_not_broken` asserts a two-line block renders on two lines
+- [x] **The split is measured on real characters, not on markup** - escaping before the split would count `&amp;` as five columns where the reader sees one
+  - log: 2026-07-23 criterion added; the token loop was rewritten to carry raw `(colour, text)` segments and escape at render time
+  - log: 2026-07-23 held by construction - `render()` is the only place escaping happens, and it runs after `wrap()`

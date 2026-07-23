@@ -72,7 +72,7 @@ That's it. No really, that's actually it. We spent considerable effort making su
 
 Configure the extension via **Settings -> Settings Editor -> Markdown Export Extension**:
 
-- **Export Font Size** - Base body text size for all three formats: `small` (10pt), `medium` (12pt, default), `large` (14pt). Every other size - headings, tables, code, captions - is a fixed proportion of it, so the whole document scales together
+- **Export Font Size** - Base body text size for all three formats: `small` (10pt), `medium` (12pt, default), `large` (13pt). Every other size - headings, tables, code, captions - is a fixed proportion of it, so the whole document scales together
 - **SVG Export Pixel Width** - Target pixel width for SVG images and Mermaid diagrams rasterized server-side in DOCX/PDF (default: 1920, range: 400-4096). Height follows the source aspect ratio
 - **Math Export Pixel Width (PDF only)** - Target pixel width for math expression images in PDF export (default: 800, range: 200-3000). DOCX uses native OMML equations and HTML uses KaTeX, neither affected by this setting
 - **Show Alert Labels** - Display alert type labels (NOTE, TIP, etc.) in exported documents (default: off)

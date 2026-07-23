@@ -48,6 +48,15 @@ class ChromiumUnavailableError(RuntimeError):
     """
 
 
+#: A line break as an author may write it - any case, any attributes, closed or
+#: not. `\b` would accept a custom element like `<br-spacer>`, whose break is
+#: not a break at all.
+BREAK_TAG_RE = re.compile(r'<br(?:\s[^>]*?)?/?>', re.IGNORECASE)
+
+#: The same tag, at the very end of a string. Used where a break is about to be
+#: appended and one the author already wrote has to count towards it.
+TRAILING_BREAK_RE = re.compile(BREAK_TAG_RE.pattern + r'\s*\Z', re.IGNORECASE)
+
 #: Built once - the rule is stateless, and `markdown_to_html` runs per export
 _MANUAL_BREAK_RULE = None
 
@@ -88,9 +97,6 @@ def manual_break_aware_nl2br():
     trailing_node = re.compile(
         re.escape(util.INLINE_PLACEHOLDER).replace(re.escape('%s'), r'(\d+)')
         + r'\Z')
-    # `\b` would accept a custom element like `<br-spacer>`, whose break is
-    # not a break at all
-    break_tag = re.compile(r'<br(?:\s[^>]*?)?/?>', re.IGNORECASE)
 
     class NewlineToBreak(InlineProcessor):
         def handleMatch(self, m, data):
@@ -125,7 +131,7 @@ def manual_break_aware_nl2br():
                 raw = self.md.htmlStash.rawHtmlBlocks[int(held.group(1))]
             except (AttributeError, IndexError, KeyError, TypeError):
                 return False           # cannot tell - behave like plain nl2br
-            return isinstance(raw, str) and bool(break_tag.fullmatch(raw.strip()))
+            return isinstance(raw, str) and bool(BREAK_TAG_RE.fullmatch(raw.strip()))
 
     class ManualBreakAwareNl2Br(Extension):
         def extendMarkdown(self, md):
@@ -370,6 +376,11 @@ class ExportHandlerBase(APIHandler):
     #: Page margin of the exported PDF, every side.
     PDF_PAGE_MARGIN = 36
 
+    #: Left and right indent of a PDF code block, in points. Subtracted from
+    #: the frame before a line is measured, so a wrapped line stops where the
+    #: block's own background does.
+    PDF_CODE_INDENT = 6
+
     #: reportlab's default LEFT/RIGHTPADDING inside a table cell. Distinct from
     #: PDF_FRAME_PADDING (which happens to share the value): this is the gap
     #: around cell text, that is the gap inside the page frame.
@@ -378,7 +389,7 @@ class ExportHandlerBase(APIHandler):
     #: Base body size in points for each `exportFontSize` setting. Every other
     #: size in every format is a proportion of this one, so the whole document
     #: scales together rather than only its paragraphs.
-    EXPORT_FONT_SIZES = {'small': 10.0, 'medium': 12.0, 'large': 14.0}
+    EXPORT_FONT_SIZES = {'small': 10.0, 'medium': 12.0, 'large': 13.0}
     DEFAULT_FONT_SIZE_PT = EXPORT_FONT_SIZES['medium']
 
     #: Body size the DOCX template is built around: its named styles carry
@@ -394,8 +405,23 @@ class ExportHandlerBase(APIHandler):
         'heading1': (1.4, 1.8),
         'heading2': (1.2, 1.5),
         'heading3': (1.1, 1.4),
+        # H4-H6 carry no size of their own in the DOCX template either - they
+        # are told apart by weight, slant and colour, not by size
+        'heading4': (1.0, 1.3),
+        'heading5': (1.0, 1.3),
+        'heading6': (1.0, 1.3),
         'table': (0.9, 1.1),
         'code': (0.8, 1.0),
+    }
+
+    #: Face the PDF gives each heading below level 3, read off the DOCX
+    #: template python-docx builds from: (bold, italic, colour). Without them
+    #: every level under 3 shared the Heading 3 style, so a sub-subsection read
+    #: as a sibling of its parent - and the PDF disagreed with its own DOCX.
+    PDF_MINOR_HEADING_FACES = {
+        4: (True, True, '#4F81BD'),
+        5: (False, False, '#243F60'),
+        6: (False, True, '#243F60'),
     }
 
     @classmethod
@@ -1021,9 +1047,38 @@ class ExportHandlerBase(APIHandler):
         modified = re.sub(code_pattern, extract_match, content, flags=re.DOTALL)
         return modified, code_blocks
 
+    @classmethod
+    def code_columns(cls, avail_width, font_name: str,
+                     font_size: float) -> int:
+        """Characters a code line may carry before it has to wrap.
+
+        `XPreformatted` draws every source line as exactly one line whatever
+        its width - it never wraps - so an over-long line is laid off the page
+        and the glyphs past the page edge are not drawn at all. The code font
+        is fixed-width, so a character count is an exact width measure and the
+        line can be split before it is ever handed to reportlab.
+
+        Returns 0 when there is nothing to measure against, which the callers
+        read as "do not wrap" - the old behaviour.
+        """
+        if not avail_width:
+            return 0
+        char_width = pdfmetrics.stringWidth('M', font_name, font_size)
+        if char_width <= 0:
+            return 0
+        room = avail_width - 2 * cls.PDF_CODE_INDENT
+        # A floor, so a pathological width can never wrap to one column a line
+        return max(20, int(room / char_width))
+
     def highlight_code_for_pdf(self, code: str, lang: str,
-                               base_pt: float = None) -> list:
+                               base_pt: float = None,
+                               avail_width: float = None) -> list:
         """Highlight code for PDF using Pygments and return reportlab flowables.
+
+        Args:
+            avail_width: Width the flowable will be laid out in, in points.
+                Given, a line too wide for it is wrapped; omitted, nothing is
+                wrapped - there is no page to wrap against.
 
         Returns list of reportlab flowables (Preformatted paragraphs)
         """
@@ -1043,12 +1098,14 @@ class ExportHandlerBase(APIHandler):
                     fontName='Courier',
                     **self.pdf_type('code', code_base),
                     backColor=colors.HexColor('#f8f8f8'),
-                    leftIndent=6,
-                    rightIndent=6,
+                    leftIndent=self.PDF_CODE_INDENT,
+                    rightIndent=self.PDF_CODE_INDENT,
                     spaceBefore=6,
                     spaceAfter=6
                 )
-                return [Preformatted(code, code_style)]
+                return [Preformatted(code, code_style, maxLineLength=(
+                    self.code_columns(avail_width, 'Courier',
+                                      code_style.fontSize) or None))]
             return []
 
         try:
@@ -1070,8 +1127,8 @@ class ExportHandlerBase(APIHandler):
             fontName=font_name,
             **self.pdf_type('code', code_base),
             backColor=colors.HexColor('#f8f8f8'),
-            leftIndent=6,
-            rightIndent=6,
+            leftIndent=self.PDF_CODE_INDENT,
+            rightIndent=self.PDF_CODE_INDENT,
             spaceBefore=6,
             spaceAfter=6,
             wordWrap='CJK'  # Allow wrapping on any character
@@ -1105,14 +1162,13 @@ class ExportHandlerBase(APIHandler):
             Token.Operator.Word: '#AA22FF',
         }
 
-        # Build XML-formatted code
-        formatted_lines = []
+        # Collect each source line as (colour, text) segments, keeping the text
+        # raw: escaping first would count `&amp;` as five columns when the
+        # reader sees one, and the wrap below measures in real characters
+        source_lines = []
         current_line = []
 
         for ttype, value in lexer.get_tokens(code):
-            # Escape XML special characters
-            value = value.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
             # Find color for token type
             color = None
             for token_type, token_color in token_colors.items():
@@ -1124,20 +1180,48 @@ class ExportHandlerBase(APIHandler):
             parts = value.split('\n')
             for i, part in enumerate(parts):
                 if part:
-                    if color:
-                        current_line.append(f'<font color="{color}">{part}</font>')
-                    else:
-                        current_line.append(part)
+                    current_line.append((color, part))
                 if i < len(parts) - 1:  # Not the last part, meaning there was a newline
-                    formatted_lines.append(''.join(current_line))
+                    source_lines.append(current_line)
                     current_line = []
 
         # Add remaining content
         if current_line:
-            formatted_lines.append(''.join(current_line))
+            source_lines.append(current_line)
+
+        columns = self.code_columns(avail_width, font_name,
+                                    code_style.fontSize)
+
+        def wrap(segments):
+            """Split one source line into lines of at most `columns` chars."""
+            if not columns:
+                return [segments]
+            lines, line, used = [], [], 0
+            for color, text in segments:
+                while text:
+                    if used >= columns:
+                        lines.append(line)
+                        line, used = [], 0
+                    head, text = text[:columns - used], text[columns - used:]
+                    line.append((color, head))
+                    used += len(head)
+            lines.append(line)
+            return lines
+
+        def render(segments):
+            out = []
+            for color, text in segments:
+                # Escape XML special characters
+                text = (text.replace('&', '&amp;').replace('<', '&lt;')
+                        .replace('>', '&gt;'))
+                out.append(f'<font color="{color}">{text}</font>' if color
+                           else text)
+            return ''.join(out)
 
         # Join with newlines - XPreformatted preserves whitespace like Preformatted
-        formatted_code = '\n'.join(formatted_lines)
+        formatted_code = '\n'.join(render(segments)
+                                   for source in source_lines
+                                   for segments in wrap(source))
 
         return [XPreformatted(formatted_code, code_style)]
 
@@ -1206,14 +1290,39 @@ class ExportHandlerBase(APIHandler):
         post-processing in DOCX to apply colored styling.
         Preserves <br> tags and markdown links/formatting within alert content.
         When show_labels is False, the alert type label is hidden from output.
+
+        The marker has to sit in one paragraph for the DOCX and HTML passes to
+        find it, so the body's own structure is carried by explicit breaks
+        instead: a source newline becomes one break, exactly as `nl2br` gives
+        body text, and the bare `>` line that separates two paragraphs of an
+        alert becomes two. Requiring `"> "` on every continuation line was
+        what ended the match at that bare `>`, leaving the rest of the alert
+        behind as a plain blockquote - one alert rendered as two boxes.
         """
-        alert_pattern = r'> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\] *\n((?:> .*\n?)*)'
+        alert_pattern = (r'> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\] *\n'
+                         r'((?:>.*\n?)*)')
+
+        def add_breaks(text, count):
+            """Append `count` breaks, counting one the author already wrote."""
+            if TRAILING_BREAK_RE.search(text):
+                count -= 1
+            return text + '<br>' * max(0, count)
 
         def replace_alert(match):
             alert_type = match.group(1).upper()
-            # Remove '> ' prefix from each line, preserve content including <br> and links
-            alert_lines = match.group(2).strip().split('\n')
-            alert_content = ' '.join(line.lstrip('> ').strip() for line in alert_lines if line.strip())
+            # Strip the blockquote prefix; an emptied line is the bare `>` that
+            # separates two paragraphs of the alert
+            alert_content, owed = '', 0
+            for line in match.group(2).split('\n'):
+                line = line.lstrip('> ').strip()
+                if not line:
+                    if alert_content:
+                        owed = 2
+                    continue
+                if alert_content:
+                    alert_content = add_breaks(alert_content, max(owed, 1))
+                alert_content += line
+                owed = 0
 
             # Zero-width space markers for DOCX post-processing
             marker = f'\u200b{alert_type}\u200b'
@@ -3024,8 +3133,19 @@ class ExportHandlerBase(APIHandler):
         doc = Document(io.BytesIO(docx_bytes))
 
         # Determine which font to use
-        font_name = 'UnicodeSans' if 'UnicodeSans' in pdfmetrics.getRegisteredFontNames() else 'Helvetica'
-        font_name_bold = 'UnicodeSansBold' if 'UnicodeSansBold' in pdfmetrics.getRegisteredFontNames() else 'Helvetica-Bold'
+        registered = pdfmetrics.getRegisteredFontNames()
+        font_name = 'UnicodeSans' if 'UnicodeSans' in registered else 'Helvetica'
+        font_name_bold = ('UnicodeSansBold' if 'UnicodeSansBold' in registered
+                          else 'Helvetica-Bold')
+        # Heading 4 and 6 need faces the body never asks for
+        heading_faces = {
+            (False, False): font_name,
+            (True, False): font_name_bold,
+            (False, True): ('UnicodeSansItalic' if 'UnicodeSansItalic' in
+                            registered else 'Helvetica-Oblique'),
+            (True, True): ('UnicodeSansBoldItalic' if 'UnicodeSansBoldItalic'
+                           in registered else 'Helvetica-BoldOblique'),
+        }
 
         # Create PDF in memory
         pdf_buffer = io.BytesIO()
@@ -3124,6 +3244,20 @@ class ExportHandlerBase(APIHandler):
             spaceBefore=0.6 * base_pt,
             textColor=colors.HexColor('#4F81BD')
         )
+
+        heading_styles = {1: heading1_style, 2: heading2_style,
+                          3: heading3_style}
+        for level, (bold, italic, hex_color) in \
+                self.PDF_MINOR_HEADING_FACES.items():
+            heading_styles[level] = ParagraphStyle(
+                f'CustomHeading{level}',
+                parent=styles[f'Heading{level}'],
+                fontName=heading_faces[(bold, italic)],
+                **self.pdf_type(f'heading{level}', base_pt),
+                spaceAfter=0.25 * base_pt,
+                spaceBefore=0.5 * base_pt,
+                textColor=colors.HexColor(hex_color)
+            )
 
         # Callout body (blockquotes, alert boxes). Same size as body text but
         # no trailing space - the surrounding callout table supplies padding.
@@ -3281,7 +3415,8 @@ class ExportHandlerBase(APIHandler):
                 if idx < len(code_blocks):
                     block = code_blocks[idx]
                     return self.highlight_code_for_pdf(
-                        block['code'], block['lang'], base_pt)
+                        block['code'], block['lang'], base_pt,
+                        avail_width=frame_width)
                 return Paragraph("&nbsp;", normal_style)
 
             # Escape XML special characters for base text
@@ -3309,15 +3444,13 @@ class ExportHandlerBase(APIHandler):
 
             # Detect heading styles
             style_name = para.style.name if para.style else ''
-            if style_name.startswith('Heading 1'):
+            if style_name.startswith('Heading'):
                 last_list_level = -1
-                return Paragraph(text, heading1_style)
-            elif style_name.startswith('Heading 2'):
-                last_list_level = -1
-                return Paragraph(text, heading2_style)
-            elif style_name.startswith('Heading 3') or style_name.startswith('Heading'):
-                last_list_level = -1
-                return Paragraph(text, heading3_style)
+                level = re.match(r'Heading (\d+)', style_name)
+                # An unnumbered or out-of-range 'Heading ...' keeps the old
+                # catch-all target rather than losing its heading face
+                return Paragraph(text, heading_styles.get(
+                    int(level.group(1)) if level else 0, heading3_style))
 
             # Blockquote: style_docx_blockquotes gave it a left border, shading
             # and indent that process_paragraph would otherwise drop. Render it
