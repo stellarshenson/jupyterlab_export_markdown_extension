@@ -58,8 +58,17 @@ source = "nodejs"
 fields = ["description", "authors", "urls", "keywords"]
 
 [tool.hatch.build.targets.sdist]
-artifacts = ["jupyterlab_export_markdown_extension/labextension"]
+artifacts = [
+    "jupyterlab_export_markdown_extension/labextension",
+    "jupyterlab_export_markdown_extension/vendor",
+]
 exclude = [".github", "binder"]
+
+[tool.hatch.build.targets.wheel]
+# Both are build output and so git-ignored; name them here or the wheel ships
+# without them. The mermaid bundle is what renders a diagram server-side when
+# the export comes from the REST API rather than the browser.
+artifacts = ["jupyterlab_export_markdown_extension/vendor"]
 
 [tool.hatch.build.targets.wheel.shared-data]
 "jupyterlab_export_markdown_extension/labextension" = "share/jupyter/labextensions/jupyterlab_export_markdown_extension"
@@ -75,8 +84,17 @@ build-function = "hatch_jupyter_builder.npm_builder"
 ensured-targets = [
     "jupyterlab_export_markdown_extension/labextension/static/style.js",
     "jupyterlab_export_markdown_extension/labextension/package.json",
+    "jupyterlab_export_markdown_extension/vendor/mermaid.min.js",
 ]
-skip-if-exists = ["jupyterlab_export_markdown_extension/labextension/static/style.js"]
+# Every ensured target belongs here too: the skip fires when all of these
+# exist, and the ensure check runs either way - so a tree holding a
+# pre-change labextension build would skip the build that creates the
+# bundle, then fail on the bundle it did not create.
+skip-if-exists = [
+    "jupyterlab_export_markdown_extension/labextension/static/style.js",
+    "jupyterlab_export_markdown_extension/labextension/package.json",
+    "jupyterlab_export_markdown_extension/vendor/mermaid.min.js",
+]
 
 [tool.hatch.build.hooks.jupyter-builder.build-kwargs]
 build_cmd = "build:prod"

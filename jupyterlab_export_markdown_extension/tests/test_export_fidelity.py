@@ -1,5 +1,6 @@
 """Export fidelity tests - validate that HTML, DOCX, and PDF exports contain expected content."""
 
+import asyncio
 import json
 import io
 import re
@@ -4426,3 +4427,1350 @@ class TestPdfCodeLineWrapping:
         assert len(tops) == 2, (
             f"a two-line code block rendered on {len(tops)} lines: {tops}"
         )
+
+
+def _docx_text(docx_bytes):
+    """Every run of word/document.xml joined back into one string.
+
+    Syntax highlighting splits a kept code block across runs - `flowchart LR`
+    lands as `flowchart`, ` `, `LR` - so a substring test against the raw XML
+    passes whether or not the text is there.
+    """
+    import html as _html
+
+    with zipfile.ZipFile(io.BytesIO(docx_bytes)) as z:
+        xml = z.read("word/document.xml").decode("utf-8")
+    return _html.unescape("".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", xml)))
+
+
+MERMAID_ONLY_MARKDOWN = """# Diagrams
+
+```mermaid
+flowchart LR
+    Ingest --> Model --> Report
+```
+
+Some prose between the diagrams.
+
+```mermaid
+sequenceDiagram
+    Alice->>Bob: hello
+    Bob-->>Alice: hi
+```
+"""
+
+
+@pytest.fixture
+def mermaid_markdown_file(jp_root_dir):
+    md_file = jp_root_dir / "mermaid_api.md"
+    md_file.write_text(MERMAID_ONLY_MARKDOWN, encoding="utf-8")
+    return md_file
+
+
+class TestApiMermaidRendering:
+    """DEF-16: mermaid is a browser library, so the frontend renders each
+    diagram and posts it as `mermaidDiagrams`. A caller driving the REST API
+    directly sends no such payload, and every diagram used to export as its
+    own source code. The server renders what the frontend did not."""
+
+    async def test_docx_renders_mermaid_without_a_frontend_payload(
+        self, jp_fetch, mermaid_markdown_file
+    ):
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "mermaid_api.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+
+        assert len(media) == 2, (
+            f"{len(media)} of 2 mermaid diagrams reached the DOCX - a diagram "
+            f"the browser did not pre-render was dropped"
+        )
+        text = _docx_text(response.body)
+        assert "flowchart" not in text and "sequenceDiagram" not in text, (
+            "the mermaid source was written into the document as code instead "
+            "of being rendered"
+        )
+
+    async def test_pdf_renders_mermaid_without_a_frontend_payload(
+        self, jp_fetch, mermaid_markdown_file
+    ):
+        import fitz
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "mermaid_api.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+
+        pdf = fitz.open(stream=response.body, filetype="pdf")
+        try:
+            images = sum(len(page.get_images(full=True)) for page in pdf)
+            text = "\n".join(page.get_text() for page in pdf)
+        finally:
+            pdf.close()
+
+        assert images == 2, f"{images} of 2 mermaid diagrams reached the PDF"
+        assert "flowchart LR" not in text and "sequenceDiagram" not in text, (
+            "the mermaid source was drawn into the PDF as code"
+        )
+
+    async def test_html_renders_mermaid_without_a_frontend_payload(
+        self, jp_fetch, mermaid_markdown_file
+    ):
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "mermaid_api.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        html = response.body.decode("utf-8")
+
+        assert html.count("data:image/svg+xml") == 2, (
+            f"{html.count('data:image/svg+xml')} of 2 mermaid diagrams were "
+            f"inlined into the HTML"
+        )
+        assert "language-mermaid" not in html, (
+            "a mermaid block stayed a code block in the HTML"
+        )
+
+    async def test_a_diagram_the_frontend_supplied_is_not_re_rendered(
+        self, jp_fetch, jp_root_dir
+    ):
+        """The browser's own render wins - it carries the Lab theme and fonts.
+        A 1x1 PNG is unmistakable: anything the server rendered would be
+        thousands of bytes."""
+        (jp_root_dir / "one.md").write_text(
+            "# One\n\n```mermaid\nflowchart LR\n    A --> B\n```\n", encoding="utf-8"
+        )
+        one_pixel_png = (
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAf"
+            "FcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", raise_error=False,
+            body=json.dumps({
+                "path": "one.md",
+                "mermaidDiagrams": [{"index": 0, "png": one_pixel_png, "svg": ""}],
+            }),
+        )
+        assert response.code == 200
+
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+            blobs = [z.read(n) for n in media]
+
+        assert len(blobs) == 1, f"expected one image, got {len(blobs)}"
+        assert len(blobs[0]) < 500, (
+            f"the frontend's diagram was replaced by a server render "
+            f"({len(blobs[0])} bytes) - the browser's version must win"
+        )
+
+    async def test_a_diagram_mermaid_rejects_keeps_its_source(
+        self, jp_fetch, jp_root_dir
+    ):
+        """One unparseable diagram must not fail the export or take the good
+        diagram down with it."""
+        (jp_root_dir / "bad.md").write_text(
+            "# Bad\n\n```mermaid\nnot a diagram at all {{{\n```\n\n"
+            "```mermaid\nflowchart LR\n    A --> B\n```\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "bad.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+
+        assert len(media) == 1, (
+            f"{len(media)} images embedded - the valid diagram must still "
+            f"render and the invalid one must not"
+        )
+        assert "not a diagram at all" in _docx_text(response.body), (
+            "the source of the diagram mermaid rejected was dropped instead of "
+            "being kept as text"
+        )
+
+    async def test_a_document_without_mermaid_never_starts_a_browser(
+        self, jp_fetch, jp_root_dir, monkeypatch
+    ):
+        """Chromium costs seconds to launch. Nothing to render means no
+        browser - and means an export cannot start failing on a server with
+        no Chromium just because this pass exists."""
+        from jupyterlab_export_markdown_extension import routes
+
+        class Exploding:
+            def __init__(self, *a, **kw):
+                raise AssertionError("Chromium was launched with no diagram to render")
+
+        monkeypatch.setattr(routes, "PlaywrightSvgRenderer", Exploding)
+        (jp_root_dir / "plain.md").write_text("# Plain\n\nNo diagrams here.\n",
+                                              encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "plain.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+
+    async def test_docx_carries_a_png_and_html_an_svg(
+        self, jp_fetch, mermaid_markdown_file
+    ):
+        """The server-rendered diagram must arrive in the shape each format
+        already expects from the frontend - Word cannot embed an SVG at all."""
+        docx = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "mermaid_api.md"}),
+            raise_error=False,
+        )
+        assert docx.code == 200
+        with zipfile.ZipFile(io.BytesIO(docx.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+            assert media and all(n.endswith(".png") for n in media), (
+                f"DOCX media are not PNG: {media}"
+            )
+
+        html = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "mermaid_api.md"}),
+            raise_error=False,
+        )
+        assert html.code == 200
+        assert "data:image/svg+xml" in html.body.decode("utf-8"), (
+            "HTML should inline the diagram as SVG, not rasterize it"
+        )
+
+    async def test_one_browser_renders_and_rasterizes(
+        self, jp_fetch, mermaid_markdown_file, monkeypatch
+    ):
+        """Rasterizing inside the render session is the whole point of doing it
+        there - a second launch is ~300ms of Chromium startup for nothing."""
+        from jupyterlab_export_markdown_extension import routes
+
+        launches = []
+        original = routes.PlaywrightSvgRenderer.__aenter__
+
+        async def counting_aenter(self):
+            launches.append(1)
+            return await original(self)
+
+        monkeypatch.setattr(routes.PlaywrightSvgRenderer, "__aenter__", counting_aenter)
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "mermaid_api.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert len(launches) == 1, (
+            f"Chromium was launched {len(launches)} times for a document whose "
+            f"only images are mermaid diagrams"
+        )
+
+    async def test_a_clean_export_reports_no_warnings(
+        self, jp_fetch, mermaid_markdown_file
+    ):
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "mermaid_api.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert "X-Export-Warnings" not in response.headers, (
+            f"a clean export warned: {response.headers.get('X-Export-Warnings')}"
+        )
+
+
+class TestApiMermaidWarnings:
+    """DEF-16: an export never fails over a diagram - the source is kept and
+    the response says what happened. The body is a document, so the header is
+    the only channel an API caller has."""
+
+    @staticmethod
+    def _warnings(response):
+        raw = response.headers.get("X-Export-Warnings")
+        assert raw, "the export reported no warning at all"
+        return {w["code"]: w for w in json.loads(raw)}
+
+    async def test_a_chromium_less_server_still_exports_and_says_why(
+        self, jp_fetch, jp_root_dir, monkeypatch
+    ):
+        from jupyterlab_export_markdown_extension import routes
+
+        async def refuse(self):
+            raise routes.ChromiumUnavailableError(
+                "Chromium binary not found at /nowhere"
+            )
+
+        monkeypatch.setattr(routes.PlaywrightSvgRenderer, "__aenter__", refuse)
+        (jp_root_dir / "nc.md").write_text(
+            "# NC\n\n```mermaid\nflowchart LR\n    A --> B\n```\n", encoding="utf-8"
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "nc.md"}), raise_error=False,
+        )
+
+        assert response.code == 200, (
+            "a missing Chromium must not fail an export that can still produce "
+            "the document"
+        )
+        assert "flowchart" in _docx_text(response.body), (
+            "the diagram source was dropped instead of kept"
+        )
+
+        warning = self._warnings(response)["chromium-unavailable"]
+        assert warning["diagrams"] == [0]
+        assert "jupyterlab-export-markdown-extension install" in warning["message"], (
+            f"the warning does not say how to fix it: {warning['message']}"
+        )
+
+    async def test_html_export_also_reports_it(
+        self, jp_fetch, jp_root_dir, monkeypatch
+    ):
+        """HTML never needed Chromium before this feature, so it must not start
+        failing now - it warns like the others."""
+        from jupyterlab_export_markdown_extension import routes
+
+        async def refuse(self):
+            raise routes.ChromiumUnavailableError("no chromium")
+
+        monkeypatch.setattr(routes.PlaywrightSvgRenderer, "__aenter__", refuse)
+        (jp_root_dir / "nch.md").write_text(
+            "# NC\n\n```mermaid\nflowchart LR\n    A --> B\n```\n", encoding="utf-8"
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "nch.md"}), raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        assert "chromium-unavailable" in self._warnings(response)
+
+    async def test_a_missing_bundle_is_named_as_such(
+        self, jp_fetch, jp_root_dir, monkeypatch
+    ):
+        """A wheel built without its vendor step must say so, not blame the
+        diagram - and must not pay for a browser launch to find out."""
+        from jupyterlab_export_markdown_extension import routes
+
+        monkeypatch.setattr(routes.PlaywrightSvgRenderer, "MERMAID_JS_PATH",
+                            Path("/nonexistent/mermaid.min.js"))
+
+        async def explode(self):
+            raise AssertionError("Chromium was launched with no bundle to load")
+
+        monkeypatch.setattr(routes.PlaywrightSvgRenderer, "__aenter__", explode)
+        (jp_root_dir / "nb.md").write_text(
+            "# NB\n\n```mermaid\nflowchart LR\n    A --> B\n```\n", encoding="utf-8"
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "nb.md"}), raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        assert "bundle-missing" in self._warnings(response)
+
+    async def test_a_syntax_error_is_reported_against_its_own_diagram(
+        self, jp_fetch, jp_root_dir
+    ):
+        """Two diagrams, the first unparseable: the warning must point at index
+        0 and the second must still render."""
+        (jp_root_dir / "mix.md").write_text(
+            "# Mix\n\n```mermaid\nnot a diagram at all {{{\n```\n\n"
+            "```mermaid\nflowchart LR\n    A --> B\n```\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "mix.md"}), raise_error=False,
+        )
+        assert response.code == 200
+
+        warning = self._warnings(response)["syntax-error"]
+        assert warning["diagrams"] == [0], (
+            f"the warning blames the wrong diagram: {warning['diagrams']}"
+        )
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+        assert len(media) == 1, "the valid diagram must still have rendered"
+
+    async def test_the_header_is_one_line_of_valid_json(
+        self, jp_fetch, jp_root_dir
+    ):
+        """A header carrying a newline is rejected by the HTTP layer, and the
+        diagram source is attacker-adjacent text - it must never reach it."""
+        (jp_root_dir / "hdr.md").write_text(
+            "# H\n\n```mermaid\nbroken é\nsüper\n\"quoted\"\n```\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "hdr.md"}), raise_error=False,
+        )
+        assert response.code == 200
+        raw = response.headers["X-Export-Warnings"]
+        assert "\n" not in raw and "\r" not in raw
+        json.loads(raw)  # must parse
+        assert "broken" not in raw, "the diagram source leaked into the header"
+
+    async def test_a_broken_browser_session_still_exports(
+        self, jp_fetch, jp_root_dir, monkeypatch
+    ):
+        """Chromium launching is not the only thing that can go wrong with a
+        browser. Whatever the session throws, the export still produces the
+        document - per-diagram faults are handled a level down."""
+        from jupyterlab_export_markdown_extension import routes
+
+        async def blow_up(self, *args, **kwargs):
+            raise RuntimeError("target page, context or browser has been closed")
+
+        monkeypatch.setattr(routes.PlaywrightSvgRenderer, "render_mermaid", blow_up)
+        (jp_root_dir / "bs.md").write_text(
+            "# BS\n\n```mermaid\nflowchart LR\n    A --> B\n```\n", encoding="utf-8"
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "bs.md"}), raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        assert "flowchart" in _docx_text(response.body)
+        assert "render-failed" in self._warnings(response)
+
+    async def test_the_header_stays_bounded_on_a_document_full_of_diagrams(
+        self, jp_fetch, jp_root_dir, monkeypatch
+    ):
+        """nginx's default `proxy_buffer_size` is 4KB and must hold the whole
+        response header block. 200 broken diagrams must report their count
+        without listing every index."""
+        from jupyterlab_export_markdown_extension import routes
+
+        async def refuse(self):
+            raise routes.ChromiumUnavailableError("no chromium")
+
+        monkeypatch.setattr(routes.PlaywrightSvgRenderer, "__aenter__", refuse)
+        block = "```mermaid\nflowchart LR\n    A --> B\n```\n\n"
+        (jp_root_dir / "many.md").write_text("# Many\n\n" + block * 200,
+                                             encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "many.md"}), raise_error=False,
+        )
+        assert response.code == 200
+
+        raw = response.headers["X-Export-Warnings"]
+        assert len(raw) < 2048, f"the warning header grew to {len(raw)} bytes"
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+        warning = self._warnings(response)["chromium-unavailable"]
+        assert warning["count"] == 200, (
+            f"the header lost the true count: {warning['count']}"
+        )
+        assert len(warning["diagrams"]) <= ExportHandlerBase.MAX_REPORTED_DIAGRAMS
+
+
+class TestApiMermaidHardening:
+    """Findings from the architect and bug-hunter review of DEF-16."""
+
+    @staticmethod
+    def _warnings(response):
+        raw = response.headers.get("X-Export-Warnings")
+        assert raw, "the export reported no warning at all"
+        return {w["code"]: w for w in json.loads(raw)}
+
+    async def test_a_mermaid_label_cannot_make_the_server_fetch_a_url(
+        self, jp_fetch, jp_root_dir
+    ):
+        """Confirmed SSRF: mermaid keeps HTML labels, so `<img src=...>` in a
+        diagram survives into the SVG and the SERVER fetches it - a document
+        someone else wrote reaching the host's metadata endpoint. Measured
+        three outbound requests before the block."""
+        import socket
+        import threading
+
+        hits = []
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.listen(5)
+        sock.settimeout(20)
+
+        def serve():
+            while True:
+                try:
+                    conn, _ = sock.accept()
+                    hits.append(conn.recv(100))
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    conn.close()
+                except Exception:
+                    return
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            (jp_root_dir / "ssrf.md").write_text(
+                "# S\n\n```mermaid\nflowchart LR\n"
+                f"    A[\"<img src='http://127.0.0.1:{port}/probe.png' "
+                "width='40' height='40'>\"] --> B[ok]\n```\n",
+                encoding="utf-8",
+            )
+            response = await jp_fetch(
+                "jupyterlab-export-markdown-extension", "export/docx",
+                method="POST", body=json.dumps({"path": "ssrf.md"}),
+                raise_error=False,
+            )
+            assert response.code == 200, response.body[:300]
+        finally:
+            sock.close()
+
+        assert not hits, (
+            f"the server made {len(hits)} outbound request(s) because a diagram "
+            f"asked it to - a markdown file must not be able to drive the "
+            f"server's network"
+        )
+
+    async def test_a_mermaid_example_inside_an_outer_fence_is_left_alone(
+        self, jp_fetch, jp_root_dir
+    ):
+        """Documentation that SHOWS mermaid syntax must stay text - rendering
+        it replaces the code sample with a picture of itself."""
+        (jp_root_dir / "doc.md").write_text(
+            "# Docs\n\nWrite a diagram like this:\n\n"
+            "````markdown\n```mermaid\nflowchart LR\n    A --> B\n```\n````\n\n"
+            "And here is a real one:\n\n"
+            "```mermaid\nflowchart LR\n    C --> D\n```\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "doc.md"}), raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+        assert len(media) == 1, (
+            f"{len(media)} diagrams rendered - the example inside the outer "
+            f"fence is documentation, not a diagram"
+        )
+        assert "flowchart LR" in _docx_text(response.body).replace("\n", ""), (
+            "the quoted example lost its source"
+        )
+
+    async def test_a_warning_names_the_diagram_the_reader_would_count_to(
+        self, jp_fetch, jp_root_dir, monkeypatch
+    ):
+        """With the frontend supplying diagrams 0 and 1, a failure on the third
+        must report 2 - numbering the leftovers from zero sends the reader to a
+        diagram that is fine."""
+        from jupyterlab_export_markdown_extension import routes
+
+        async def refuse(self):
+            raise routes.ChromiumUnavailableError("no chromium")
+
+        monkeypatch.setattr(routes.PlaywrightSvgRenderer, "__aenter__", refuse)
+        block = "```mermaid\nflowchart LR\n    A --> B\n```\n\n"
+        (jp_root_dir / "part.md").write_text("# P\n\n" + block * 3, encoding="utf-8")
+        png = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAf"
+               "FcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", raise_error=False,
+            body=json.dumps({
+                "path": "part.md",
+                "mermaidDiagrams": [{"index": 0, "png": png, "svg": ""},
+                                    {"index": 1, "png": png, "svg": ""}],
+            }),
+        )
+        assert response.code == 200
+        warning = self._warnings(response)["chromium-unavailable"]
+        assert warning["diagrams"] == [2], (
+            f"the warning points at diagram(s) {warning['diagrams']} instead of "
+            f"the third one the frontend could not supply"
+        )
+
+    async def test_a_diagram_inside_an_alert_keeps_its_own_picture(
+        self, jp_fetch, jp_root_dir
+    ):
+        """`preprocess_github_alerts` folds an alert body onto one line, which
+        erases a fence inside a `> [!NOTE]` completely. Running it before the
+        mermaid passes left the server counting one diagram where the browser
+        counted two, so the note's picture was pasted onto the diagram after
+        it and the note kept raw source. Nothing that rewrites the source may
+        run before the diagrams are paired."""
+        doc = (
+            "# A\n\n"
+            "> [!NOTE]\n"
+            "> See this:\n"
+            "> ```mermaid\n"
+            "> flowchart LR\n"
+            ">     IN_THE_NOTE --> X\n"
+            "> ```\n\n"
+            "And separately:\n\n"
+            "```mermaid\nflowchart LR\n    AFTER_THE_NOTE --> Y\n```\n"
+        )
+        (jp_root_dir / "alert.md").write_text(doc, encoding="utf-8")
+
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        blocks = [b.group(1) for b in ExportHandlerBase.iter_mermaid_blocks(doc)]
+        assert len(blocks) == 2 and "IN_THE_NOTE" in blocks[0], (
+            f"the document as written holds two diagrams, the note's first; "
+            f"the scanner sees {blocks!r}"
+        )
+
+        first = "data:image/svg+xml;base64,SU5fVEhFX05PVEU="
+        second = "data:image/svg+xml;base64,QUZURVJfVEhFX05PVEU="
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST",
+            body=json.dumps({
+                "path": "alert.md",
+                "mermaidDiagrams": [{"index": 0, "svg": first, "png": ""},
+                                    {"index": 1, "svg": second, "png": ""}],
+            }),
+        )
+        html = response.body.decode("utf-8")
+
+        assert first in html and second in html, (
+            "a diagram the frontend supplied did not reach the document"
+        )
+        assert html.index(first) < html.index(second), (
+            "the note's picture came out after the one that follows it - the "
+            "two are paired by position and the pairing has shifted"
+        )
+        assert "IN_THE_NOTE" not in html, (
+            "the diagram inside the alert kept its source: the alert pass ran "
+            "first and erased the fence before it could be paired"
+        )
+
+    async def test_the_server_renders_with_the_options_the_frontend_uses(self):
+        """A diagram must not come out of the API unlike the one the UI makes.
+        The frontend sets `securityLevel: 'loose'`; under `strict` mermaid
+        turns off HTML labels and the same diagram draws differently."""
+        from pathlib import Path as _Path
+        from jupyterlab_export_markdown_extension.routes import PlaywrightSvgRenderer
+
+        frontend = _Path(__file__).parents[2] / "src" / "index.ts"
+        assert "securityLevel: 'loose'" in frontend.read_text(encoding="utf-8"), (
+            "the frontend no longer sets securityLevel: 'loose' - the server "
+            "constant below has to follow it"
+        )
+        assert PlaywrightSvgRenderer.MERMAID_INIT_OPTIONS["securityLevel"] == "loose"
+
+    async def test_every_reported_code_has_a_message(self):
+        """The renderer names codes, the header carries their messages - a code
+        with no entry would report a warning that explains nothing."""
+        import re as _re
+        from jupyterlab_export_markdown_extension import routes
+
+        source = _Path_source = (
+            __import__("pathlib").Path(routes.__file__).read_text(encoding="utf-8")
+        )
+        emitted = set(_re.findall(r"'(?:None, )?([a-z]+(?:-[a-z]+)+)'\)", source))
+        codes = {c for c in emitted if c in routes.MERMAID_WARNINGS or "-" in c}
+        unknown = {c for c in codes
+                   if c not in routes.MERMAID_WARNINGS
+                   and c in {"render-failed", "syntax-error", "render-timeout",
+                             "rasterize-failed", "skipped", "budget-exhausted",
+                             "layout-unsupported", "bundle-missing",
+                             "chromium-unavailable"}}
+        assert not unknown, f"codes with no message: {unknown}"
+        assert routes.MERMAID_WARNINGS.keys() >= {
+            "chromium-unavailable", "bundle-missing", "syntax-error",
+            "layout-unsupported", "render-timeout", "skipped",
+            "budget-exhausted", "rasterize-failed", "render-failed",
+        }
+
+    async def test_the_diagrams_behind_a_timeout_are_not_blamed_for_it(
+        self, jp_fetch, jp_root_dir, monkeypatch
+    ):
+        """A document where diagram 0 does not finish must not tell the reader
+        that the healthy diagrams behind it are too complex to draw.
+
+        The timeout is forced rather than provoked: mermaid draws even a
+        4000-edge graph in 0.7s, so a source slow enough to trip a real 30s
+        budget would make this test slower than the suite it lives in."""
+        from jupyterlab_export_markdown_extension import routes
+
+        real_wait_for = asyncio.wait_for
+        first = []
+
+        async def timeout_once(awaitable, timeout=None):
+            if not first:
+                first.append(True)
+                if hasattr(awaitable, "close"):
+                    awaitable.close()
+                raise asyncio.TimeoutError()
+            return await real_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(routes.asyncio, "wait_for", timeout_once)
+        block = "```mermaid\nflowchart LR\n    A --> B\n```\n\n"
+        (jp_root_dir / "hang.md").write_text("# H\n\n" + block * 3, encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "hang.md"}), raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+
+        warnings = self._warnings(response)
+        assert warnings["render-timeout"]["diagrams"] == [0], (
+            f"the timeout is reported against "
+            f"{warnings['render-timeout']['diagrams']}, not the diagram that hung"
+        )
+        assert warnings["skipped"]["diagrams"] == [1, 2], (
+            "the diagrams behind the offender must be reported as skipped, not "
+            "as having timed out themselves"
+        )
+        assert "Simplify" not in warnings["skipped"]["message"], (
+            "the skipped diagrams are told to simplify themselves"
+        )
+
+    async def test_the_frontend_counts_diagrams_the_way_the_server_does(self):
+        """The frontend posts diagrams by position and the server pairs them by
+        position, so both must skip a ```mermaid quoted inside a longer fence.
+        One counting it and the other not hands a diagram the wrong picture."""
+        from pathlib import Path as _P
+
+        frontend = (_P(__file__).parents[2] / "src" / "index.ts").read_text(
+            encoding="utf-8"
+        )
+        assert "mermaidBlocksFromSource(source)" in frontend, (
+            "the source fallback went back to a bare regex over the document; "
+            "it would count a quoted example the server skips"
+        )
+        assert "`{3,}|~{3,}" in frontend, (
+            "the frontend's fence tracking no longer mirrors the server's - "
+            "both must treat a ```mermaid opened inside any fence as content"
+        )
+
+    async def test_a_mermaid_example_inside_a_plain_fence_is_left_alone(
+        self, jp_fetch, jp_root_dir
+    ):
+        """A fence carrying an info string never closes a block, so
+        ```text / ```mermaid / ``` is ONE code block per CommonMark - the
+        mermaid inside it is quoted just as firmly as inside a longer fence."""
+        (jp_root_dir / "plain.md").write_text(
+            "# Docs\n\n"
+            "```text\n```mermaid\nflowchart LR\n    A --> B\n```\n\n"
+            "A real one:\n\n"
+            "```mermaid\nflowchart LR\n    C --> D\n```\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "plain.md"}), raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+        assert len(media) == 1, (
+            f"{len(media)} diagrams rendered - a ```mermaid quoted inside a "
+            f"plain ```text block is documentation, not a diagram"
+        )
+
+    async def test_the_server_keeps_the_ceilings_the_browser_has(self):
+        """`@jupyterlab/mermaid` raises maxTextSize/maxEdges and the frontend
+        inherits them, so matching only securityLevel would fail diagrams
+        through the API that JupyterLab draws without complaint."""
+        from jupyterlab_export_markdown_extension.routes import PlaywrightSvgRenderer
+
+        options = PlaywrightSvgRenderer.MERMAID_INIT_OPTIONS
+        assert options["maxTextSize"] == 100000
+        assert options["maxEdges"] == 100000
+
+    async def test_a_null_pixel_width_still_produces_a_png(
+        self, jp_fetch, mermaid_markdown_file
+    ):
+        """`data.get(k, default)` defaults a MISSING key only. A client sending
+        `"svgPixelWidth": null` used to select SVG output silently, and Word
+        cannot display an SVG."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", raise_error=False,
+            body=json.dumps({"path": "mermaid_api.md", "svgPixelWidth": None}),
+        )
+        assert response.code == 200, response.body[:300]
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+        assert media and all(n.endswith(".png") for n in media), (
+            f"a null width put {media} in the DOCX instead of PNG images"
+        )
+
+    async def test_a_junk_pixel_width_does_not_fail_the_export(
+        self, jp_fetch, mermaid_markdown_file
+    ):
+        for width in ["wide", 0, -5, True, {"px": 900}, 99999]:
+            response = await jp_fetch(
+                "jupyterlab-export-markdown-extension", "export/docx",
+                method="POST", raise_error=False,
+                body=json.dumps({"path": "mermaid_api.md", "svgPixelWidth": width}),
+            )
+            assert response.code == 200, f"width={width!r}: {response.body[:200]}"
+            with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+                media = [n for n in z.namelist() if n.startswith("word/media/")]
+            assert len(media) == 2, f"width={width!r} lost a diagram"
+
+    async def test_a_syntax_error_echoing_a_dead_session_phrase_does_not_abort(
+        self, jp_fetch, jp_root_dir
+    ):
+        """A mermaid parse error echoes the offending source line, so a node
+        label reading 'Connection closed' or 'Target page' beside a real syntax
+        error was read as the browser dying and dropped every later diagram.
+        Liveness is now decided from page state, so the run continues and the
+        later healthy diagram still renders."""
+        doc = (
+            "# S\n\n"
+            "```mermaid\nflowchart LR\n    A --> First\n```\n\n"
+            # syntactically broken AND echoes a dead-session phrase in its text
+            "```mermaid\nflowchart LR\n    Connection closed -->\n```\n\n"
+            "```mermaid\nflowchart LR\n    B --> Third\n```\n"
+        )
+        (jp_root_dir / "echo.md").write_text(doc, encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "echo.md"}), raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+        assert len(media) == 2, (
+            f"{len(media)} of the 2 healthy diagrams rendered - the run aborted "
+            f"at the broken one because its text echoed a dead-session phrase"
+        )
+        codes = self._warnings(response)
+        assert "render-failed" not in codes, (
+            "a syntax error was misread as the browser dying"
+        )
+        assert "syntax-error" in codes, (
+            "the genuinely broken diagram should report a syntax error"
+        )
+
+
+    async def test_a_diagram_nested_in_a_list_is_still_a_diagram(
+        self, jp_fetch, jp_root_dir
+    ):
+        """CommonMark measures a fence's indent from its container's content
+        column, so a block inside a list item sits four or more spaces in.
+        JupyterLab renders it, so the server must count it - or every later
+        diagram's picture lands on the wrong fence."""
+        (jp_root_dir / "nested.md").write_text(
+            "# N\n\n"
+            "- step one\n"
+            "  - detail\n\n"
+            "    ```mermaid\n    flowchart LR\n        A --> B\n    ```\n\n"
+            "- step two\n\n"
+            "```mermaid\nflowchart LR\n    C --> D\n```\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "nested.md"}), raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+        assert len(media) == 2, (
+            f"{len(media)} of 2 diagrams rendered - the list-nested one was "
+            f"skipped, which shifts every later diagram onto the wrong fence"
+        )
+
+    async def test_a_blockquoted_diagram_is_still_a_diagram(
+        self, jp_fetch, jp_root_dir
+    ):
+        (jp_root_dir / "quoted.md").write_text(
+            "# Q\n\n> ```mermaid\n> flowchart LR\n>     A --> B\n> ```\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "quoted.md"}), raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+        assert len(media) == 1, "a blockquoted diagram was not rendered"
+
+    async def test_a_tilde_fence_declares_a_diagram_and_still_quotes(self):
+        """marked's fence rule treats `~~~` exactly like ``` ``` ```, so
+        JupyterLab renders `~~~mermaid` and the preview capture counts it. The
+        server has to agree or the browser's diagram N lands on fence N-1. A
+        tilde fence must still QUOTE what a longer fence holds."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        as_diagram = "~~~mermaid\nflowchart LR\n    A --> B\n~~~\n"
+        assert ExportHandlerBase.count_mermaid_blocks(as_diagram) == 1, (
+            "a tilde fence did not declare a diagram the browser counts"
+        )
+        quoting = "~~~text\n```mermaid\nflowchart LR\n    A --> B\n```\n~~~\n"
+        assert ExportHandlerBase.count_mermaid_blocks(quoting) == 0, (
+            "a tilde fence stopped quoting what is inside it"
+        )
+        plain = "```mermaid\nflowchart LR\n    A --> B\n```\n"
+        assert ExportHandlerBase.count_mermaid_blocks(plain) == 1
+
+    async def test_an_uppercase_info_string_is_not_a_diagram(self):
+        """`block.languages.includes(token.lang)` is case-sensitive, so
+        JupyterLab renders ```MERMAID as a code sample. Lowercasing here turned
+        that sample into a picture of itself and shifted every later block."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        doc = ("```MERMAID\nflowchart LR\n    A --> B\n```\n\n"
+               "```mermaid\nflowchart LR\n    C --> D\n```\n")
+        blocks = list(ExportHandlerBase.iter_mermaid_blocks(doc))
+        assert len(blocks) == 1, (
+            f"expected only the lowercase fence to be a diagram, got "
+            f"{[b.group(1) for b in blocks]}"
+        )
+        assert "C --> D" in blocks[0].group(1), (
+            "the uppercase sample was taken as the diagram, so the browser's "
+            "picture would land on it"
+        )
+
+    async def test_a_null_math_width_keeps_the_equations(
+        self, jp_fetch, jp_root_dir
+    ):
+        """The same null-default hazard as svgPixelWidth: uncoerced, the DPI
+        arithmetic raises, the raise is swallowed, and the PDF ships its
+        equations as literal `$x^2$` text."""
+        import fitz
+
+        (jp_root_dir / "math.md").write_text(
+            "# M\n\nAn equation: $x^2 + y^2 = z^2$\n", encoding="utf-8"
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", raise_error=False,
+            body=json.dumps({"path": "math.md", "mathPixelWidth": None}),
+        )
+        assert response.code == 200, response.body[:300]
+        pdf = fitz.open(stream=response.body, filetype="pdf")
+        try:
+            text = "\n".join(page.get_text() for page in pdf)
+            images = sum(len(page.get_images(full=True)) for page in pdf)
+        finally:
+            pdf.close()
+        assert "$x^2" not in text, (
+            "the equation shipped as literal markdown - a null width silently "
+            "disabled math rendering"
+        )
+        assert images >= 1, "the equation image is missing from the PDF"
+
+    async def test_an_infinite_pixel_width_does_not_fail_the_export(
+        self, jp_fetch, mermaid_markdown_file
+    ):
+        """`json.loads` accepts `Infinity`, and `int(float('inf'))` raises
+        OverflowError - which is not a ValueError."""
+        for body in ['{"path": "mermaid_api.md", "svgPixelWidth": Infinity}',
+                     '{"path": "mermaid_api.md", "svgPixelWidth": NaN}',
+                     '{"path": "mermaid_api.md", "svgPixelWidth": "1e400"}']:
+            response = await jp_fetch(
+                "jupyterlab-export-markdown-extension", "export/docx",
+                method="POST", body=body, raise_error=False,
+            )
+            assert response.code == 200, f"{body}: {response.body[:200]}"
+            with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+                media = [n for n in z.namelist() if n.startswith("word/media/")]
+            assert len(media) == 2, f"{body} lost a diagram"
+
+    async def test_a_broken_diagram_keeps_the_healthy_ones_around_it(
+        self, jp_fetch, jp_root_dir
+    ):
+        """A syntax error in the middle of a document keeps its source but must
+        not throw away the diagrams drawn before it or block the ones after -
+        the per-diagram fault is isolated, only a genuine session death stops
+        the run."""
+        doc = (
+            "# B\n\n"
+            "```mermaid\nflowchart LR\n    A --> Before\n```\n\n"
+            "```mermaid\nnot a valid diagram at all @#$\n```\n\n"
+            "```mermaid\nflowchart LR\n    C --> After\n```\n"
+        )
+        (jp_root_dir / "mid.md").write_text(doc, encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "mid.md"}), raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+        assert len(media) == 2, (
+            f"{len(media)} of 2 healthy diagrams rendered - a per-diagram "
+            f"syntax error was allowed to stop the whole run"
+        )
+
+    async def test_the_missing_layout_regex_tells_an_elk_diagram_from_a_bug(self):
+        """A genuinely unsupported layout gets its own remedy; an ordinary JS
+        error mentioning 'layout' must not be dressed up as one."""
+        from jupyterlab_export_markdown_extension.routes import PlaywrightSvgRenderer
+
+        assert not PlaywrightSvgRenderer._MERMAID_MISSING_LAYOUT_RE.search(
+            "Cannot read properties of undefined (reading 'layout')"
+        ), "an ordinary JS error is reported as an unsupported layout"
+        assert PlaywrightSvgRenderer._MERMAID_MISSING_LAYOUT_RE.search(
+            "Error: Layout algorithm elk is not registered."
+        ), "a genuinely missing layout engine is not recognised"
+
+    async def test_the_frontend_reads_a_crlf_file(self):
+        """JS `.` excludes \\r, so a naive `(.*)$` matches no fence at all in a
+        Windows-authored document - the fallback would find nothing where it
+        used to find every diagram."""
+        from pathlib import Path as _P
+
+        frontend = (_P(__file__).parents[2] / "src" / "index.ts").read_text(
+            encoding="utf-8"
+        )
+        assert "replace(/\\r$/, '')" in frontend, (
+            "the frontend no longer strips a trailing CR before matching fences"
+        )
+
+    async def test_a_four_space_indented_example_at_top_level_is_not_a_diagram(
+        self, jp_fetch, jp_root_dir
+    ):
+        """Four spaces at the top level is an indented code block, not a fence.
+        JupyterLab renders only the real diagram, so counting the example would
+        put the browser's picture on the wrong one.
+
+        Counting images cannot tell the two apart - either way one renders and
+        one does not - so this asserts WHICH survived as text."""
+        (jp_root_dir / "indented.md").write_text(
+            "# I\n\nShown as an example:\n\n"
+            "    ```mermaid\n    flowchart LR\n        A --> B\n    ```\n\n"
+            "The real one:\n\n"
+            "```mermaid\nflowchart LR\n    C --> D\n```\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "indented.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        text = _docx_text(response.body).replace("\n", "")
+        assert "A --> B" in text, (
+            "the indented example was rendered into a picture of itself "
+            "instead of staying the code sample it is"
+        )
+        assert "C --> D" not in text, "the real diagram was left as source"
+
+    async def test_an_unclosed_quoted_fence_ends_with_its_blockquote(self):
+        """A blockquote ends at its first unquoted line, and CommonMark closes
+        any fence still open inside it - marked renders that block, so it is a
+        diagram. What it must not do is run on: that makes one 'diagram' out of
+        the blockquote plus every paragraph and code block after it, up to
+        whatever ``` happens to close it."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        doc = ("# U\n\n> ```mermaid\n> flowchart LR\n>     A --> B\n\n"
+               "This paragraph must survive.\n\n"
+               "```python\nkeep = 'this'\n```\n")
+        blocks = list(ExportHandlerBase.iter_mermaid_blocks(doc))
+        assert len(blocks) == 1, (
+            f"expected the quoted block to close with its blockquote, got "
+            f"{len(blocks)} block(s)"
+        )
+        assert blocks[0].end() < doc.index("This paragraph"), (
+            f"the block spans {(blocks[0].start(), blocks[0].end())} of a "
+            f"{len(doc)}-char document - the substitution would replace the "
+            f"prose and the python block too"
+        )
+        assert blocks[0].group(1).strip() == "flowchart LR\n    A --> B", (
+            f"quote markers survived into the source: {blocks[0].group(1)!r}"
+        )
+
+    async def test_an_unclosed_fence_at_the_end_of_the_file_is_a_diagram(self):
+        """CommonMark closes an unclosed fence at the end of the document and
+        marked renders what it opened, so the preview counts it. Dropping it
+        here would leave the browser one diagram ahead of the server."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        doc = "# E\n\n```mermaid\nflowchart LR\n    A --> B\n"
+        blocks = list(ExportHandlerBase.iter_mermaid_blocks(doc))
+        assert len(blocks) == 1, (
+            f"an unclosed fence at EOF yielded {len(blocks)} blocks"
+        )
+        assert blocks[0].group(1).strip() == "flowchart LR\n    A --> B"
+
+    async def test_a_crlf_document_hands_mermaid_clean_source(self):
+        """A Windows-authored file keeps a CR on every line when the source is
+        sliced straight out of the content."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        doc = "# C\r\n\r\n```mermaid\r\nflowchart LR\r\n    A --> B\r\n```\r\n"
+        blocks = list(ExportHandlerBase.iter_mermaid_blocks(doc))
+        assert len(blocks) == 1, f"a CRLF document yielded {len(blocks)} blocks"
+        assert "\r" not in blocks[0].group(1), (
+            f"the source handed to mermaid carries CRs: {blocks[0].group(1)!r}"
+        )
+
+    async def test_a_crlf_document_renders_its_diagrams(
+        self, jp_fetch, jp_root_dir
+    ):
+        (jp_root_dir / "crlf.md").write_bytes(
+            b"# C\r\n\r\n```mermaid\r\nflowchart LR\r\n    A --> B\r\n```\r\n"
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "crlf.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+        assert len(media) == 1, "a CRLF document rendered no diagram"
+
+    async def test_a_nested_quote_strips_every_marker(self):
+        """One `>` per level; leaving any behind hands mermaid `> flowchart`."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        doc = "# N\n\n> > ```mermaid\n> > flowchart LR\n> >     A --> B\n> > ```\n"
+        blocks = list(ExportHandlerBase.iter_mermaid_blocks(doc))
+        assert len(blocks) == 1
+        source = blocks[0].group(1)
+        assert not any(line.lstrip().startswith(">") for line in source.split("\n")), (
+            f"quote markers reached mermaid: {source!r}"
+        )
+        assert "flowchart LR" in source and "A --> B" in source
+
+    async def test_the_frontend_carries_every_counting_rule_the_server_has(self):
+        """A cheap smoke check that each rule is at least present on both sides.
+
+        It is NOT the guarantee - both files can carry every one of these
+        substrings and still behave differently, which is exactly what a
+        differential fuzz found (a CRLF bare list marker). The guarantee is
+        `TestFenceScannerParity`, which runs both scanners."""
+        from pathlib import Path as _P
+
+        frontend = (_P(__file__).parents[2] / "src" / "index.ts").read_text(
+            encoding="utf-8"
+        )
+        for rule, what in [
+            ("`{3,}|~{3,}", "every fence opener, not only long ones"),
+            ("replace(/\\r$/, '')", "CRLF lines"),
+            ("quoteStripped", "measuring indent in the container's coordinate"),
+            ("expandTabs", "a tab after > carries one column of the marker"),
+            ("listContentCol", "the list item's content column"),
+            ("spaces - base > 3", "indented code past the container is not a fence"),
+            ("stripQuoteMarkers", "a quoted block's markers"),
+            ("dedentBody", "the container's indent is not the diagram's"),
+            ("info === 'mermaid'", "an exact, case-sensitive info string"),
+            ("spaces <= openSpaces + 3", "a closer lives in its opener's container"),
+            ("q < openQ", "a blockquote ending closes the fence inside it"),
+        ]:
+            assert rule in frontend, (
+                f"the frontend scanner no longer handles {what} ({rule!r}) - "
+                f"it must mirror iter_mermaid_blocks or the indices diverge"
+            )
+
+FENCE_SHAPES = {
+    "plain": "```mermaid\nflowchart LR\n    A --> B\n```\n",
+    "quoted_by_longer": "````markdown\n```mermaid\nflowchart LR\n    A --> B\n```\n````\n",
+    "quoted_by_plain": "```text\n```mermaid\nflowchart LR\n    A --> B\n```\n",
+    "tilde_opener": "~~~mermaid\nflowchart LR\n    A --> B\n~~~\n",
+    "tilde_quoting": "~~~text\n```mermaid\nflowchart LR\n    A --> B\n```\n~~~\n",
+    "list_nested": "- a\n  - b\n\n    ```mermaid\n    flowchart LR\n        A --> B\n    ```\n",
+    "top_indented": "text\n\n    ```mermaid\n    flowchart LR\n        A --> B\n    ```\n",
+    "blockquote": "> ```mermaid\n> flowchart LR\n>     A --> B\n> ```\n",
+    "nested_quote": "> > ```mermaid\n> > flowchart LR\n> >     A --> B\n> > ```\n",
+    "unclosed_quote": "> ```mermaid\n> flowchart LR\n\nprose\n\n```python\nx = 1\n```\n",
+    "crlf": "```mermaid\r\nflowchart LR\r\n    A --> B\r\n```\r\n",
+    "two_plain": "```mermaid\nflowchart LR\n    A --> B\n```\n\n```mermaid\nflowchart LR\n    C --> D\n```\n",
+    "unclosed_eof": "```mermaid\nflowchart LR\n    A --> B\n",
+    "info_suffix": "```mermaid extra\nflowchart LR\n```\n",
+    "crlf_bare_marker": "-\r\n    ```mermaid\r\n    flowchart LR\r\n    ```\r\n",
+    "crlf_ordered_marker": "1.\r\n    ```mermaid\r\n    flowchart LR\r\n    ```\r\n",
+    "crlf_list_then_text": "- a\r\n\r\ntext\r\n\r\n```mermaid\r\nflowchart LR\r\n```\r\n",
+    "uppercase_info": "```MERMAID\nflowchart LR\n    A --> B\n```\n",
+    "mixed_case_info": "```Mermaid\nflowchart LR\n    A --> B\n```\n",
+    "quoted_closer": "```mermaid\nflowchart LR\n> ```\nstill the diagram\n```\n",
+    "deep_closer": "```mermaid\nflowchart LR\n    ```\nstill the diagram\n```\n",
+    "list_then_quote": "- a\n\n> quote\n\n    ```mermaid\n    flowchart LR\n    ```\n",
+    "quote_deep_indent": "- a\n\n>     ```mermaid\n>     flowchart LR\n>     ```\n",
+    # Round-6: shapes both adversarial lenses reproduced as silent
+    # picture-misplacement - a fence four spaces past a list item's content
+    # column is indented code, a bare/tab-indented container was mis-measured.
+    "list_over_indented": ("- Here is an example:\n\n      ```mermaid\n"
+                           "      flowchart LR\n      ```\n\nAnd real:\n\n"
+                           "```mermaid\nflowchart RL\n```\n"),
+    "list_in_quote": "> - step\n>\n>     ```mermaid\n>     flowchart LR\n>     ```\n",
+    "bare_marker_deep": "-\n\n      ```mermaid\n      flowchart LR\n      ```\n",
+    "tab_quoted_fence": ">\t```mermaid\n>\tflowchart LR\n>\t```\n",
+    "quote_then_bare_fence": ("> ```mermaid\n> flowchart LR\n```python\n"
+                              "x = 1\n```\n"),
+    "list_content_col_three": "1. item\n\n   ```mermaid\n   flowchart LR\n   ```\n",
+    # Round-7 (architect): marked trims the info string with JS `.trim()`, which
+    # strips a BOM; Python `str.strip()` keeps it, so ```mermaid<BOM> counted as
+    # source here and as a diagram in the browser - a one-off count shift.
+    "bom_info": "```mermaid\ufeff\nflowchart LR\n    A --> B\n```\n",
+}
+
+#: What each shape must yield. A diagram counted by one side and not the other
+#: hands the server a picture addressed to the wrong fence. Every count here is
+#: what marked - the parser JupyterLab renders with, and therefore what the
+#: preview-capture path counts - produces for that document; none is a reading
+#: of the spec. `test_marked_agrees_with_the_server_on_every_shape` re-derives
+#: them from the installed marked so the table cannot drift from it.
+FENCE_SHAPE_COUNTS = {
+    "plain": 1, "quoted_by_longer": 0, "quoted_by_plain": 0, "tilde_opener": 1,
+    "tilde_quoting": 0, "list_nested": 1, "top_indented": 0, "blockquote": 1,
+    "nested_quote": 1, "unclosed_quote": 1, "crlf": 1, "two_plain": 2,
+    "unclosed_eof": 1, "info_suffix": 0, "crlf_bare_marker": 1,
+    "crlf_ordered_marker": 1, "crlf_list_then_text": 1, "uppercase_info": 0,
+    "mixed_case_info": 0, "quoted_closer": 1, "deep_closer": 1,
+    "list_then_quote": 0, "quote_deep_indent": 0, "list_over_indented": 1,
+    "list_in_quote": 1, "bare_marker_deep": 0, "tab_quoted_fence": 1,
+    "quote_then_bare_fence": 1, "list_content_col_three": 1, "bom_info": 1,
+}
+
+
+class TestFenceScannerParity:
+    """DEF-16: the frontend posts diagrams by position and the server pairs them
+    by position, so the two scanners must agree on every fence shape. This runs
+    BOTH - the TypeScript one is extracted and executed under node - rather than
+    reading one and trusting the other."""
+
+    @staticmethod
+    def _typescript_blocks(fixtures):
+        import json as _json
+        import re as _re
+        import subprocess
+        import tempfile
+        from pathlib import Path as _P
+
+        source = (_P(__file__).parents[2] / "src" / "index.ts").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("/** One `>` per quote level")
+        end = source.index("/**\n * Capture rendered Mermaid diagrams")
+        body = source[start:end]
+        # Strip TypeScript type annotations so node can run the extracted body:
+        # function return types `): T {` first, then parameter/variable `: T`.
+        body = _re.sub(r"\)\s*:\s*[A-Za-z0-9_\[\]<>,.| ]+\s*\{", ") {", body)
+        for pattern in (r":\s*string\[\]", r":\s*string \| null",
+                        r":\s*number \| null", r":\s*\[number, string\]",
+                        r":\s*(?:string|number|boolean|void)\b"):
+            body = _re.sub(pattern, "", body)
+        body = body.replace(" as string", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = _P(tmp) / "fence.js"
+            data = _P(tmp) / "fixtures.json"
+            data.write_text(_json.dumps(fixtures), encoding="utf-8")
+            script.write_text(body + """
+const fixtures = JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'));
+const out = {};
+for (const [name, doc] of Object.entries(fixtures)) {
+  out[name] = mermaidBlocksFromSource(doc);
+}
+console.log(JSON.stringify(out));
+""", encoding="utf-8")
+            done = subprocess.run(["node", str(script), str(data)],
+                                  capture_output=True, text=True, timeout=60)
+        assert done.returncode == 0, f"node failed: {done.stderr[:400]}"
+        return _json.loads(done.stdout)
+
+    @staticmethod
+    def _normalise(blocks):
+        return [b.replace("\r\n", "\n").rstrip("\n") for b in blocks]
+
+    def test_the_server_counts_every_shape_as_specified(self):
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        for name, doc in FENCE_SHAPES.items():
+            found = len(list(ExportHandlerBase.iter_mermaid_blocks(doc)))
+            assert found == FENCE_SHAPE_COUNTS[name], (
+                f"{name}: server found {found}, expected "
+                f"{FENCE_SHAPE_COUNTS[name]}"
+            )
+
+    def test_marked_agrees_with_the_server_on_every_shape(self):
+        """marked is the authority, not the CommonMark spec and not a reading
+        of it: JupyterLab renders the preview with marked, and the DOM capture
+        posts one diagram per fence marked turned into a diagram. Anything the
+        server counts differently lands a picture on the wrong fence.
+
+        This runs the installed marked over the same shapes. It is what caught
+        ```MERMAID (marked is case-sensitive, the server was not) and ~~~mermaid
+        (marked renders it, the server refused it)."""
+        import json as _json
+        import shutil
+        import subprocess
+        import tempfile
+        from pathlib import Path as _P
+
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        marked = (_P(__file__).parents[2] / "node_modules" / "marked" / "lib"
+                  / "marked.esm.js")
+        if shutil.which("node") is None or not marked.exists():
+            pytest.skip("node and the installed marked are needed")
+
+        names = list(FENCE_SHAPES)
+        with tempfile.TemporaryDirectory() as tmp:
+            script = _P(tmp) / "count.mjs"
+            data = _P(tmp) / "docs.json"
+            data.write_text(_json.dumps([FENCE_SHAPES[n] for n in names]),
+                            encoding="utf-8")
+            # Mirrors @jupyterlab/markedparser-extension: a fence is a diagram
+            # when the code token's lang is exactly what MermaidMarkdown
+            # registers, `block.languages.includes(lang)` with languages
+            # `['mermaid']`.
+            script.write_text(f"""
+import {{ marked }} from '{marked.as_posix()}';
+import {{ readFileSync }} from 'fs';
+function walk(tokens, out) {{
+  for (const t of tokens) {{
+    if (t.type === 'code' && t.lang === 'mermaid') out.push(t.text);
+    if (t.tokens) walk(t.tokens, out);
+    if (t.items) walk(t.items, out);
+  }}
+}}
+const docs = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+console.log(JSON.stringify(docs.map(d => {{ const o = []; walk(marked.lexer(d), o); return o; }})));
+""", encoding="utf-8")
+            done = subprocess.run(["node", str(script), str(data)],
+                                  capture_output=True, text=True, timeout=60)
+        assert done.returncode == 0, f"node failed: {done.stderr[:400]}"
+
+        for name, blocks in zip(names, _json.loads(done.stdout)):
+            server = len(list(
+                ExportHandlerBase.iter_mermaid_blocks(FENCE_SHAPES[name])))
+            assert server == len(blocks), (
+                f"{name}: marked renders {len(blocks)} diagram(s) and the "
+                f"server counts {server} - the browser posts one per rendered "
+                f"diagram, so every later picture lands on the wrong fence"
+            )
+            assert len(blocks) == FENCE_SHAPE_COUNTS[name], (
+                f"{name}: FENCE_SHAPE_COUNTS says {FENCE_SHAPE_COUNTS[name]} "
+                f"but marked renders {len(blocks)} - the table has drifted "
+                f"from the parser it is supposed to describe"
+            )
+
+    def test_both_scanners_agree_on_every_shape(self):
+        import shutil
+
+        if shutil.which("node") is None:
+            pytest.skip("node is not available to run the TypeScript scanner")
+
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        typescript = self._typescript_blocks(FENCE_SHAPES)
+        for name, doc in FENCE_SHAPES.items():
+            server = self._normalise(
+                [b.group(1) for b in ExportHandlerBase.iter_mermaid_blocks(doc)]
+            )
+            frontend = self._normalise(typescript[name])
+            assert server == frontend, (
+                f"{name}: the server yields {server!r} and the frontend "
+                f"{frontend!r} - one counts a block the other skips, so a "
+                f"diagram would receive the wrong picture"
+            )
+

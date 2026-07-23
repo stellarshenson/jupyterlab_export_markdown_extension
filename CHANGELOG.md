@@ -2,6 +2,18 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.22
+
+### Added
+
+- Mermaid diagrams now render when a document is exported through the REST endpoints, not only from the JupyterLab UI. A script, `curl`, or a scheduled job previously got the raw ` ```mermaid ` source as a code block, because diagrams are rendered by the browser and posted from the page; the server now renders whatever the frontend did not, using a bundled copy of Mermaid inside the same headless Chromium the SVG rasterizer uses - no network access, no CDN
+- An export never fails over a diagram: a diagram that cannot be rendered (no Chromium, a syntax error, an unsupported `layout: elk`) keeps its source and the response carries an `X-Export-Warnings` header - a JSON array of `{code, count, diagrams, message}` where the message is the full remedy (`chromium-unavailable` names the install command). The header is absent when everything rendered and is listed in `Access-Control-Expose-Headers` so a cross-origin caller can read it
+
+### Fixed
+
+- A diagram rendered server-side cannot make the server fetch a URL: Mermaid keeps HTML labels, so a label carrying an `<img src>` used to have the server issue the request - both the render and the rasterize contexts now block all network access for server-generated SVGs
+- The server counts exactly the diagrams the browser does, in documents that nest a diagram inside a list item or a blockquote, quote one inside a longer fence, use `~~~` fences, or carry CRLF line endings - a miscount would otherwise pair a picture with the wrong diagram
+
 ## 1.6.21
 
 - Fix a GitHub alert with more than one paragraph rendering as two separate boxes - the blank `>` line between paragraphs ended the alert, leaving the rest below it as a plain grey blockquote; the whole alert now stays in one coloured box with its paragraphs intact

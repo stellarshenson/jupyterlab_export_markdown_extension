@@ -7,6 +7,7 @@ using pure Python libraries (no system dependencies).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import base64
@@ -15,6 +16,7 @@ import re
 import io
 import socket
 import tempfile
+import time
 from html import unescape
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -40,12 +42,93 @@ except ImportError:
     REPORTLAB_AVAILABLE = False
 
 
+class _MermaidBlock:
+    """One fenced mermaid block, shaped like the `re.Match` it replaced so
+    callers read `.start()`, `.end()`, `.group(0)` and `.group(1)` as before."""
+
+    __slots__ = ('_content', '_start', '_end', '_source')
+
+    def __init__(self, content: str, start: int, end: int, source: str):
+        self._content, self._start, self._end, self._source = (
+            content, start, end, source)
+
+    def start(self) -> int:
+        return self._start
+
+    def end(self) -> int:
+        return self._end
+
+    def group(self, n: int = 0) -> str:
+        if n == 0:
+            return self._content[self._start:self._end]
+        if n == 1:
+            return self._source
+        raise IndexError('no such group')  # never answer a question not asked
+
+
 class ChromiumUnavailableError(RuntimeError):
     """Raised when Playwright cannot launch Chromium (binary or sys-libs missing).
 
     Carries the original error message so the handler can return install
     guidance to the frontend.
     """
+
+
+#: The one command that fixes a missing Chromium, quoted rather than reworded
+#: wherever this module says it. `cli.py` and `src/index.ts` restate the same
+#: string because neither can import from here - the installer CLI must run
+#: without this module's heavy imports, and the frontend is another language -
+#: so those two are the copies to keep in step if the entry point is renamed.
+CHROMIUM_INSTALL_COMMAND = 'jupyterlab-export-markdown-extension install'
+
+#: Why a diagram kept its source instead of becoming a picture, and what the
+#: caller can do about it. Both the renderer (which detects the failures) and
+#: the handler (which reports them) name codes from this one table, so a code
+#: cannot be emitted that has no message. The message IS the whole remedy - a
+#: caller reading `X-Export-Warnings` off a binary response has nowhere else
+#: to look.
+MERMAID_WARNINGS = {
+    'chromium-unavailable': (
+        'Mermaid diagrams were not rendered because Chromium could not '
+        f'launch, so their source was kept. Run: {CHROMIUM_INSTALL_COMMAND}'
+    ),
+    'bundle-missing': (
+        'Mermaid diagrams were not rendered because the bundled mermaid '
+        'renderer is missing or could not be loaded, so their source was '
+        'kept. Reinstall jupyterlab_export_markdown_extension'
+    ),
+    'syntax-error': (
+        'Mermaid could not draw these diagrams, so their source was kept. '
+        'Check the diagram syntax'
+    ),
+    'layout-unsupported': (
+        'These diagrams ask for a layout engine the server does not carry '
+        '(mermaid-layout-elk is not bundled), so their source was kept. They '
+        'still render in JupyterLab; export them from the UI, or use the '
+        'default layout'
+    ),
+    'render-timeout': (
+        'Mermaid did not finish drawing this diagram in time, so its source '
+        'was kept. Simplify it or split it up'
+    ),
+    'skipped': (
+        'Rendering stopped at the diagram that did not finish, so these were '
+        'never attempted and kept their source. Fix the one reported under '
+        'render-timeout'
+    ),
+    'budget-exhausted': (
+        'Rendering ran past the time this export allows for diagrams, so '
+        'these were never attempted and kept their source'
+    ),
+    'rasterize-failed': (
+        'These diagrams were drawn but could not be converted to an image, '
+        'so their source was kept'
+    ),
+    'render-failed': (
+        'The mermaid renderer failed, so these diagrams kept their source. '
+        'Check the Jupyter server log'
+    ),
+}
 
 
 #: A line break as an author may write it - any case, any attributes, closed or
@@ -143,7 +226,7 @@ def manual_break_aware_nl2br():
 
 
 class PlaywrightSvgRenderer:
-    """Render SVG bytes to PNG bytes via Playwright Chromium.
+    """Owns a headless Chromium: rasterizes SVG to PNG, and draws mermaid.
 
     Reuses one browser process across multiple render() calls within an
     `async with` block. Uses a real browser engine, so CSS classes,
@@ -154,12 +237,17 @@ class PlaywrightSvgRenderer:
     viewBox aspect ratio. Chromium anti-aliases natively, so no
     supersampling is needed - it renders straight to the target size.
     Pass supersample > 1 only if a specific SVG needs extra smoothing.
+
+    `render_mermaid` uses the same browser to turn mermaid source into a
+    diagram, so the class also carries the bundle path, the mermaid options
+    and the render budget.
     """
 
-    def __init__(self, color_scheme: str = 'light'):
+    def __init__(self, color_scheme: str = 'light', offline: bool = False):
         if color_scheme not in ('light', 'dark'):
             color_scheme = 'light'
         self.color_scheme = color_scheme
+        self.offline = offline
         self._pw = None
         self._browser = None
 
@@ -172,7 +260,17 @@ class PlaywrightSvgRenderer:
             ) from e
         try:
             self._pw = await async_playwright().start()
-            self._browser = await self._pw.chromium.launch(headless=True)
+            # An offline browser cannot resolve a name at all. Route
+            # interception stops requests, but Chromium resolves a
+            # `<link rel="dns-prefetch">` without emitting one, and a mermaid
+            # label can carry that tag - a DNS leak out of the server from
+            # someone else's markdown. Used for content this server generated.
+            self._browser = await self._pw.chromium.launch(
+                headless=True,
+                args=(['--host-resolver-rules=MAP * ~NOTFOUND',
+                       '--disable-features=NetworkPrediction']
+                      if self.offline else []),
+            )
         except Exception as e:
             # Most common failure is missing system libs (libnspr4, libnss3
             # etc.) or Chromium binary not downloaded yet.
@@ -186,12 +284,17 @@ class PlaywrightSvgRenderer:
     async def _safe_stop(self):
         try:
             if self._browser is not None:
-                await self._browser.close()
+                # Bounded: the one path that gets here with a renderer still
+                # spinning is a mermaid layout timeout, and an unbounded close
+                # would hand the request back to that same wedge.
+                await asyncio.wait_for(self._browser.close(),
+                                       timeout=self.CONTEXT_CLOSE_TIMEOUT_S)
         except Exception:
             pass
         try:
             if self._pw is not None:
-                await self._pw.stop()
+                await asyncio.wait_for(self._pw.stop(),
+                                       timeout=self.CONTEXT_CLOSE_TIMEOUT_S)
         except Exception:
             pass
         self._browser = None
@@ -200,6 +303,195 @@ class PlaywrightSvgRenderer:
     # Chromium refuses a viewport, and silently fails a texture, past roughly
     # 16384px. Held a little under it for the compositor's own overhead.
     MAX_RASTER_PX = 16000
+
+    #: The mermaid UMD bundle, copied out of node_modules into the wheel by
+    #: `jlpm vendor:mermaid`. Loading it from disk keeps a server-side render
+    #: offline - no CDN, no network call from the export path.
+    MERMAID_JS_PATH = Path(__file__).parent / 'vendor' / 'mermaid.min.js'
+
+    #: What THIS extension's frontend initialises mermaid with before it
+    #: captures a diagram (`renderMermaidInTheme` in `src/index.ts`), not what
+    #: `@jupyterlab/mermaid` defaults to. The two differ: the frontend sets
+    #: `securityLevel: 'loose'`, and under `strict` mermaid turns off HTML
+    #: labels, so the same diagram would come out of the API visibly unlike
+    #: the one the UI produces - the divergence this pass exists to remove.
+    #: Loose costs nothing here because the render has no network (see
+    #: `render_mermaid`) and the SVG is never scripted, only screenshotted.
+    #: `theme` is per-render.
+    MERMAID_INIT_OPTIONS = {
+        'startOnLoad': False,
+        'securityLevel': 'loose',
+        # Not set by `renderMermaidInTheme` itself - `initialize` merges onto
+        # the config `@jupyterlab/mermaid`'s manager already applied, so the
+        # browser keeps these ceilings. Without them the server falls back to
+        # mermaid's own much lower defaults and reports a large generated
+        # diagram as a syntax error that JupyterLab renders perfectly well.
+        'maxTextSize': 100000,
+        'maxEdges': 100000,
+    }
+
+    #: Seconds a single diagram gets to lay itself out. Mermaid runs in the
+    #: page's one JS thread, so without this a graph whose layout does not
+    #: converge holds the export request open with nothing to return.
+    MERMAID_RENDER_TIMEOUT_S = 30
+
+    #: Seconds all of a document's diagrams get between them. The per-diagram
+    #: timeout does not bound the request: 200 diagrams that each take 4s hold
+    #: it open for 13 minutes, long after the client gave up.
+    MERMAID_TOTAL_BUDGET_S = 180
+
+    #: Seconds to wait on closing the page. The one path that reaches here
+    #: with a wedged renderer is the layout timeout, which is exactly where an
+    #: unbounded close would hang.
+    CONTEXT_CLOSE_TIMEOUT_S = 15
+
+    @classmethod
+    def mermaid_bundle_available(cls) -> bool:
+        """Whether this installation can render mermaid at all. Lets a caller
+        decide without launching a browser, and without knowing where the
+        bundle lives."""
+        return cls.MERMAID_JS_PATH.exists()
+
+    @staticmethod
+    async def _block_network(ctx) -> None:
+        """Refuse every request the page makes.
+
+        A mermaid diagram is self-contained - the bundle is injected from
+        disk, the styles are inlined - so nothing here legitimately needs the
+        network. Left open, a diagram is an SSRF primitive: mermaid's HTML
+        labels survive into a `<foreignObject>`, so a label of
+        `A["<img src='http://169.254.169.254/...'>"]` in someone else's
+        markdown makes THIS server fetch that URL. Measured before the block:
+        three outbound requests from one exported diagram.
+        """
+        await ctx.route('**/*', lambda route: route.abort())
+
+    #: Mermaid's own words when a diagram asks for a layout engine that was
+    #: never registered. Told apart from a syntax error because the remedy is
+    #: the opposite: the diagram is fine, this server just cannot draw it.
+    _MERMAID_MISSING_LAYOUT_RE = re.compile(
+        r'layout\s+(?:algorithm\s+)?\S+\s+is\s+not\s+registered'
+        r'|no\s+layout\s+loader|registerLayoutLoaders'
+        r'|unknown\s+layout', re.IGNORECASE)
+
+    async def render_mermaid(self, sources: list[str], *, theme: str,
+                             png_width: int | None
+                             ) -> list[tuple[str | bytes | None, str | None]]:
+        """Render mermaid sources, one browser page for all of them.
+
+        Returns one `(result, reason)` pair per source, in order, exactly one
+        of them set. `result` is the SVG text, or the rasterized PNG bytes
+        when `png_width` is given - rasterizing here rather than leaving it to
+        `extract_data_uri_images` reuses this browser, so a document whose only
+        images are diagrams starts Chromium once instead of twice. (One that
+        also carries the frontend's own SVGs still pays for the second.)
+        `reason` is a code from `MERMAID_WARNINGS` naming why the caller must
+        keep that diagram's source instead.
+
+        Never raises for a diagram - a failure is always a reason code, and
+        even a browser that dies mid-run keeps the diagrams already drawn.
+        """
+        out: list[tuple[str | bytes | None, str | None]] = []
+
+        def fill_rest(reason: str) -> None:
+            out.extend([(None, reason)] * (len(sources) - len(out)))
+
+        ctx = await self._browser.new_context(color_scheme=self.color_scheme)
+        try:
+            await self._block_network(ctx)
+            page = await ctx.new_page()
+            await page.set_content(
+                "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                "</head><body></body></html>"
+            )
+            await page.add_script_tag(path=str(self.MERMAID_JS_PATH))
+            # A bundle that loaded but did not define the global is a bundle
+            # of the wrong kind (an ESM build injected as a classic script).
+            # Say so, rather than blame every diagram in the document.
+            if await page.evaluate("() => typeof mermaid") == 'undefined':
+                fill_rest('bundle-missing')
+                return out
+            await page.evaluate(
+                '(opts) => mermaid.initialize(opts)',
+                {**self.MERMAID_INIT_OPTIONS, 'theme': theme},
+            )
+
+            deadline = time.monotonic() + self.MERMAID_TOTAL_BUDGET_S
+            for i, source in enumerate(sources):
+                if time.monotonic() >= deadline:
+                    fill_rest('budget-exhausted')
+                    break
+                # A diagram gets its full timeout only if that much budget is
+                # left; nearer the deadline the window shrinks. Remember which
+                # limit applied, so a diagram that draws fine but ran out the
+                # document's total budget is not blamed for being slow.
+                remaining = deadline - time.monotonic()
+                budget_limited = remaining < self.MERMAID_RENDER_TIMEOUT_S
+                try:
+                    svg = await asyncio.wait_for(page.evaluate(
+                        """async ({src, id}) => {
+                            const {svg} = await mermaid.render(id, src);
+                            return svg;
+                        }""",
+                        {'src': source, 'id': f'export-mermaid-{i}'},
+                    ), timeout=max(1.0, min(self.MERMAID_RENDER_TIMEOUT_S,
+                                            remaining)))
+                except asyncio.TimeoutError:
+                    if budget_limited:
+                        # The document's total budget ran out, not this diagram
+                        # - it never got a full window. Report the true cause.
+                        fill_rest('budget-exhausted')
+                        break
+                    # That layout still holds the page's only JS thread, so
+                    # every diagram behind it would time out in turn. Give them
+                    # all their source back rather than spend the timeout again
+                    # and again on a page that is not coming back - and say
+                    # which one stopped the run, since the rest are innocent.
+                    out.append((None, 'render-timeout'))
+                    fill_rest('skipped')
+                    break
+                except Exception as e:
+                    if page.is_closed() or not self._browser.is_connected():
+                        # The page is gone; every later evaluate would fail the
+                        # same way and each would be reported as the author's
+                        # syntax error. Stop, and keep what did render. Decided
+                        # from page STATE, not the message text - mermaid echoes
+                        # the offending line, so a node label reading "Target
+                        # page" or "Connection closed" beside a real syntax
+                        # error must not be read as the browser dying.
+                        fill_rest('render-failed')
+                        break
+                    out.append((None, 'layout-unsupported'
+                                if self._MERMAID_MISSING_LAYOUT_RE.search(str(e))
+                                else 'syntax-error'))
+                    continue
+
+                if not svg:
+                    out.append((None, 'syntax-error'))
+                elif png_width is None:
+                    out.append((svg, None))
+                else:
+                    try:
+                        out.append((await asyncio.wait_for(
+                            self.render(svg.encode('utf-8'), width=png_width,
+                                        block_network=True),
+                            timeout=max(1.0, deadline - time.monotonic()),
+                        ), None))
+                    except Exception:
+                        # Including a timeout: the loop samples the budget only
+                        # at the top, so a single hung screenshot would hold the
+                        # request open past every other bound.
+                        out.append((None, 'rasterize-failed'))
+            return out
+        finally:
+            # Cleanup must not throw away the diagrams that rendered: this
+            # runs after `return out`, so an exception here would discard the
+            # whole list and degrade a good export to source blocks.
+            try:
+                await asyncio.wait_for(ctx.close(),
+                                       timeout=self.CONTEXT_CLOSE_TIMEOUT_S)
+            except Exception:
+                pass
 
     @staticmethod
     def _viewbox_dims(svg_text: str) -> tuple[float, float]:
@@ -219,7 +511,8 @@ class PlaywrightSvgRenderer:
         )
 
     async def render(self, svg_bytes: bytes, *,
-                     width: int = 1920, supersample: int = 1) -> bytes:
+                     width: int = 1920, supersample: int = 1,
+                     block_network: bool = False) -> bytes:
         svg_text = svg_bytes.decode('utf-8', errors='replace')
 
         # Drop any XML declaration / DOCTYPE prologue before the <svg> root.
@@ -251,6 +544,11 @@ class PlaywrightSvgRenderer:
             viewport={'width': probe, 'height': probe},
         )
         try:
+            if block_network:
+                # Only for an SVG this server generated from document text -
+                # see `_block_network`. An SVG the user supplied keeps the
+                # browser's own behaviour, web fonts and all, as it always had.
+                await self._block_network(ctx)
             page = await ctx.new_page()
             probe_html = (
                 "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
@@ -472,6 +770,53 @@ class ExportHandlerBase(APIHandler):
                     style.font.size = Pt(round(size.pt * scale, 1))
         document.styles['Normal'].font.size = Pt(base_pt)
 
+    #: Bounds of `svgPixelWidth`, mirroring schema/plugin.json. A width is a
+    #: raster size: zero produces nothing, and an absurd one a canvas Chromium
+    #: refuses.
+    SVG_PIXEL_WIDTH_RANGE = (400, 4096)
+    DEFAULT_SVG_PIXEL_WIDTH = 1920
+
+    #: Bounds of `mathPixelWidth`, mirroring schema/plugin.json.
+    MATH_PIXEL_WIDTH_RANGE = (200, 3000)
+    DEFAULT_MATH_PIXEL_WIDTH = 800
+
+    @classmethod
+    def math_pixel_width(cls, value) -> int:
+        """Math rasterization width for a request value.
+
+        Same hazard as `svg_pixel_width`: `"mathPixelWidth": null` reaches
+        the renderer as None, where the DPI arithmetic raises, the raise is
+        swallowed, and the PDF ships its equations as literal `$x^2$` text.
+        """
+        return cls._pixel_width(value, cls.DEFAULT_MATH_PIXEL_WIDTH,
+                                cls.MATH_PIXEL_WIDTH_RANGE)
+
+    @classmethod
+    def svg_pixel_width(cls, value) -> int:
+        """Rasterization width for a request value.
+
+        `data.get(key, default)` only defaults a MISSING key, so a client that
+        sends `"svgPixelWidth": null` - or a string, or a bool - lands here
+        with something that is not a width. It must not reach the renderer:
+        `None` there silently selects SVG output, which Word cannot display,
+        and no failure is raised to warn anyone.
+        """
+        return cls._pixel_width(value, cls.DEFAULT_SVG_PIXEL_WIDTH,
+                                cls.SVG_PIXEL_WIDTH_RANGE)
+
+    @staticmethod
+    def _pixel_width(value, default: int, bounds: tuple[int, int]) -> int:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return default
+        try:
+            width = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError is not a ValueError: `Infinity` survives
+            # json.loads, and "1e400" survives the isinstance gate.
+            return default
+        low, high = bounds
+        return min(max(width, low), high)
+
     def get_absolute_path(self, relative_path: str) -> Path:
         """Convert a relative path to an absolute path within the server root."""
         root_dir = self.contents_manager.root_dir
@@ -507,8 +852,276 @@ class ExportHandlerBase(APIHandler):
         with open(path, 'r', encoding='utf-8') as f:
             return f.read()
 
+    #: Any fenced block's opening or closing line: its indentation, the run of
+    #: backticks or tildes, then the info string. Three backticks is the
+    #: CommonMark minimum, so a ```mermaid block is one of these too - which is
+    #: the point: whether it is a diagram or an example depends on whether a
+    #: fence is already open.
+    #:
+    #: The prefix is captured, not bounded, and allows `>`. CommonMark measures
+    #: a fence's indent from its container's content column, so a block inside
+    #: a list item sits four or more spaces in and a quoted one behind a `>` -
+    #: both still fences. The regex this replaced was position-blind and
+    #: JupyterLab renders both, so refusing them here would drop a diagram the
+    #: browser had already counted and put every later picture on the wrong
+    #: fence.
+    _FENCE_RE = re.compile(r'^([ \t>]*)(`{3,}|~{3,})(.*)$')
+
+    #: The exact character set JS `String.prototype.trim()` removes - ECMAScript
+    #: WhiteSpace plus LineTerminator. marked (JS) is the authority for what an
+    #: info string trims to, and Python's `str.strip()` differs on a few code
+    #: points: it keeps U+FEFF (a BOM after `mermaid` would count as a diagram
+    #: in the browser but not here) and strips control chars JS does not. Using
+    #: this set with `str.strip()` makes the trim byte-equivalent to marked's.
+    _JS_TRIM = ''.join(chr(c) for c in (
+        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0xa0, 0x1680,
+        0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007,
+        0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+        0xfeff,
+    ))
+
+    @classmethod
+    def iter_mermaid_blocks(cls, content: str):
+        """Every mermaid block the document actually means as a diagram.
+
+        Yields a match-like object per block, in document order, with the
+        source in group 1 - so a caller reads it exactly as it read the
+        `re.finditer` this replaced.
+
+        A ```mermaid opened while another fence is already open is
+        documentation showing the syntax, not a diagram: nobody wants their
+        code sample replaced by a picture of itself. Only a same-character
+        fence at least as long as the opener AND carrying no info string
+        closes a block (CommonMark), so ```mermaid can sit quoted inside a
+        plain ```text block as easily as inside a ```` ```` ```` one.
+        """
+        lines = content.split('\n')
+        offsets, at = [], 0
+        for line in lines:
+            offsets.append(at)
+            at += len(line) + 1
+
+        char: str | None = None      # the open fence, if any
+        length = 0
+        opened_mermaid = False       # ...and whether it is a diagram
+        quoted_block = False         # ...and whether a blockquote holds it
+        open_q = 0                   # ...and at what blockquote depth
+        list_col = 0                 # content column of the open list item
+        list_q = 0                   # ...at what blockquote depth it lives
+        body_start = 0
+        block_start = 0
+        open_spaces = 0
+
+        for i, line in enumerate(lines):
+            # Everything about where a fence sits is measured in the coordinate
+            # marked re-lexes a line in: blockquote markers stripped, tabs
+            # expanded. A fence is a diagram only where marked draws one, and
+            # the browser pairs diagrams with fences by position, so counting
+            # one marked skips - or skipping one it draws - puts every later
+            # picture on the wrong fence.
+            q, text = cls._quote_stripped(line)
+            spaces = len(text) - len(text.lstrip(' '))
+
+            if char is None:
+                # Track the innermost open list item's content column. Inside an
+                # item the indentation is the item's, and the fence starts at
+                # that column; four spaces PAST it is an indented code block,
+                # exactly as at the top level.
+                col = cls._list_content_col(text)
+                if col is not None:
+                    list_col, list_q = col, q
+                elif text.strip(cls._JS_TRIM) and (q != list_q
+                                                   or spaces < list_col):
+                    list_col = 0
+
+            # A blockquote ends at the first line that is not quoted, and
+            # CommonMark closes any fence still open inside it. Checked before
+            # the fence branch so a line that both ends the quote AND is itself
+            # a fence (```python right after a quoted ```mermaid) closes the
+            # block first instead of running on and eating that next fence.
+            if char is not None and quoted_block and q < open_q:
+                if opened_mermaid:
+                    # marked renders a container-closed block, so the browser
+                    # counted it; dropping it here shifts every later picture.
+                    end = offsets[i] - 1
+                    yield _MermaidBlock(content, block_start, end,
+                                        cls._body_source(
+                                            content[body_start:end],
+                                            quoted_block, open_spaces))
+                char, opened_mermaid, quoted_block = None, False, False
+
+            fence = cls._FENCE_RE.match(line)
+            if not fence:
+                continue
+            indent, marker = fence.group(1), fence.group(2)
+            info = fence.group(3).strip(cls._JS_TRIM)
+            if char is None:
+                base = list_col if (list_col and q == list_q) else 0
+                if spaces - base > 3:
+                    continue  # indented code, not a fence opener
+                char, length = marker[0], len(marker)
+                open_spaces = spaces
+                open_q = q
+                # marked decides what a DIAGRAM is: `languages.includes(lang)`
+                # is an exact, case-sensitive match on the trimmed info string,
+                # and marked's fence rule treats ~~~ exactly like ```.
+                # Lowercasing made a ```MERMAID sample a picture of itself, and
+                # refusing ~~~ dropped a diagram the browser had counted.
+                # Residue: a ~~~ block left un-rendered is not covered by the
+                # ``` fence protection in the math and alert passes (DEF-19).
+                opened_mermaid = info == 'mermaid'
+                quoted_block = q > 0
+                # Start at the backticks, not at the start of the line: the
+                # indentation belongs to whatever container holds the block,
+                # and swallowing it drops the image out of that container.
+                block_start = offsets[i] + len(indent)
+                body_start = offsets[i] + len(line) + 1
+            elif (marker[0] == char and len(marker) >= length and not info
+                  and q == open_q and spaces <= open_spaces + 3):
+                # A closer has to live in the opener's container: a quoted ```
+                # inside an unquoted fence, or one indented far enough to be
+                # code, is body text. Both are how a document that quotes fenced
+                # markdown reads, and closing early truncates the source and
+                # shifts every later block.
+                if opened_mermaid:
+                    yield _MermaidBlock(content, block_start,
+                                        offsets[i] + len(line),
+                                        cls._body_source(
+                                            content[body_start:offsets[i]],
+                                            quoted_block, open_spaces))
+                char = None
+                opened_mermaid = False
+                quoted_block = False
+
+        if opened_mermaid:
+            # Same rule at the end of the document: CommonMark closes the fence
+            # there and marked renders the block, so it is a diagram.
+            end = offsets[-1] + len(lines[-1])
+            yield _MermaidBlock(content, block_start, end,
+                                cls._body_source(content[body_start:end],
+                                                 quoted_block, open_spaces))
+
+    #: A blockquote marker at the head of a line inside a quoted block. The
+    #: markers are the quote's syntax, not the diagram's - markdown strips
+    #: them before the code ever reaches a renderer, and mermaid cannot parse
+    #: `> flowchart LR`.
+    _QUOTE_MARKER_RE = re.compile(r'^[ \t]*>[ ]?', re.MULTILINE)
+
+    #: A blockquote marker at the head of a line: up to three leading spaces,
+    #: a `>`, and one optional space that marked strips with it.
+    _QUOTE_PREFIX_RE = re.compile(r'^ {0,3}>[ ]?')
+
+    #: A list item marker and the spaces after it. `\r` is in the trailing
+    #: class because `_quote_stripped` keeps a CRLF line's `\r`, so a bare `-`
+    #: marker must still read as a list item.
+    _LIST_MARKER_RE = re.compile(r'^( {0,3})([-*+]|\d{1,9}[.)])([ \t\r]*)')
+
+    @classmethod
+    def _quote_stripped(cls, line: str) -> tuple[int, str]:
+        """The line in the coordinate marked re-lexes it in.
+
+        Blockquote markers removed (with the one space each carries) and tabs
+        expanded, so a fence's indentation is measured against its container's
+        content column, not the raw start of the line. Returns the blockquote
+        depth and the stripped text.
+        """
+        # Expand tabs first: a tab right after `>` advances to the next tab
+        # stop, and the blockquote marker consumes one column of it, so the
+        # rest counts as the fence's indent. marked draws `>\t```mermaid`.
+        line = line.expandtabs(4)
+        q = 0
+        m = cls._QUOTE_PREFIX_RE.match(line)
+        while m:
+            q += 1
+            line = line[m.end():]
+            m = cls._QUOTE_PREFIX_RE.match(line)
+        return q, line
+
+    @classmethod
+    def _list_content_col(cls, text: str) -> int | None:
+        """The column a list item's content begins at, or None if `text` (already
+        quote-stripped) is not a list item.
+
+        CommonMark: the content column is the marker end plus the spaces after
+        it, except a bare marker or five-plus spaces (indented code inside the
+        item) counts as one - which is the column a nested fence indents into.
+        """
+        m = cls._LIST_MARKER_RE.match(text)
+        if not m:
+            return None
+        after = m.group(3).replace('\r', '')
+        if m.end() != len(text) and not after:
+            return None  # marker jammed against content, e.g. `-->`
+        base = len(m.group(1)) + len(m.group(2))
+        n = len(after)
+        if m.end() == len(text) or n == 0 or n >= 5:
+            return base + 1
+        return base + n
+
+    @classmethod
+    def _body_source(cls, source: str, quoted: bool, indent: int) -> str:
+        """The source as the diagram author wrote it.
+
+        A nested quote carries a marker per level, so strip while they match;
+        and a CRLF document keeps its `\\r` through the slice, which mermaid
+        reads as part of the last token on every line.
+
+        A block inside a list item is indented, and that indent is the item's,
+        not the diagram's - marked hands mermaid the body without it, so this
+        removes the same columns the opening fence carried. Leaving them on is
+        what makes a diagram render from the preview but not from the API.
+        """
+        source = source.replace('\r\n', '\n')
+        # `indent` is already the container-relative column (the quote's own
+        # space was stripped when it was measured), so the body is dedented by
+        # exactly that after its own quote markers come off.
+        while quoted and cls._QUOTE_MARKER_RE.search(source):
+            source = cls._QUOTE_MARKER_RE.sub('', source)
+        out = []
+        for line in source.split('\n'):
+            # A block closed by its container rather than by a fence ends mid
+            # line-ending, so the last line can still carry a lone `\r`.
+            if line.endswith('\r'):
+                line = line[:-1]
+            cut = col = 0
+            while cut < len(line) and col < indent:
+                if line[cut] == ' ':
+                    col += 1
+                elif line[cut] == '\t':
+                    col += 4
+                else:
+                    break
+                cut += 1
+            out.append(line[cut:])
+        return '\n'.join(out)
+
+    @classmethod
+    def count_mermaid_blocks(cls, content: str) -> int:
+        return sum(1 for _ in cls.iter_mermaid_blocks(content))
+
+    @classmethod
+    def sub_mermaid_blocks(cls, content: str, replace) -> str:
+        """`re.sub` over exactly the blocks `iter_mermaid_blocks` yields, so
+        the substitution and the collection can never see different sets."""
+        out: list[str] = []
+        last = 0
+        for match in cls.iter_mermaid_blocks(content):
+            out.append(content[last:match.start()])
+            out.append(replace(match))
+            last = match.end()
+        out.append(content[last:])
+        return ''.join(out)
+
+    @staticmethod
+    def color_scheme_for(theme: str) -> str:
+        """The browser colour scheme an export theme resolves to. Mermaid and
+        `prefers-color-scheme` have light and dark and no third option, so the
+        follow-the-viewer settings - 'auto' for the DOCX theme, 'system' for
+        the HTML one - render light."""
+        return 'dark' if theme == 'dark' else 'light'
+
     def replace_mermaid_with_images(self, content: str, mermaid_diagrams: list,
-                                      use_png: bool = False) -> str:
+                                      use_png: bool = False) -> tuple[str, list[int]]:
         """
         Replace mermaid code blocks with pre-rendered images from the frontend.
 
@@ -518,13 +1131,14 @@ class ExportHandlerBase(APIHandler):
             use_png: If True, convert SVG to PNG (for DOCX compatibility)
 
         Returns:
-            Markdown content with mermaid blocks replaced by image references
+            The content with each supplied diagram substituted, and the
+            document positions of the blocks left behind. Those positions are
+            what a warning about an un-rendered diagram must quote: numbering
+            the leftovers 0, 1, 2 would send the reader to the wrong diagram
+            whenever the frontend supplied some but not all of them.
         """
         if not mermaid_diagrams:
-            return content
-
-        # Pattern to match mermaid code blocks
-        mermaid_pattern = r'```mermaid\s*\n(.*?)```'
+            return content, list(range(self.count_mermaid_blocks(content)))
 
         # Create lookup dicts by index for both SVG and PNG
         diagrams_by_index = {}
@@ -535,6 +1149,7 @@ class ExportHandlerBase(APIHandler):
             }
 
         current_index = [0]  # Use list to allow mutation in nested function
+        left_behind: list[int] = []
 
         def replace_mermaid(match):
             idx = current_index[0]
@@ -553,9 +1168,171 @@ class ExportHandlerBase(APIHandler):
                 return f'![Mermaid Diagram]({svg_data_uri})'
 
             # No pre-rendered diagram available, keep original
+            left_behind.append(idx)
             return match.group(0)
 
-        return re.sub(mermaid_pattern, replace_mermaid, content, flags=re.DOTALL)
+        content = self.sub_mermaid_blocks(content, replace_mermaid)
+        return content, left_behind
+
+    #: Diagram indices listed per warning before the header just reports the
+    #: count. A generated document can carry hundreds of diagrams, and this is
+    #: what keeps the header bounded. At most six codes can co-occur (the
+    #: document-wide ones exclude the per-diagram ones), so the header stays
+    #: under 1.7KB - inside nginx's 4KB default `proxy_buffer_size`, which has
+    #: to hold the whole response header block, not just this one.
+    MAX_REPORTED_DIAGRAMS = 10
+
+
+    async def render_mermaid_server_side(
+        self, content: str, *, color_scheme: str, png_width: int | None,
+        diagram_indices: list[int],
+    ) -> tuple[str, list[dict]]:
+        """Render any mermaid block the frontend did not, and inline it.
+
+        Mermaid is a browser library, so the extension renders diagrams in the
+        page and posts them as `mermaidDiagrams`. A caller driving the REST API
+        directly - a script, curl, a scheduled job - has no browser, so nothing
+        arrives and every diagram used to export as its own source code. Render
+        those blocks with the vendored mermaid bundle in the same headless
+        Chromium that rasterizes SVGs: `png_width` gives a PNG at that width
+        for DOCX and PDF, `None` an SVG for HTML - exactly what the frontend
+        posts for each.
+
+        Runs after `replace_mermaid_with_images`, so a diagram the frontend
+        supplied is already gone and only what it left is rendered - the UI
+        export is untouched, and a document with no mermaid never starts a
+        browser. `diagram_indices` is that method's account of which document
+        positions the blocks still here occupy, so a warning quotes the number
+        the reader would count to in their own file.
+
+        ORDERING RULE: both mermaid passes run on the document as read, before
+        any pass that rewrites the source. The frontend counted its diagrams in
+        the file the author wrote and pairing is by position, so a pass that
+        adds or removes a fence first shifts every later picture onto the wrong
+        one. `preprocess_github_alerts` does exactly that - it folds an alert
+        body onto a single line, which erases a fence inside a `> [!NOTE]`
+        completely, so a document with one diagram in a note and one after it
+        exported the note's picture in the later diagram's place.
+
+        Returns the content and a warning per reason a diagram kept its source.
+        Nothing here fails an export: an export missing a picture still beats
+        no export at all, so every failure degrades to the source block and is
+        reported instead.
+        """
+        sources = [m.group(1) for m in self.iter_mermaid_blocks(content)]
+        if not sources:
+            return content, []
+
+        # Checked before the browser starts, so a broken install costs no
+        # Chromium launch to discover.
+        if not PlaywrightSvgRenderer.mermaid_bundle_available():
+            # Logged as well as reported: a mis-packaged wheel degrades every
+            # export in the same silent way a caller who never looks at the
+            # header cannot tell from the feature not existing.
+            self.log.warning('mermaid: %s', MERMAID_WARNINGS['bundle-missing'])
+            return content, self.group_mermaid_warnings(
+                ['bundle-missing'] * len(sources), diagram_indices)
+
+        # One parameter carries the whole PNG-vs-SVG decision, so what the
+        # renderer produces and how the data URI labels it cannot disagree.
+        mime = 'image/png' if png_width is not None else 'image/svg+xml'
+
+        try:
+            async with PlaywrightSvgRenderer(color_scheme=color_scheme,
+                                             offline=True) as renderer:
+                results = await renderer.render_mermaid(
+                    sources,
+                    theme='dark' if color_scheme == 'dark' else 'default',
+                    png_width=png_width,
+                )
+        except ChromiumUnavailableError:
+            self.log.warning('mermaid: %s',
+                             MERMAID_WARNINGS['chromium-unavailable'])
+            return content, self.group_mermaid_warnings(
+                ['chromium-unavailable'] * len(sources), diagram_indices)
+        except Exception:
+            # Anything else the browser session can throw - the page failing to
+            # load, the bundle deleted under us, the context dying. Per-diagram
+            # faults are already handled inside render_mermaid; this is the
+            # whole session going down, and it must still not fail the export.
+            self.log.exception('mermaid: the render session failed')
+            return content, self.group_mermaid_warnings(
+                ['render-failed'] * len(sources), diagram_indices)
+
+        rendered = iter(results)
+        reasons: list[str | None] = []
+
+        def replace(match):
+            image, reason = next(rendered, (None, 'render-failed'))
+            try:
+                if image is None:
+                    return match.group(0)  # keep the source, reported below
+                raw = image if isinstance(image, bytes) else image.encode('utf-8')
+                data_uri = (f'data:{mime};base64,'
+                            + base64.b64encode(raw).decode('ascii'))
+                return f'![Mermaid Diagram]({data_uri})'
+            except Exception:
+                # The only unguarded step left in the pass, and it must not be
+                # the one that fails an export - a lone surrogate in a label
+                # would take UTF-8 encoding down with it.
+                self.log.exception('mermaid: could not inline a rendered diagram')
+                reason = 'render-failed'
+                return match.group(0)
+            finally:
+                reasons.append(reason)
+
+        content = self.sub_mermaid_blocks(content, replace)
+        return content, self.group_mermaid_warnings(reasons, diagram_indices)
+
+    def group_mermaid_warnings(self, reasons: list[str | None],
+                               diagram_indices: list[int]) -> list[dict]:
+        """Group per-diagram failure reasons into one warning each, in the
+        order the diagrams appear.
+
+        `reasons[k]` is the k-th block this pass saw; `diagram_indices[k]` is
+        where that block sits among the document's own diagrams, and that is
+        the number reported. `count` is always the true total; `diagrams`
+        lists the first `MAX_REPORTED_DIAGRAMS`, so a document with hundreds
+        of broken diagrams cannot grow the header past what an HTTP header
+        block will carry.
+        """
+        order: list[str] = []
+        by_code: dict[str, list[int]] = {}
+        for position, reason in enumerate(reasons):
+            if reason is None:
+                continue
+            if reason not in by_code:
+                by_code[reason] = []
+                order.append(reason)
+            by_code[reason].append(
+                diagram_indices[position] if position < len(diagram_indices)
+                else position)
+        return [{
+            'code': code,
+            'count': len(by_code[code]),
+            'diagrams': by_code[code][:self.MAX_REPORTED_DIAGRAMS],
+            'message': MERMAID_WARNINGS[code],
+        } for code in order]
+
+    def set_export_warnings(self, warnings: list[dict]) -> None:
+        """Report what went wrong on an export that still succeeded.
+
+        The body is a document, so a warning has nowhere to go but a header.
+        Absent when everything rendered.
+
+        Nothing in `src/` reads it: asked how warnings should reach a caller,
+        the answer was the response header alone rather than a dialog. It is
+        an API channel by decision - a UI export reaches this path only when
+        the mermaid manager token is missing, since otherwise the browser
+        renders every diagram and there is nothing left to warn about.
+        """
+        if not warnings:
+            return
+        self.set_header('X-Export-Warnings', json.dumps(warnings))
+        # Without this a cross-origin `fetch()` is handed the document with the
+        # warnings stripped - the one channel, silently gone. `add_header`,
+        # because something else may already expose one.
+        self.add_header('Access-Control-Expose-Headers', 'X-Export-Warnings')
 
     # Inline images carrying an explicit display size at or below this many
     # CSS px are treated as small badges/pills, not full-width diagrams.
@@ -3930,15 +4707,15 @@ class ExportPdfHandler(ExportHandlerBase):
             data = json.loads(self.request.body)
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
-            svg_pixel_width = data.get("svgPixelWidth", 1920)
+            svg_pixel_width = self.svg_pixel_width(data.get("svgPixelWidth"))
             show_alert_labels = data.get('showAlertLabels', False)
             base_pt = self.font_size_pt(data.get('exportFontSize'))
-            math_pixel_width = data.get('mathPixelWidth', 800)
+            math_pixel_width = self.math_pixel_width(data.get('mathPixelWidth'))
             # DOCX/PDF SVG + Mermaid rasterization theme. Defaults to light
             # (Word docs are usually printed). 'auto' is resolved by the
             # frontend to a concrete light/dark before the request.
             docx_theme = data.get('docxTheme', data.get('htmlTheme', 'light'))
-            svg_color_scheme = 'dark' if docx_theme == 'dark' else 'light'
+            svg_color_scheme = self.color_scheme_for(docx_theme)
 
             if not relative_path:
                 self.set_status(400)
@@ -3953,10 +4730,16 @@ class ExportPdfHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            # Diagrams first, on the document as written - see the ordering
+            # rule on render_mermaid_server_side.
+            content, unrendered = self.replace_mermaid_with_images(
+                content, mermaid_diagrams, use_png=True)
+            content, export_warnings = await self.render_mermaid_server_side(
+                content, color_scheme=svg_color_scheme,
+                png_width=svg_pixel_width, diagram_indices=unrendered)
             content = self.preprocess_task_lists(content)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             content = self.replace_math_with_images(content, width=math_pixel_width)
-            content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
 
             # Extract code blocks for PDF rendering (before DOCX conversion)
@@ -4034,6 +4817,7 @@ class ExportPdfHandler(ExportHandlerBase):
             pdf_content = self.convert_docx_to_pdf(docx_bytes, code_blocks,
                                                    base_pt=base_pt)
 
+            self.set_export_warnings(export_warnings)
             self.set_header('Content-Type', 'application/pdf')
             self.set_header('Content-Disposition',
                           f'attachment; filename="{file_path.stem}.pdf"')
@@ -4046,7 +4830,7 @@ class ExportPdfHandler(ExportHandlerBase):
                 'errorCode': 'CHROMIUM_UNAVAILABLE',
                 'message': (
                     'Chromium is required to render embedded SVG images. '
-                    'Run: jupyterlab-export-markdown-extension install'
+                    f'Run: {CHROMIUM_INSTALL_COMMAND}'
                 ),
             }))
         except ImportError as e:
@@ -4068,14 +4852,14 @@ class ExportDocxHandler(ExportHandlerBase):
             data = json.loads(self.request.body)
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
-            svg_pixel_width = data.get("svgPixelWidth", 1920)
+            svg_pixel_width = self.svg_pixel_width(data.get("svgPixelWidth"))
             show_alert_labels = data.get('showAlertLabels', False)
             base_pt = self.font_size_pt(data.get('exportFontSize'))
             # DOCX/PDF SVG + Mermaid rasterization theme. Defaults to light
             # (Word docs are usually printed). 'auto' is resolved by the
             # frontend to a concrete light/dark before the request.
             docx_theme = data.get('docxTheme', data.get('htmlTheme', 'light'))
-            svg_color_scheme = 'dark' if docx_theme == 'dark' else 'light'
+            svg_color_scheme = self.color_scheme_for(docx_theme)
 
             if not relative_path:
                 self.set_status(400)
@@ -4090,12 +4874,18 @@ class ExportDocxHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            # Diagrams first, on the document as written - see the ordering
+            # rule on render_mermaid_server_side. Use PNG for DOCX (better
+            # Word compatibility).
+            content, unrendered = self.replace_mermaid_with_images(
+                content, mermaid_diagrams, use_png=True)
+            content, export_warnings = await self.render_mermaid_server_side(
+                content, color_scheme=svg_color_scheme,
+                png_width=svg_pixel_width, diagram_indices=unrendered)
             content = self.preprocess_task_lists(content)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             # Use OMML markers for DOCX (native Word equations)
             content, inline_math, display_math = self.replace_math_with_markers(content)
-            # Use PNG for DOCX (better Word compatibility)
-            content = self.replace_mermaid_with_images(content, mermaid_diagrams, use_png=True)
             content = self.embed_images_as_base64(content, file_path.parent)
             # Highlight code blocks with inline styles for DOCX
             content = self.highlight_code_blocks(content, use_inline_styles=True)
@@ -4268,6 +5058,7 @@ class ExportDocxHandler(ExportHandlerBase):
                 document.save(docx_buffer)
                 docx_content = docx_buffer.getvalue()
 
+            self.set_export_warnings(export_warnings)
             self.set_header('Content-Type',
                           'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
             self.set_header('Content-Disposition',
@@ -4281,7 +5072,7 @@ class ExportDocxHandler(ExportHandlerBase):
                 'errorCode': 'CHROMIUM_UNAVAILABLE',
                 'message': (
                     'Chromium is required to render embedded SVG images. '
-                    'Run: jupyterlab-export-markdown-extension install'
+                    f'Run: {CHROMIUM_INSTALL_COMMAND}'
                 ),
             }))
         except ImportError as e:
@@ -4308,6 +5099,7 @@ class ExportHtmlHandler(ExportHandlerBase):
             html_theme = data.get('htmlTheme', 'light')
             dark_background = data.get('htmlDarkBackground', '#111111')
             light_background = data.get('htmlLightBackground', '#ffffff')
+            mermaid_color_scheme = self.color_scheme_for(html_theme)
 
             if not relative_path:
                 self.set_status(400)
@@ -4322,9 +5114,15 @@ class ExportHtmlHandler(ExportHandlerBase):
                 return
 
             content = self.read_markdown_file(file_path)
+            # Diagrams first, on the document as written - see the ordering
+            # rule on render_mermaid_server_side.
+            content, unrendered = self.replace_mermaid_with_images(
+                content, mermaid_diagrams)
+            content, export_warnings = await self.render_mermaid_server_side(
+                content, color_scheme=mermaid_color_scheme,
+                png_width=None, diagram_indices=unrendered)
             content = self.preprocess_task_lists(content)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
-            content = self.replace_mermaid_with_images(content, mermaid_diagrams)
             content = self.embed_images_as_base64(content, file_path.parent)
             html = self.markdown_to_html(
                 content, file_path.stem, math_support=True,
@@ -4339,6 +5137,7 @@ class ExportHtmlHandler(ExportHandlerBase):
             html = self.drop_empty_table_headers(html)
             html = self.wrap_html_tables(html)
 
+            self.set_export_warnings(export_warnings)
             self.set_header('Content-Type', 'text/html; charset=utf-8')
             self.set_header('Content-Disposition',
                           f'attachment; filename="{file_path.stem}.html"')

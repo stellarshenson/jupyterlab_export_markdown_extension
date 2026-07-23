@@ -44,7 +44,9 @@ For PDF export, install required system libraries and emoji font:
 sudo apt-get install libcairo2 libpango-1.0-0 libpangoft2-1.0-0 fonts-noto-color-emoji
 ```
 
-Mermaid diagrams are rendered client-side using JupyterLab's built-in Mermaid support - no additional installation required.
+Mermaid diagrams are rendered client-side using JupyterLab's built-in Mermaid support - no additional installation required. An export driven through the REST endpoints instead of the UI has no browser to render them, so the server renders those diagrams itself with a bundled copy of Mermaid, in the same Playwright Chromium the SVG rasterizer uses - no network access involved.
+
+A diagram that cannot be rendered never fails the export: its source is kept and the response carries an `X-Export-Warnings` header describing what happened, as a JSON array of `{code, count, diagrams, message}`. `code` is one of `chromium-unavailable`, `bundle-missing`, `syntax-error`, `layout-unsupported`, `render-timeout`, `skipped`, `budget-exhausted`, `rasterize-failed` or `render-failed`; `count` is how many diagrams the warning covers, `diagrams` a bounded prefix of their positions in the document, and `message` the remedy in full - a caller needs nothing beyond the header. It is absent when everything rendered, and is listed in `Access-Control-Expose-Headers` so a cross-origin caller can read it.
 
 ## Install
 
