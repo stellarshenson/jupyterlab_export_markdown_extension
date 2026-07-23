@@ -347,7 +347,8 @@ async function exportMarkdown(
   htmlTheme: string = 'light',
   htmlDarkBackground: string = '#111111',
   htmlLightBackground: string = '#ffffff',
-  docxTheme: string = 'light'
+  docxTheme: string = 'light',
+  exportFontSize: string = 'medium'
 ): Promise<void> {
   const blob = await requestBlobAPI(`export/${format}`, {
     method: 'POST',
@@ -363,7 +364,8 @@ async function exportMarkdown(
       htmlTheme,
       htmlDarkBackground,
       htmlLightBackground,
-      docxTheme
+      docxTheme,
+      exportFontSize
     })
   });
 
@@ -402,6 +404,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
     let htmlTheme = 'light'; // Default: light theme
     let htmlDarkBackground = '#111111'; // Default: JupyterLab dark theme darkest gray
     let htmlLightBackground = '#ffffff'; // Default: light theme background
+    let exportFontSize = 'medium'; // Default: 12pt base body text
     if (settingRegistry) {
       try {
         const settings = await settingRegistry.load(plugin.id);
@@ -414,6 +417,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
           .composite as string;
         htmlLightBackground = settings.get('htmlLightBackground')
           .composite as string;
+        exportFontSize = settings.get('exportFontSize').composite as string;
         console.log(
           'Export Markdown: Loaded settings - svgPixelWidth:',
           svgPixelWidth,
@@ -424,7 +428,9 @@ const plugin: JupyterFrontEndPlugin<void> = {
           'docxTheme:',
           docxTheme,
           'htmlTheme:',
-          htmlTheme
+          htmlTheme,
+          'exportFontSize:',
+          exportFontSize
         );
 
         // Listen for settings changes
@@ -439,6 +445,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
             .composite as string;
           htmlLightBackground = settings.get('htmlLightBackground')
             .composite as string;
+          exportFontSize = settings.get('exportFontSize').composite as string;
           console.log(
             'Export Markdown: Settings changed - svgPixelWidth:',
             svgPixelWidth,
@@ -449,7 +456,9 @@ const plugin: JupyterFrontEndPlugin<void> = {
             'docxTheme:',
             docxTheme,
             'htmlTheme:',
-            htmlTheme
+            htmlTheme,
+            'exportFontSize:',
+            exportFontSize
           );
         });
       } catch (error) {
@@ -515,7 +524,8 @@ const plugin: JupyterFrontEndPlugin<void> = {
               htmlTheme,
               htmlDarkBackground,
               htmlLightBackground,
-              resolvedDocxTheme
+              resolvedDocxTheme,
+              exportFontSize
             );
           } catch (error) {
             console.error(

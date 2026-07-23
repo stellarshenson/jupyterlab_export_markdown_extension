@@ -9,6 +9,7 @@ Acceptance criteria for the markdown export extension across PDF, DOCX and HTML.
 - [Row and callout page splitting](#row-and-callout-page-splitting)
 - [Mermaid raster framing](#mermaid-raster-framing)
 - [Line break fidelity](#line-break-fidelity)
+- [Export font size](#export-font-size)
 
 ## Export page fitting
 
@@ -157,23 +158,60 @@ A mermaid diagram is rendered to SVG in the browser and screenshotted at the con
 
 A break the author writes must render as one break. Markdown's `nl2br` also converts the newline that follows it, which doubles any hand-written `<br>` - and a doubled break is not cosmetic: it inverts the grouping of a question above its answer, the reason the idiom is used at all.
 
-| Source             | Author's intent | Rendered breaks |
-| ------------------ | --------------- | --------------- |
-| `line<br>` + `\n`  | one break       | 1               |
-| `line` + `\n`      | one break       | 1               |
-| `line<br><br>`     | blank line      | 2               |
-| `<br>` in a cell   | one break       | 1               |
-| `<br>` in raw HTML | one break       | 1               |
+| Source                                | Author's intent             | Rendered breaks  |
+| ------------------------------------- | --------------------------- | ---------------- |
+| `line<br>` + newline                  | one break                   | 1                |
+| `line<br>` + space + newline          | one break                   | 1                |
+| `line<br>` + 2 spaces + newline       | break, then hard break      | 2                |
+| `line<br><br>` + newline              | blank line                  | 2                |
+| `line<BR>` / `<br clear="all">`       | one break                   | 1                |
+| `line<br-spacer>` + newline           | custom element, not a break | 1                |
+| `line<!-- ... <br> ... -->`           | a comment, not a break      | 1                |
+| `**line<br>**` + newline              | one break                   | 2 (not detected) |
+| `<br>` alone on its own line          | blank line                  | 2                |
+| `<br>` in a table cell                | one break                   | 1                |
+| `one<br /><br />` in a raw HTML block | blank line                  | 2                |
 
-- [x] **One break where the author wrote one** - a line ended with `<br>` renders with a single break in HTML, DOCX and PDF
+- [x] **One break where the author wrote one** - a line ended with `<br>` renders with a single break in HTML, DOCX and PDF. Known limitation: a break written INSIDE inline markup (`**Q<br>**`) is not detected, because the trailing node is then the emphasis element rather than the break; that shape still renders a blank line
   - log: 2026-07-23 criterion added after `DEF-10` ("question and answer ... in the docx they are spread apart, one cannot know that one q&a is separate from next q&a")
   - log: 2026-07-23 implemented in `markdown_to_html`, so all three formats inherit it; tests `test_html_keeps_one_break`, `test_docx_pair_holds_one_break` (v1.6.19)
+  - log: 2026-07-23 adversarial review replaced the mechanism twice. Shipped as a regex over the finished HTML, it matched shape rather than provenance and deleted authored breaks - inside a raw HTML block, and for Markdown's own two-trailing-spaces hard break, which core Markdown emits as the same `<br />`. The rule now lives at the inline stage, where the author's tag is still a stashed node and the two-space break has already been claimed by a higher-priority pattern
 - [x] **A pair reads as a pair** - a question sits closer to its own answer than to the next question
   - log: 2026-07-23 criterion added - the measurable form of the defect, since the break count alone does not prove the reader can see the grouping
   - log: 2026-07-23 held - PDF measures 12.0pt inside the pair against 18.0pt between pairs (24.0 against 18.0 before); DOCX gets ~13pt against the ~23pt its `w:after="200"` plus 1.15 line spacing gives a paragraph boundary. Test `test_pdf_pair_is_tighter_than_the_gap_between_pairs`, mutation-proved (v1.6.19)
 - [x] **An explicit blank line survives** - `<br><br>` is an author asking for a blank line, not a duplicate to collapse
   - log: 2026-07-23 criterion added
   - log: 2026-07-23 held - only the generated tag is dropped, so two hand-written breaks stay two; test `test_explicit_blank_line_is_preserved` (v1.6.19)
-- [x] **Breaks outside a paragraph are untouched** - a `<br>` in a table cell or a raw HTML block keeps its break, since `nl2br` never ran there to double it
-  - log: 2026-07-23 criterion added - a caption-above-image grid depends on exactly this break
-  - log: 2026-07-23 held - the pattern requires the generated `<br />` plus its newline, which those contexts never carry; test `test_break_in_a_table_cell_is_untouched` (v1.6.19)
+- [x] **Only a generated break is ever dropped** - every break the author typed survives, whatever its spelling and wherever it sits
+  - log: 2026-07-23 criterion added - a caption-above-image grid depends on a cell's break, and the alert-box idiom on a raw block's
+  - log: 2026-07-23 restated after the review proved the original wording ("the pattern requires the generated `<br />` plus its newline, which those contexts never carry") false for a raw HTML block. The rule now decides at the inline stage: a newline is skipped only when the node immediately before it is a break tag the author typed, so a table cell (which cannot hold a newline), a raw HTML block, a `<br-spacer>` custom element and the two-space hard break are all left alone
+  - log: 2026-07-23 held - tests `test_break_in_a_table_cell_is_untouched`, `test_raw_html_block_keeps_its_own_breaks`, `test_custom_element_is_not_treated_as_a_break`, `test_manual_break_plus_hard_break_keeps_both`, `test_uppercase_and_attributed_breaks_are_recognised`, `test_non_breaking_space_after_the_break_still_collapses`, all mutation-proved
+- [x] **A failure of this rule cannot fail an export** - it is cosmetic, and it reaches into Markdown's internals to read provenance
+  - log: 2026-07-23 criterion added after the review found the internal import sitting in the request path, where an incompatible Markdown would 500 every export
+  - log: 2026-07-23 held - each internal lookup falls back to emitting the break (plain `nl2br` behaviour) and the extension itself falls back to `'nl2br'` if it cannot be built
+
+## Export font size
+
+One setting picks the base body size and everything else follows from it, so a document scales as a whole rather than only its paragraphs. Before this, the PDF hardcoded 10pt body text and the DOCX 11pt - the same document rendered at two different scales.
+
+| Setting  | Base body | PDF heading 1 | PDF table | PDF code | HTML measure |
+| -------- | --------- | ------------- | --------- | -------- | ------------ |
+| `small`  | 10pt      | 14pt          | 9pt       | 8pt      | 50em         |
+| `medium` | 12pt      | 16.8pt        | 10.8pt    | 9.6pt    | 50em         |
+| `large`  | 14pt      | 19.6pt        | 12.6pt    | 11.2pt   | 50em         |
+
+- [x] **The base size follows the setting in all three formats** - PDF body text, the DOCX `Normal` style and the HTML body rule all render at 10 / 12 / 14pt
+  - log: 2026-07-23 criterion added with the `exportFontSize` setting
+  - log: 2026-07-23 implemented - `EXPORT_FONT_SIZES` resolves the setting, `PDF_TYPE_SCALE` derives every reportlab style, `apply_docx_font_size` scales the DOCX styles, the HTML body rule takes the size directly; tests `test_pdf_base_size_follows_the_setting`, `test_docx_base_size_follows_the_setting`, `test_html_base_size_follows_the_setting` (v1.6.20)
+- [x] **Everything else is a proportion of it** - a heading, a table cell and a code block keep the same ratio to body text at every size
+  - log: 2026-07-23 criterion added - a base size that moved only paragraphs would change the document's proportions, not its scale
+  - log: 2026-07-23 held - PDF sizes come from one ratio table, the DOCX template's explicit sizes are scaled by the same factor rather than overwritten, and the HTML stylesheet was already in `em`; test `test_pdf_headings_stay_proportional` (v1.6.20)
+- [x] **Line length scales too** - the HTML column is `50em`, so characters per line stay constant instead of shrinking a third at `large`
+  - log: 2026-07-23 criterion added after review found `max-width: 800px` was the one measure left absolute
+  - log: 2026-07-23 implemented; at the 12pt default 50em is the same 800px it was, so nothing moves for an existing reader. Test `test_html_measure_scales_with_the_body` (v1.6.20)
+- [x] **The default is medium, including for a client that sends nothing** - an older frontend, or a fresh install, exports at 12pt
+  - log: 2026-07-23 criterion added
+  - log: 2026-07-23 held - the handlers resolve through `font_size_pt`, which defaults; test `test_default_is_medium_in_every_format` (v1.6.20)
+- [x] **A malformed setting cannot fail an export** - the size is cosmetic, so a value of the wrong type or an absurd number falls back or clamps rather than returning a 500
+  - log: 2026-07-23 criterion added after review found a plain dict lookup raises `TypeError` on an unhashable value, and that an explicit 0 builds zero-height flowables
+  - log: 2026-07-23 implemented - non-string, non-number values take the default; a number is clamped to 6-32pt. Test `test_a_malformed_setting_cannot_fail_an_export`, mutation-proved (500 without the guard) (v1.6.20)

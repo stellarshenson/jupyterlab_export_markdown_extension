@@ -21,6 +21,13 @@
       "minimum": 200,
       "maximum": 3000
     },
+    "exportFontSize": {
+      "title": "Export Font Size",
+      "description": "Base body text size for PDF, DOCX and HTML exports. Every other size - headings, tables, code, captions - is a fixed proportion of it, so the whole document scales together. 'small' is 10pt, 'medium' 12pt (default), 'large' 14pt.",
+      "type": "string",
+      "default": "medium",
+      "enum": ["small", "medium", "large"]
+    },
     "showAlertLabels": {
       "title": "Show Alert Labels",
       "description": "Show alert type labels (NOTE, TIP, IMPORTANT, WARNING, CAUTION) in exported documents. When disabled, only the alert content is shown with colored styling.",

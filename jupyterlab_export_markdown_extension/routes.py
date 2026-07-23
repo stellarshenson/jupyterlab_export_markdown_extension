@@ -48,6 +48,94 @@ class ChromiumUnavailableError(RuntimeError):
     """
 
 
+#: Built once - the rule is stateless, and `markdown_to_html` runs per export
+_MANUAL_BREAK_RULE = None
+
+
+def manual_break_aware_nl2br():
+    """The `nl2br` rule, minus the break it would add after a manual one.
+
+    `nl2br` turns every newline into a break. A line the author ended with
+    `<br>` - the idiom for a question above its answer - therefore gets two,
+    and the resulting blank line makes the gap inside the pair match the gap
+    between pairs, so the grouping reads backwards. The author asked for one
+    break and should get one.
+
+    Deciding that needs to happen where provenance still exists, which is the
+    inline stage. By the time the HTML is serialized a break the author typed
+    and a break `nl2br` generated are the same six characters, and so is the
+    one core Markdown generates for the two-trailing-spaces idiom - collapsing
+    on shape there deletes authored breaks. Here the author's tag is still a
+    stashed node, and the two-space break is consumed by the `linebreak`
+    pattern (priority 100) long before this one (priority 5) is reached, so
+    `text<br>` + two spaces keeps both of its breaks.
+
+    Everything the resolution touches is guarded: if Markdown's internals move,
+    this cannot tell a manual break from a generated one and falls back to
+    emitting the break, which is exactly `nl2br`'s own behaviour.
+    """
+    global _MANUAL_BREAK_RULE
+    if _MANUAL_BREAK_RULE is not None:
+        return _MANUAL_BREAK_RULE
+
+    from markdown.extensions import Extension
+    from markdown.inlinepatterns import InlineProcessor
+    from markdown import util
+    from xml.etree import ElementTree
+
+    # The author's tag as it sits in the text at this point: an inline
+    # placeholder, at the very end of what precedes the newline
+    trailing_node = re.compile(
+        re.escape(util.INLINE_PLACEHOLDER).replace(re.escape('%s'), r'(\d+)')
+        + r'\Z')
+    # `\b` would accept a custom element like `<br-spacer>`, whose break is
+    # not a break at all
+    break_tag = re.compile(r'<br(?:\s[^>]*?)?/?>', re.IGNORECASE)
+
+    class NewlineToBreak(InlineProcessor):
+        def handleMatch(self, m, data):
+            if self._after_manual_break(data[:m.start(0)]):
+                return None, None, None
+            return ElementTree.Element('br'), m.start(0), m.end(0)
+
+        def _after_manual_break(self, before):
+            """True when a break tag the author typed ends ``before``.
+
+            Trailing blanks are skipped: one space after `<br>` is invisible
+            in an editor and must not decide how the document renders. Two
+            spaces never reach here - `linebreak` has already claimed them. A
+            tab cannot either - `expandtabs` runs before inline processing.
+
+            A break nested inside inline markup (`**Q<br>**`) is NOT detected:
+            the trailing node is then the emphasis Element, not the break, and
+            the pair renders with a blank line. Known limitation, pinned by
+            `test_break_inside_emphasis_is_a_known_limitation`.
+            """
+            node = trailing_node.search(before.rstrip(' \xa0'))
+            if node is None:
+                return False
+            try:
+                inline = self.md.treeprocessors['inline'].stashed_nodes
+                stashed = inline.get(node.group(1))
+                if not isinstance(stashed, str):
+                    return False       # a real element, so not raw HTML
+                held = util.HTML_PLACEHOLDER_RE.fullmatch(stashed)
+                if held is None:
+                    return False
+                raw = self.md.htmlStash.rawHtmlBlocks[int(held.group(1))]
+            except (AttributeError, IndexError, KeyError, TypeError):
+                return False           # cannot tell - behave like plain nl2br
+            return isinstance(raw, str) and bool(break_tag.fullmatch(raw.strip()))
+
+    class ManualBreakAwareNl2Br(Extension):
+        def extendMarkdown(self, md):
+            # Same slot and priority nl2br itself uses
+            md.inlinePatterns.register(NewlineToBreak(r'\n', md), 'nl', 5)
+
+    _MANUAL_BREAK_RULE = ManualBreakAwareNl2Br()
+    return _MANUAL_BREAK_RULE
+
+
 class PlaywrightSvgRenderer:
     """Render SVG bytes to PNG bytes via Playwright Chromium.
 
@@ -286,6 +374,77 @@ class ExportHandlerBase(APIHandler):
     #: PDF_FRAME_PADDING (which happens to share the value): this is the gap
     #: around cell text, that is the gap inside the page frame.
     PDF_TABLE_CELL_PADDING = 6
+
+    #: Base body size in points for each `exportFontSize` setting. Every other
+    #: size in every format is a proportion of this one, so the whole document
+    #: scales together rather than only its paragraphs.
+    EXPORT_FONT_SIZES = {'small': 10.0, 'medium': 12.0, 'large': 14.0}
+    DEFAULT_FONT_SIZE_PT = EXPORT_FONT_SIZES['medium']
+
+    #: Body size the DOCX template is built around: its named styles carry
+    #: explicit sizes proportioned against this, and so does the column-width
+    #: estimate in `fit_docx_table_to_page`.
+    DOCX_TEMPLATE_BASE_PT = 11.0
+
+    #: Every size the PDF draws, as a multiple of the base body size, with the
+    #: leading each one needs. Sized against the DOCX template's proportions so
+    #: the two formats render the same document at the same scale.
+    PDF_TYPE_SCALE = {
+        'body': (1.0, 1.2),
+        'heading1': (1.4, 1.8),
+        'heading2': (1.2, 1.5),
+        'heading3': (1.1, 1.4),
+        'table': (0.9, 1.1),
+        'code': (0.8, 1.0),
+    }
+
+    @classmethod
+    def font_size_pt(cls, name) -> float:
+        """Base body size in points for a setting value.
+
+        Anything unrecognised - an older client that does not send the
+        setting, a hand-edited value, a value of the wrong type entirely -
+        falls back to the default rather than failing an export over a
+        cosmetic choice. An explicit number is accepted but clamped to a range
+        that still produces a readable document.
+        """
+        if isinstance(name, bool) or not isinstance(name, (int, float, str)):
+            return cls.DEFAULT_FONT_SIZE_PT   # a list or dict is not a size
+        if isinstance(name, str):
+            return cls.EXPORT_FONT_SIZES.get(name, cls.DEFAULT_FONT_SIZE_PT)
+        # An explicit number is honoured, but clamped: 0 gives zero-height
+        # flowables and a huge value one glyph per page, neither of which is
+        # a document
+        return min(max(float(name), 6.0), 32.0)
+
+    @classmethod
+    def pdf_type(cls, role: str, base_pt: float) -> dict:
+        """`fontSize`/`leading` kwargs for one role at a given base size."""
+        size_ratio, leading_ratio = cls.PDF_TYPE_SCALE[role]
+        return {'fontSize': base_pt * size_ratio,
+                'leading': base_pt * leading_ratio}
+
+    def apply_docx_font_size(self, document, base_pt: float) -> None:
+        """Scale a document's type so its body text is ``base_pt``.
+
+        Word resolves an unset size through the style chain, so setting Normal
+        moves body text, tables and lists together. The styles that carry an
+        explicit size - headings, caption, title - are scaled by the same
+        factor instead of being overwritten, which keeps the proportions the
+        template was designed with.
+        """
+        from docx.shared import Pt
+
+        scale = base_pt / self.DOCX_TEMPLATE_BASE_PT
+        if scale != 1.0:
+            for style in document.styles:
+                try:
+                    size = style.font.size
+                except (AttributeError, NotImplementedError):
+                    continue  # table and numbering styles carry no font
+                if size is not None:
+                    style.font.size = Pt(round(size.pt * scale, 1))
+        document.styles['Normal'].font.size = Pt(base_pt)
 
     def get_absolute_path(self, relative_path: str) -> Path:
         """Convert a relative path to an absolute path within the server root."""
@@ -862,11 +1021,13 @@ class ExportHandlerBase(APIHandler):
         modified = re.sub(code_pattern, extract_match, content, flags=re.DOTALL)
         return modified, code_blocks
 
-    def highlight_code_for_pdf(self, code: str, lang: str) -> list:
+    def highlight_code_for_pdf(self, code: str, lang: str,
+                               base_pt: float = None) -> list:
         """Highlight code for PDF using Pygments and return reportlab flowables.
 
         Returns list of reportlab flowables (Preformatted paragraphs)
         """
+        code_base = self.DEFAULT_FONT_SIZE_PT if base_pt is None else base_pt
         try:
             from pygments import highlight
             from pygments.lexers import get_lexer_by_name, guess_lexer, TextLexer
@@ -880,8 +1041,7 @@ class ExportHandlerBase(APIHandler):
                     'CodeBlock',
                     parent=styles['Code'],
                     fontName='Courier',
-                    fontSize=8,
-                    leading=10,
+                    **self.pdf_type('code', code_base),
                     backColor=colors.HexColor('#f8f8f8'),
                     leftIndent=6,
                     rightIndent=6,
@@ -908,8 +1068,7 @@ class ExportHandlerBase(APIHandler):
         code_style = ParagraphStyle(
             'CodeBlock',
             fontName=font_name,
-            fontSize=8,
-            leading=10,
+            **self.pdf_type('code', code_base),
             backColor=colors.HexColor('#f8f8f8'),
             leftIndent=6,
             rightIndent=6,
@@ -2280,7 +2439,8 @@ class ExportHandlerBase(APIHandler):
             if trPr.find(qn('w:cantSplit')) is None:
                 trPr.insert(0, OxmlElement('w:cantSplit'))
 
-    def fit_docx_table_to_page(self, table, available_twips: int) -> None:
+    def fit_docx_table_to_page(self, table, available_twips: int,
+                               base_pt: float = None) -> None:
         """Pin an over-wide table to the page with proportional columns.
 
         Word's default autofit layout widens a table past the right margin when
@@ -2296,9 +2456,11 @@ class ExportHandlerBase(APIHandler):
         if ncols == 0:
             return
 
-        # Nominal width of one character of 11pt Calibri body text - a stand-in
-        # for the text measurement only Word itself can make.
-        char_twips = 120
+        # Nominal width of one character of Calibri body text at the document's
+        # base size - a stand-in for the measurement only Word itself can make.
+        # 120 twips is the figure for the template's 11pt.
+        base_pt = self.DOCX_TEMPLATE_BASE_PT if base_pt is None else base_pt
+        char_twips = 120 * base_pt / self.DOCX_TEMPLATE_BASE_PT
         cell_margin_twips = self.DOCX_CELL_MARGIN_TWIPS
 
         # Row 0 is only bold when the table actually has a header. A borderless
@@ -2359,23 +2521,12 @@ class ExportHandlerBase(APIHandler):
         # position; appending the element by hand puts it out of sequence.
         table.autofit = False
 
-    #: `nl2br` turns every newline into a break, including the one that
-    #: follows a break the author wrote by hand. A line ended with `<br>` -
-    #: the idiom for a question above its answer - therefore renders with a
-    #: blank line after it, and the gap inside the pair matches the gap
-    #: between pairs, so the grouping is lost. Drop the generated tag when a
-    #: hand-written one already sits in front of it: the author asked for one
-    #: break and gets one. The generated tag is always `<br />` immediately
-    #: before the newline it replaced, and `nl2br` does not run inside a raw
-    #: HTML block, a table cell or a code block, so nothing the author wrote
-    #: in those places can match. An explicit `<br><br>` still keeps both.
-    DOUBLED_LINE_BREAK_RE = re.compile(r'(<br\s*/?>)<br />\n')
-
     def markdown_to_html(self, content: str, title: str = 'Exported Document',
                          compact: bool = False, math_support: bool = False,
                          theme: str = 'light',
                          dark_background: str = '#111111',
-                         light_background: str = '#ffffff') -> str:
+                         light_background: str = '#ffffff',
+                         base_pt: float = None) -> str:
         """Convert markdown to standalone HTML.
 
         Args:
@@ -2386,14 +2537,25 @@ class ExportHandlerBase(APIHandler):
             theme: 'system' (auto-detect via prefers-color-scheme), 'light', or 'dark'
             dark_background: Background color for dark theme (hex)
             light_background: Background color for light theme (hex)
+            base_pt: Base body text size in points; every other size in the
+                stylesheet is expressed in `em`, so this scales the document
         """
+        base_pt = self.DEFAULT_FONT_SIZE_PT if base_pt is None else base_pt
         import markdown
 
-        md = markdown.Markdown(
-            extensions=['tables', 'fenced_code', 'codehilite', 'toc', 'nl2br'],
-            tab_length=2  # Support 2-space nested lists (GitHub/CommonMark convention)
-        )
-        body = self.DOUBLED_LINE_BREAK_RE.sub(r'\1\n', md.convert(content))
+        # tab_length=2 supports 2-space nested lists (GitHub/CommonMark)
+        base = ['tables', 'fenced_code', 'codehilite', 'toc']
+        try:
+            md = markdown.Markdown(
+                extensions=base + [manual_break_aware_nl2br()], tab_length=2)
+        except Exception:
+            # The manual-break rule reads Markdown's internals to tell an
+            # authored break from a generated one, and the wiring that touches
+            # them runs HERE, inside the constructor - not in the factory
+            # above. It is a cosmetic refinement either way, so any failure
+            # falls back: one blank line too many beats a 500 on every export.
+            md = markdown.Markdown(extensions=base + ['nl2br'], tab_length=2)
+        body = md.convert(content)
 
         if compact:
             # PDF-optimized stylesheet with tighter spacing
@@ -2404,7 +2566,7 @@ class ExportHandlerBase(APIHandler):
         }
         body {
             font-family: Calibri, "Noto Color Emoji", sans-serif;
-            font-size: 11pt;
+            font-size: ''' + f'{base_pt:g}' + '''pt;
             line-height: 1.4;
             margin: 0;
             padding: 0;
@@ -2548,8 +2710,9 @@ class ExportHandlerBase(APIHandler):
             style = f'''
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            font-size: {base_pt:g}pt;
             line-height: 1.6;
-            max-width: 800px;
+            max-width: 50em;
             margin: 0 auto;
             padding: 20px;
             color: {text_color};
@@ -2835,7 +2998,8 @@ class ExportHandlerBase(APIHandler):
             except Exception:
                 pass
 
-    def convert_docx_to_pdf(self, docx_bytes: bytes, code_blocks: list = None) -> bytes:
+    def convert_docx_to_pdf(self, docx_bytes: bytes, code_blocks: list = None,
+                            base_pt: float = None) -> bytes:
         """
         Convert DOCX document to PDF using python-docx + reportlab.
 
@@ -2877,14 +3041,16 @@ class ExportHandlerBase(APIHandler):
         # Get default styles
         styles = getSampleStyleSheet()
 
-        # Create custom styles (sizes matched to DOCX rendering)
+        # Every size below is a proportion of the base body size, so the
+        # document scales as one and matches what the DOCX renders at
+        base_pt = self.DEFAULT_FONT_SIZE_PT if base_pt is None else base_pt
+        body_type = self.pdf_type('body', base_pt)
         normal_style = ParagraphStyle(
             'CustomNormal',
             parent=styles['Normal'],
             fontName=font_name,
-            fontSize=10,
-            leading=12,
-            spaceAfter=6
+            **body_type,
+            spaceAfter=0.6 * base_pt
         )
 
         # Level-specific list styles for bullets
@@ -2892,9 +3058,8 @@ class ExportHandlerBase(APIHandler):
             'CustomListBullet',
             parent=styles['Normal'],
             fontName=font_name,
-            fontSize=10,
-            leading=12,
-            spaceAfter=3,
+            **body_type,
+            spaceAfter=0.3 * base_pt,
             leftIndent=18,
             bulletIndent=6
         )
@@ -2903,9 +3068,8 @@ class ExportHandlerBase(APIHandler):
             'CustomListBullet2',
             parent=styles['Normal'],
             fontName=font_name,
-            fontSize=10,
-            leading=12,
-            spaceAfter=3,
+            **body_type,
+            spaceAfter=0.3 * base_pt,
             leftIndent=36,
             bulletIndent=24
         )
@@ -2915,9 +3079,8 @@ class ExportHandlerBase(APIHandler):
             'CustomListNumber',
             parent=styles['Normal'],
             fontName=font_name,
-            fontSize=10,
-            leading=12,
-            spaceAfter=3,
+            **body_type,
+            spaceAfter=0.3 * base_pt,
             leftIndent=18,
             bulletIndent=6
         )
@@ -2926,9 +3089,8 @@ class ExportHandlerBase(APIHandler):
             'CustomListNumber2',
             parent=styles['Normal'],
             fontName=font_name,
-            fontSize=10,
-            leading=12,
-            spaceAfter=3,
+            **body_type,
+            spaceAfter=0.3 * base_pt,
             leftIndent=36,
             bulletIndent=24
         )
@@ -2937,10 +3099,9 @@ class ExportHandlerBase(APIHandler):
             'CustomHeading1',
             parent=styles['Heading1'],
             fontName=font_name_bold,
-            fontSize=14,
-            leading=18,
-            spaceAfter=6,
-            spaceBefore=10,
+            **self.pdf_type('heading1', base_pt),
+            spaceAfter=0.6 * base_pt,
+            spaceBefore=1.0 * base_pt,
             textColor=colors.HexColor('#365F91')
         )
 
@@ -2948,10 +3109,9 @@ class ExportHandlerBase(APIHandler):
             'CustomHeading2',
             parent=styles['Heading2'],
             fontName=font_name_bold,
-            fontSize=12,
-            leading=15,
-            spaceAfter=4,
-            spaceBefore=8,
+            **self.pdf_type('heading2', base_pt),
+            spaceAfter=0.4 * base_pt,
+            spaceBefore=0.8 * base_pt,
             textColor=colors.HexColor('#4F81BD')
         )
 
@@ -2959,10 +3119,9 @@ class ExportHandlerBase(APIHandler):
             'CustomHeading3',
             parent=styles['Heading3'],
             fontName=font_name_bold,
-            fontSize=11,
-            leading=14,
-            spaceAfter=3,
-            spaceBefore=6,
+            **self.pdf_type('heading3', base_pt),
+            spaceAfter=0.3 * base_pt,
+            spaceBefore=0.6 * base_pt,
             textColor=colors.HexColor('#4F81BD')
         )
 
@@ -2980,8 +3139,7 @@ class ExportHandlerBase(APIHandler):
             'CustomTableCell',
             parent=styles['Normal'],
             fontName=font_name,
-            fontSize=9,
-            leading=11
+            **self.pdf_type('table', base_pt)
         )
 
         table_header_style = ParagraphStyle(
@@ -3122,7 +3280,8 @@ class ExportHandlerBase(APIHandler):
                 idx = int(code_match.group(1))
                 if idx < len(code_blocks):
                     block = code_blocks[idx]
-                    return self.highlight_code_for_pdf(block['code'], block['lang'])
+                    return self.highlight_code_for_pdf(
+                        block['code'], block['lang'], base_pt)
                 return Paragraph("&nbsp;", normal_style)
 
             # Escape XML special characters for base text
@@ -3640,6 +3799,7 @@ class ExportPdfHandler(ExportHandlerBase):
             mermaid_diagrams = data.get('mermaidDiagrams', [])
             svg_pixel_width = data.get("svgPixelWidth", 1920)
             show_alert_labels = data.get('showAlertLabels', False)
+            base_pt = self.font_size_pt(data.get('exportFontSize'))
             math_pixel_width = data.get('mathPixelWidth', 800)
             # DOCX/PDF SVG + Mermaid rasterization theme. Defaults to light
             # (Word docs are usually printed). 'auto' is resolved by the
@@ -3669,7 +3829,8 @@ class ExportPdfHandler(ExportHandlerBase):
             # Extract code blocks for PDF rendering (before DOCX conversion)
             content, code_blocks = self.extract_code_blocks(content)
 
-            html = self.markdown_to_html(content, file_path.stem)
+            html = self.markdown_to_html(content, file_path.stem,
+                                         base_pt=base_pt)
 
             # Step 1: Create DOCX in memory (same logic as DOCX export)
             from htmldocx import HtmlToDocx
@@ -3737,7 +3898,8 @@ class ExportPdfHandler(ExportHandlerBase):
                 docx_bytes = docx_buffer.getvalue()
 
             # Step 2: Convert DOCX to PDF using reportlab (with code blocks)
-            pdf_content = self.convert_docx_to_pdf(docx_bytes, code_blocks)
+            pdf_content = self.convert_docx_to_pdf(docx_bytes, code_blocks,
+                                                   base_pt=base_pt)
 
             self.set_header('Content-Type', 'application/pdf')
             self.set_header('Content-Disposition',
@@ -3775,6 +3937,7 @@ class ExportDocxHandler(ExportHandlerBase):
             mermaid_diagrams = data.get('mermaidDiagrams', [])
             svg_pixel_width = data.get("svgPixelWidth", 1920)
             show_alert_labels = data.get('showAlertLabels', False)
+            base_pt = self.font_size_pt(data.get('exportFontSize'))
             # DOCX/PDF SVG + Mermaid rasterization theme. Defaults to light
             # (Word docs are usually printed). 'auto' is resolved by the
             # frontend to a concrete light/dark before the request.
@@ -3803,7 +3966,8 @@ class ExportDocxHandler(ExportHandlerBase):
             content = self.embed_images_as_base64(content, file_path.parent)
             # Highlight code blocks with inline styles for DOCX
             content = self.highlight_code_blocks(content, use_inline_styles=True)
-            html = self.markdown_to_html(content, file_path.stem)
+            html = self.markdown_to_html(content, file_path.stem,
+                                         base_pt=base_pt)
 
             from htmldocx import HtmlToDocx
             from docx import Document
@@ -3872,11 +4036,12 @@ class ExportDocxHandler(ExportHandlerBase):
                                  - section.right_margin)
                 page_height = Emu(section.page_height - section.top_margin
                                   - section.bottom_margin)
+                self.apply_docx_font_size(document, base_pt)
                 for table in document.tables:
                     if table._tbl in alert_tables:
                         continue
                     self.style_docx_table(table)
-                    self.fit_docx_table_to_page(table, page_width.twips)
+                    self.fit_docx_table_to_page(table, page_width.twips, base_pt)
 
                 # Remove empty paragraphs at the beginning
                 while document.paragraphs and not document.paragraphs[0].text.strip():
@@ -4006,6 +4171,7 @@ class ExportHtmlHandler(ExportHandlerBase):
             relative_path = data.get('path')
             mermaid_diagrams = data.get('mermaidDiagrams', [])
             show_alert_labels = data.get('showAlertLabels', False)
+            base_pt = self.font_size_pt(data.get('exportFontSize'))
             html_theme = data.get('htmlTheme', 'light')
             dark_background = data.get('htmlDarkBackground', '#111111')
             light_background = data.get('htmlLightBackground', '#ffffff')
@@ -4031,7 +4197,8 @@ class ExportHtmlHandler(ExportHandlerBase):
                 content, file_path.stem, math_support=True,
                 theme=html_theme,
                 dark_background=dark_background,
-                light_background=light_background
+                light_background=light_background,
+                base_pt=base_pt
             )
 
             # Style GitHub alert boxes with colored borders and shading

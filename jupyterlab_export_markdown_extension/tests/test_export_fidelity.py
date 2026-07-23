@@ -3509,44 +3509,48 @@ class TestEmptyHeaderGrid:
     ):
         """The PDF twin of the DOCX bold-widening skew: `string_width` measures
         row 0 in the bold header face, so after the blank header is dropped the
-        first content row inflates its own column. Symmetric content must
-        produce a symmetric split, which shows as the second column's text
-        starting at the horizontal midpoint of the text frame."""
+        first content row inflates its own column.
+
+        Measured on the drawn grid rather than on text: the same string fills
+        the widest cell of each column, so a correct measurement puts the
+        column boundary exactly halfway across the table. Text extent would
+        depend on where the last line happens to wrap, and on the widths of
+        whichever glyphs the fixture used.
+        """
         import fitz
 
-        long_a = " ".join(["alpha"] * 16)
-        long_b = " ".join(["bravo"] * 16)
+        long_text = " ".join(["alpha"] * 16)
         (jp_root_dir / "pdf_headerless.md").write_text(
             "|  |  |\n"
             "| --- | --- |\n"
-            f"| {long_a} | short |\n"
-            f"| short | {long_b} |\n",
+            f"| {long_text} | short |\n"
+            f"| short | {long_text} |\n",
             encoding="utf-8")
         response = await jp_fetch(
             "jupyterlab-export-markdown-extension", "export/pdf",
             method="POST", body=json.dumps({"path": "pdf_headerless.md"}),
-            raise_error=False,
-        )
+            raise_error=False)
         assert response.code == 200
 
         pdf = fitz.open(stream=response.body, filetype="pdf")
         page = pdf[0]
-        words = page.get_text("words")
-        page_width = page.rect.width
+        verticals = sorted({
+            round(item[1].x, 1)
+            for drawing in page.get_drawings() for item in drawing["items"]
+            if item[0] == "l" and abs(item[1].x - item[2].x) < 0.1
+            and abs(item[1].y - item[2].y) > 2
+        })
         pdf.close()
-        alphas = [w for w in words if w[4] == "alpha"]
-        bravos = [w for w in words if w[4] == "bravo"]
-        assert alphas and bravos, "expected both columns' text in the PDF"
-        left = min(w[0] for w in alphas)          # left edge of column 0's text
-        right = min(w[0] for w in bravos)         # left edge of column 1's text
-        far = max(w[2] for w in bravos)           # right edge of column 1's text
-        # Two equal columns put column 1's left edge halfway across the table,
-        # so the split sits at the midpoint of the text's own span (the cell
-        # padding is a few points and cancels out on both ends)
-        split, half = right - left, (far - left) / 2
-        assert abs(split - half) < 8, (
-            f"column 0 took {split:.1f}pt of a {2 * half:.1f}pt span, not its "
-            f"{half:.1f}pt half - row 0 was measured in the bold header face"
+        assert len(verticals) == 3, (
+            f"expected a two-column grid (3 vertical rules), got {verticals}"
+        )
+        left, split, right = verticals
+        midpoint = (left + right) / 2
+        skew = abs(split - midpoint) / (right - left)
+        assert skew < 0.01, (
+            f"the column boundary sits at {split:.1f}pt against a "
+            f"{midpoint:.1f}pt midpoint ({skew:.1%} of the table) - row 0 was "
+            f"measured in the bold header face"
         )
 
     async def test_html_empty_header_row_is_dropped(
@@ -3637,6 +3641,11 @@ class TestEmptyHeaderGrid:
         )
 
 
+#: Every spelling of a break tag, so an assertion cannot miss `<BR>` or
+#: `<br clear="all">` - the spellings these tests exist to cover.
+BREAK_RE = re.compile(r'<br(?:\s[^>]*?)?/?>', re.IGNORECASE)
+
+
 class TestExplicitLineBreakNotDoubled:
     """DEF-10: a line ended with an explicit `<br>` - the idiom for a question
     above its answer - picked up a second break from the `nl2br` extension,
@@ -3666,8 +3675,10 @@ class TestExplicitLineBreakNotDoubled:
             f"{len(doubled)} doubled line break(s) survived - the author's "
             f"`<br>` picked up a second break from nl2br"
         )
-        assert "<br>\nNo. Passive" in html, (
-            "the author's own single break was lost"
+        para = html[html.find("<p><strong>Does the system"):]
+        para = para[:para.find("</p>")]
+        assert len(BREAK_RE.findall(para)) == 1, (
+            f"the author's own single break was lost: {para!r}"
         )
 
     async def test_docx_pair_holds_one_break(self, jp_fetch, jp_root_dir):
@@ -3733,15 +3744,16 @@ class TestExplicitLineBreakNotDoubled:
         assert r.code == 200
         html = r.body.decode("utf-8")
         body = html[html.find("<p>one"):html.find("</p>", html.find("<p>one"))]
-        assert len(re.findall(r'<br\s*/?>', body)) == 2, (
+        assert len(BREAK_RE.findall(body)) == 2, (
             f"an explicit blank line was collapsed: {body!r}"
         )
 
     async def test_break_in_a_table_cell_is_untouched(
             self, jp_fetch, jp_root_dir):
-        """nl2br never runs inside a table cell, so a caption-above-image
-        grid's `<br>` must survive - it is the only thing holding the caption
-        above its picture."""
+        """A markdown table cell cannot contain a newline, so nl2br has
+        nothing to convert there and never doubles a cell's break. The
+        caption-above-image grid depends on that break surviving - it is the
+        only thing holding the caption above its picture."""
         (jp_root_dir / "grid.md").write_text(
             "|  |  |\n|---|---|\n"
             "| **cap A**<br>text A | **cap B**<br>text B |\n",
@@ -3752,6 +3764,360 @@ class TestExplicitLineBreakNotDoubled:
             raise_error=False)
         assert r.code == 200
         html = r.body.decode("utf-8")
-        assert html.count("<br>") == 2, (
-            f"a table cell lost its line break: {html.count('<br>')} left of 2"
+        table = html[html.find("<table"):html.find("</table>")]
+        assert len(BREAK_RE.findall(table)) == 2, (
+            f"a table cell lost its line break: {table!r}"
+        )
+
+    async def test_raw_html_block_keeps_its_own_breaks(
+            self, jp_fetch, jp_root_dir):
+        """A raw HTML block's breaks are all the author's - `nl2br` never ran
+        inside it, so there is nothing there to collapse. Matching the final
+        HTML by shape cannot tell that, and ate one break of the alert-box
+        idiom this project documents."""
+        (jp_root_dir / "alert.md").write_text(
+            '<div class="alert alert-block alert-info">\n'
+            '<b>Tip:</b> first paragraph<br /><br />\n'
+            'second paragraph\n'
+            '</div>\n', encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "alert.md"}),
+            raise_error=False)
+        assert r.code == 200
+        html = r.body.decode("utf-8")
+        block = html[html.find("alert-block"):html.find("</div>",
+                                                        html.find("alert-block"))]
+        assert len(BREAK_RE.findall(block)) == 2, (
+            f"the author's blank line inside a raw HTML block was collapsed: "
+            f"{block!r}"
+        )
+
+    async def test_trailing_space_after_the_break_still_collapses(
+            self, jp_fetch, jp_root_dir):
+        """A trailing space after `<br>` is invisible in every editor, so the
+        fix must not depend on its absence - keying off the tag's position in
+        the final text made one stray space silently restore the defect."""
+        (jp_root_dir / "space.md").write_text(
+            "**Q?**<br> \nAnswer.\n", encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "space.md"}),
+            raise_error=False)
+        assert r.code == 200
+        html = r.body.decode("utf-8")
+        para = html[html.find("<p><strong>Q?"):]
+        para = para[:para.find("</p>")]
+        assert len(BREAK_RE.findall(para)) == 1, (
+            f"a trailing space defeated the collapse: {para!r}"
+        )
+
+    async def test_uppercase_and_attributed_breaks_are_recognised(
+            self, jp_fetch, jp_root_dir):
+        """`<BR>` and `<br clear="all">` are breaks the author wrote, and
+        pasted or legacy markup carries both. Recognition comes from the
+        stash, so spelling does not matter."""
+        (jp_root_dir / "spelling.md").write_text(
+            "**Upper?**<BR>\nAnswer one.\n\n"
+            '**Attr?**<br clear="all">\nAnswer two.\n', encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "spelling.md"}),
+            raise_error=False)
+        assert r.code == 200
+        html = r.body.decode("utf-8")
+        for marker in ("Upper?", "Attr?"):
+            para = html[html.find(f"<p><strong>{marker}"):]
+            para = para[:para.find("</p>")]
+            assert len(BREAK_RE.findall(para)) == 1, (
+                f"{marker} kept a doubled break: {para!r}"
+            )
+
+    async def test_break_on_its_own_line_gives_one_blank_line(
+            self, jp_fetch, jp_root_dir):
+        """A `<br>` alone on a line is the author adding a blank line between
+        two lines of text: the newline before it and the tag itself are two
+        breaks, and the newline after it is the generated one that goes. Pinned
+        because it is a rendering change, not an accident."""
+        (jp_root_dir / "ownline.md").write_text(
+            "Text\n<br>\nMore\n", encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "ownline.md"}),
+            raise_error=False)
+        assert r.code == 200
+        html = r.body.decode("utf-8")
+        para = html[html.find("<p>Text"):]
+        para = para[:para.find("</p>")]
+        assert len(BREAK_RE.findall(para)) == 2, (
+            f"expected exactly one blank line between the two lines: {para!r}"
+        )
+
+    async def test_manual_break_plus_hard_break_keeps_both(
+            self, jp_fetch, jp_root_dir):
+        """Two trailing spaces are Markdown's own hard-break idiom, so `<br>`
+        followed by them is the author asking for two breaks, not a duplicate.
+        Only a break the renderer generated on its own may be dropped - and at
+        the inline stage the two-space break has already been claimed by the
+        `linebreak` pattern, so it is never in reach."""
+        (jp_root_dir / "hard.md").write_text(
+            "**Q?**<br>  \nAnswer.\n", encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "hard.md"}),
+            raise_error=False)
+        assert r.code == 200
+        html = r.body.decode("utf-8")
+        para = html[html.find("<p><strong>Q?"):]
+        para = para[:para.find("</p>")]
+        assert len(BREAK_RE.findall(para)) == 2, (
+            f"an authored break was deleted: {para!r}"
+        )
+
+    async def test_custom_element_is_not_treated_as_a_break(
+            self, jp_fetch, jp_root_dir):
+        """`<br-spacer>` is a legal custom element, not a break. Matching it as
+        one drops the real break and runs the two lines together."""
+        (jp_root_dir / "custom.md").write_text(
+            "line one<br-spacer>\nline two\n", encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "custom.md"}),
+            raise_error=False)
+        assert r.code == 200
+        html = r.body.decode("utf-8")
+        para = html[html.find("<p>line one"):]
+        para = para[:para.find("</p>")]
+        assert len(BREAK_RE.findall(para)) == 1, (
+            f"a custom element swallowed the line break: {para!r}"
+        )
+
+    async def test_non_breaking_space_after_the_break_still_collapses(
+            self, jp_fetch, jp_root_dir):
+        """Text pasted from Word or a web page routinely ends a line with a
+        non-breaking space; it must not decide how the document renders."""
+        (jp_root_dir / "nbsp.md").write_text(
+            "**Q?**<br>\u00a0\nAnswer.\n", encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "nbsp.md"}),
+            raise_error=False)
+        assert r.code == 200
+        html = r.body.decode("utf-8")
+        para = html[html.find("<p><strong>Q?"):]
+        para = para[:para.find("</p>")]
+        assert len(BREAK_RE.findall(para)) == 1, (
+            f"a non-breaking space defeated the collapse: {para!r}"
+        )
+
+    async def test_export_survives_a_broken_manual_break_rule(
+            self, jp_fetch, jp_root_dir, monkeypatch):
+        """The rule reads Markdown's internals, so it must never be able to
+        fail an export. The coupling executes inside the converter's
+        constructor, not in the factory, so that is where the guard has to be:
+        a rule that builds fine and then fails to wire itself must fall back to
+        plain nl2br, not return a 500."""
+        from jupyterlab_export_markdown_extension import routes
+        from markdown.extensions import Extension
+
+        class Broken(Extension):
+            def extendMarkdown(self, md):
+                raise TypeError("simulated python-markdown API change")
+
+        monkeypatch.setattr(routes, "manual_break_aware_nl2br",
+                            lambda: Broken())
+        (jp_root_dir / "broken.md").write_text(
+            "**Q?**<br>\nAnswer.\n", encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "broken.md"}),
+            raise_error=False)
+        assert r.code == 200, (
+            f"a broken cosmetic rule took the whole export down ({r.code})"
+        )
+        html = r.body.decode("utf-8")
+        para = html[html.find("<p><strong>Q?"):]
+        para = para[:para.find("</p>")]
+        assert len(BREAK_RE.findall(para)) == 2, (
+            f"expected the plain nl2br fallback (two breaks), got {para!r}"
+        )
+
+    async def test_a_break_named_in_a_comment_is_not_a_break(
+            self, jp_fetch, jp_root_dir):
+        """The stashed node must BE a break tag, not merely contain one - an
+        HTML comment mentioning `<br>` is not the author writing a break, and
+        treating it as one deletes a real one."""
+        (jp_root_dir / "comment.md").write_text(
+            "Q<!-- note about <br> -->\nAnswer.\n", encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "comment.md"}),
+            raise_error=False)
+        assert r.code == 200
+        html = r.body.decode("utf-8")
+        para = html[html.find("<p>Q<!--"):]
+        para = para[:para.find("</p>")]
+        # The comment's own text contains the characters `<br>`, so count is
+        # not the measure here - what matters is that the real break after the
+        # comment survived
+        assert re.search(r'-->\s*<br', para), (
+            f"a comment that merely mentions a break deleted a real one: {para!r}"
+        )
+
+    async def test_break_inside_emphasis_is_a_known_limitation(
+            self, jp_fetch, jp_root_dir):
+        """`**Q<br>**` puts the break inside the emphasis, so by the time the
+        newline is examined the trailing node is the emphasis element, not the
+        break, and the pair still renders with a blank line. Pinned so the
+        limitation is a recorded decision rather than an unnoticed hole."""
+        (jp_root_dir / "emph.md").write_text(
+            "**Q?<br>**\nAnswer.\n", encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "emph.md"}),
+            raise_error=False)
+        assert r.code == 200
+        html = r.body.decode("utf-8")
+        para = html[html.find("<p><strong>Q?"):]
+        para = para[:para.find("</p>")]
+        assert len(BREAK_RE.findall(para)) == 2, (
+            f"the known limitation changed behaviour: {para!r}"
+        )
+
+
+class TestExportFontSize:
+    """The `exportFontSize` setting picks a base body size - small 10pt,
+    medium 12pt (default), large 14pt - and every other size in every format
+    is a fixed proportion of it, so the whole document scales together."""
+
+    DOC = "# Title\n\nBody paragraph text.\n\n## Section\n\nMore body text.\n"
+
+    async def _export(self, jp_fetch, jp_root_dir, fmt, size=None):
+        (jp_root_dir / "fs.md").write_text(self.DOC, encoding="utf-8")
+        body = {"path": "fs.md"}
+        if size is not None:
+            body["exportFontSize"] = size
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", f"export/{fmt}",
+            method="POST", body=json.dumps(body), raise_error=False)
+        assert r.code == 200, f"{fmt} export at size {size} returned {r.code}"
+        return r.body
+
+    @staticmethod
+    def _pdf_sizes(pdf_bytes):
+        """Rendered point size of the body paragraph and of the H1."""
+        import fitz
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        sizes = {}
+        for block in doc[0].get_text("dict")["blocks"]:
+            for line in block.get("lines", []):
+                for span in line["spans"]:
+                    text = span["text"].strip()
+                    if text.startswith("Body paragraph"):
+                        sizes["body"] = round(span["size"], 1)
+                    elif text == "Title":
+                        sizes["h1"] = round(span["size"], 1)
+        doc.close()
+        return sizes
+
+    async def test_pdf_base_size_follows_the_setting(self, jp_fetch, jp_root_dir):
+        for size, expected in (("small", 10.0), ("medium", 12.0), ("large", 14.0)):
+            sizes = self._pdf_sizes(
+                await self._export(jp_fetch, jp_root_dir, "pdf", size))
+            assert sizes.get("body") == expected, (
+                f"{size} rendered body text at {sizes.get('body')}pt, "
+                f"expected {expected}pt"
+            )
+
+    async def test_pdf_headings_stay_proportional(self, jp_fetch, jp_root_dir):
+        """A heading is a multiple of the body size, not a fixed number - the
+        point of a base size is that the document scales as one."""
+        ratios = []
+        for size in ("small", "medium", "large"):
+            sizes = self._pdf_sizes(
+                await self._export(jp_fetch, jp_root_dir, "pdf", size))
+            ratios.append(sizes["h1"] / sizes["body"])
+        assert max(ratios) - min(ratios) < 0.01, (
+            f"heading-to-body ratio drifted across sizes: {ratios}"
+        )
+        assert ratios[0] > 1.2, f"headings are not larger than body: {ratios}"
+
+    async def test_docx_base_size_follows_the_setting(self, jp_fetch, jp_root_dir):
+        from docx import Document
+
+        for size, expected in (("small", 10.0), ("medium", 12.0), ("large", 14.0)):
+            doc = Document(io.BytesIO(
+                await self._export(jp_fetch, jp_root_dir, "docx", size)))
+            normal = doc.styles["Normal"].font.size
+            assert normal is not None and normal.pt == expected, (
+                f"{size} gave DOCX body {normal and normal.pt}pt, "
+                f"expected {expected}pt"
+            )
+            heading = doc.styles["Heading 1"].font.size
+            assert heading is not None and heading.pt > expected, (
+                f"{size} left Heading 1 at {heading and heading.pt}pt, "
+                f"not above the {expected}pt body"
+            )
+
+    async def test_html_base_size_follows_the_setting(self, jp_fetch, jp_root_dir):
+        for size, expected in (("small", "10pt"), ("medium", "12pt"),
+                               ("large", "14pt")):
+            html = (await self._export(
+                jp_fetch, jp_root_dir, "html", size)).decode("utf-8")
+            body_rule = html[html.find("body {"):]
+            body_rule = body_rule[:body_rule.find("}")]
+            assert f"font-size: {expected}" in body_rule, (
+                f"{size} did not set the HTML body size to {expected}: "
+                f"{body_rule!r}"
+            )
+
+    async def test_default_is_medium_in_every_format(self, jp_fetch, jp_root_dir):
+        """An export with no setting - an older client, or a fresh install -
+        renders at the documented default rather than at whatever each format
+        used to hardcode."""
+        from docx import Document
+
+        assert self._pdf_sizes(
+            await self._export(jp_fetch, jp_root_dir, "pdf"))["body"] == 12.0
+        doc = Document(io.BytesIO(await self._export(jp_fetch, jp_root_dir, "docx")))
+        assert doc.styles["Normal"].font.size.pt == 12.0
+        html = (await self._export(jp_fetch, jp_root_dir, "html")).decode("utf-8")
+        assert "font-size: 12pt" in html
+
+    async def test_a_malformed_setting_cannot_fail_an_export(
+            self, jp_fetch, jp_root_dir):
+        """The size is a cosmetic choice, so nothing a client can put in the
+        field may take the export down - including values that are not even
+        the right type, which a plain dict lookup raises on."""
+        for value in ([], {}, True, "enormous", None, 0, 10**6):
+            (jp_root_dir / "fs.md").write_text(self.DOC, encoding="utf-8")
+            r = await jp_fetch(
+                "jupyterlab-export-markdown-extension", "export/html",
+                method="POST",
+                body=json.dumps({"path": "fs.md", "exportFontSize": value}),
+                raise_error=False)
+            assert r.code == 200, (
+                f"exportFontSize={value!r} returned {r.code} instead of "
+                f"falling back"
+            )
+
+    async def test_html_measure_scales_with_the_body(
+            self, jp_fetch, jp_root_dir):
+        """Line length is what governs readability, so the column width has to
+        be a multiple of the body size too - a fixed pixel width would give
+        `large` a third fewer characters per line than `small`."""
+        widths = {}
+        for size in ("small", "medium", "large"):
+            html = (await self._export(
+                jp_fetch, jp_root_dir, "html", size)).decode("utf-8")
+            body_rule = html[html.find("body {"):]
+            body_rule = body_rule[:body_rule.find("}")]
+            match = re.search(r'max-width:\s*([\d.]+)(em|px)', body_rule)
+            assert match, f"no max-width in the body rule: {body_rule!r}"
+            widths[size] = (float(match.group(1)), match.group(2))
+        assert {unit for _, unit in widths.values()} == {"em"}, (
+            f"the column width is not relative to the body size: {widths}"
+        )
+        assert len({value for value, _ in widths.values()}) == 1, (
+            f"the em measure should be one constant across sizes: {widths}"
         )

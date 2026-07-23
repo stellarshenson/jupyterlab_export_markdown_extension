@@ -2,6 +2,18 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.20
+
+### Added
+
+- Export font size setting - `small` (10pt), `medium` (12pt, default) or `large` (14pt) sets the base body text size for PDF, DOCX and HTML; headings, tables, code and captions are fixed proportions of it, so the whole document scales together. This also aligns the PDF and DOCX, which previously rendered the same document at 10pt and 11pt respectively
+
+### Fixed
+
+- An explicit `<br>` written at the end of a line no longer loses a break the author asked for: a `<br>` inside a raw HTML block keeps its own breaks, `<BR>` and `<br clear="all">` are recognised, a trailing space or non-breaking space no longer defeats the rule, and `<br>` followed by Markdown's two-space hard break correctly renders both. A `<br>` written inside inline markup (`**Q<br>**`) is still not detected
+- A failure of the line-break rule can no longer fail an export - it falls back to the previous behaviour instead of returning an error
+- A malformed export font size no longer fails the export; an out-of-range value is clamped to a readable size
+
 ## 1.6.19
 
 - Fix a line ended with an explicit `<br>` rendering as two line breaks in DOCX, PDF and HTML - a question written above its answer came out with a blank line between them, so the pair sat further apart than it sat from the next pair and the grouping read backwards; a deliberate `<br><br>` still renders its blank line, and a `<br>` inside a table cell or raw HTML block is unaffected
