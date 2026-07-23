@@ -2,6 +2,16 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.18
+
+- Fix mermaid diagrams rasterizing mostly as whitespace - the inline `max-width` mermaid stamps on its SVG capped the diagram at its natural size inside a much larger canvas; diagrams now fill their image (97-99% of the width on a reference document, against 43% at worst before)
+- Fix an empty header row still being rendered as a blank first row in DOCX, PDF and HTML - a borderless image or layout grid is written in Markdown with an empty header, which Markdown itself renders as nothing, so the row is now dropped rather than merely unstyled
+- Fix a table row being torn across a page break when it would fit the next page whole - a caption and its image now stay together, in PDF (conditional intra-row splitting) and in Word (rows marked unbreakable); a row genuinely taller than a page still splits
+- Fix a header row holding only pictures being deleted as "empty" in HTML export, losing the images of an image-on-top / caption-below grid that DOCX and PDF kept
+- Fix a picture-only first row being banded and repeated as a table header in Word while PDF treated it as ordinary content
+- Fix column widths in a headerless grid being skewed by the bold-header width allowance, which no longer applies once there is no header
+- Fix a very tall, narrow diagram failing to rasterize and vanishing from the export - it is now scaled down to the renderer's raster limit with its aspect ratio intact
+
 ## 1.6.17
 
 - Fix task-list checkboxes exporting as literal `[x]` / `[ ]` text - `- [x]` and `- [ ]` now render as checkbox glyphs (checked and empty) in HTML, DOCX and PDF

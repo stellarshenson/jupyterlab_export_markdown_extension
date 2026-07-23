@@ -1518,6 +1518,53 @@ class TestTableImageScaling:
         doc.close()
         assert n_images >= 1, "near-full-page header image was dropped"
 
+    async def test_pdf_row_that_fits_a_page_is_not_split(self, jp_fetch, jp_root_dir):
+        """DEF-9: a row that fits on a page must move to the next page whole,
+        not be torn at the page boundary. A cell holding a caption and its image
+        otherwise strands the caption on one page and the image on the next,
+        even though the whole row would fit on the following page."""
+        from PIL import Image as PILImage
+        import fitz
+
+        images_dir = jp_root_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        # Sized so the caption+image row comfortably fits one page (a row that
+        # genuinely exceeds a page must still split - that is not this case).
+        PILImage.new("RGB", (900, 600), color=(200, 80, 40)).save(
+            images_dir / "shot.png"
+        )
+        # Tuned so the caption+image row does not fit the space left on page 1
+        # but fits page 2 whole - the case an unconditional splitInRow tears.
+        filler = ("Filler sentence that wraps across the column to consume "
+                  "most of the first page. " * 60)
+        (jp_root_dir / "split.md").write_text(
+            "# Split\n\n"
+            "| Col |\n|---|\n"
+            f"| {filler} |\n"
+            '| **CAPTIONX**<br><img src="images/shot.png" alt="s"> |\n',
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "split.md"}), raise_error=False,
+        )
+        assert response.code == 200
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        n_pages = doc.page_count
+        cap_pages = [i for i, pg in enumerate(doc) if "CAPTIONX" in pg.get_text()]
+        img_pages = [i for i, pg in enumerate(doc) if pg.get_images()]
+        doc.close()
+        assert n_pages >= 2, (
+            f"test premise broken: content did not span pages ({n_pages})"
+        )
+        assert len(cap_pages) == 1, f"caption found on pages {cap_pages}"
+        assert img_pages, "the cell image was dropped"
+        assert cap_pages[0] in img_pages, (
+            f"caption is on page {cap_pages[0]} but its image is on page(s) "
+            f"{img_pages} - the row was split at the page boundary instead of "
+            f"moving to the next page whole"
+        )
+
     async def test_pdf_image_only_grid_columns_size_to_images(self, jp_fetch, jp_root_dir):
         """An image-only grid (empty header, no captions - the borderless layout
         idiom the mockup docs use) earns no column width from text, so without an
@@ -2885,6 +2932,37 @@ class TestBlockquotePdfCallout:
             "blockquote text is not indented relative to body text"
         )
 
+    async def test_pdf_callout_that_fits_a_page_is_not_split(self, jp_fetch, jp_root_dir):
+        """DEF-9 applies to callouts too: a blockquote/alert box that fits a
+        page must move whole rather than tear mid-box at the page boundary."""
+        import fitz
+
+        # Tuned so the quote box does not fit the space left on the page it
+        # would start on, but fits the next page whole - the case an
+        # unconditional splitInRow tears mid-box.
+        filler = "Filler paragraph line to push the quote toward the page end. "
+        quote = " ".join(
+            f"QW{i} lorem ipsum dolor sit amet consectetur" for i in range(40)
+        )
+        (jp_root_dir / "cq.md").write_text(
+            "# Q\n\n" + (filler * 175) + "\n\n> " + quote + "\n",
+            encoding="utf-8",
+        )
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "cq.md"}), raise_error=False,
+        )
+        assert response.code == 200
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        first = [i for i, pg in enumerate(doc) if "QW0 " in pg.get_text()]
+        last = [i for i, pg in enumerate(doc) if "QW39 " in pg.get_text()]
+        doc.close()
+        assert first and last, "quote text missing from the PDF"
+        assert first[0] == last[0], (
+            f"the quote box was torn across pages: starts on page {first[0]}, "
+            f"ends on page {last[0]} - a callout that fits a page must move whole"
+        )
+
     async def test_pdf_multi_paragraph_quote_is_one_callout(self, jp_fetch, jp_root_dir):
         """Consecutive blockquote paragraphs render as a single shaded box with
         one continuous bar, not a stack of separate boxes with gaps."""
@@ -3107,6 +3185,116 @@ class TestMermaidViewBoxCrop:
             f"viewBox origin was dropped, shifting the drawing off-canvas"
         )
 
+    async def test_extreme_aspect_diagram_stays_within_the_raster_limit(
+            self, monkeypatch):
+        """A long single-column flowchart is many times taller than it is wide,
+        and at the configured export width its raster runs past Chromium's
+        ~16384px viewport and texture caps - the screenshot throws and the
+        diagram is dropped from the export with no error surfaced. It must be
+        scaled down instead, aspect intact.
+
+        The cap is patched down so the test exercises the clamp without
+        rendering a 16000px canvas."""
+        from jupyterlab_export_markdown_extension.routes import (
+            PlaywrightSvgRenderer,
+        )
+        from PIL import Image as PILImage
+
+        monkeypatch.setattr(PlaywrightSvgRenderer, "MAX_RASTER_PX", 1000)
+        # A 60x1500 column inside a square viewBox: cropped (fill_h 0.94 but
+        # fill_w 0.04), it rasterizes ~25:1 - 400px wide would be 10000px tall.
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1600" '
+            'width="100%"><rect x="20" y="50" width="60" height="1500" '
+            'fill="black"/></svg>'
+        ).encode("utf-8")
+
+        async with PlaywrightSvgRenderer(color_scheme="light") as renderer:
+            png = await renderer.render(svg, width=400)
+
+        img = PILImage.open(io.BytesIO(png))
+        w, h = img.size
+        assert max(w, h) <= 1000, (
+            f"raster came back {w}x{h}, past the {1000}px cap - Chromium "
+            f"would refuse it and the diagram would vanish from the export"
+        )
+        assert img.convert("RGBA").getbbox() is not None, (
+            "the clamped raster is blank"
+        )
+        # The clamp must scale, not crop: the drawn column keeps its aspect
+        assert h > w * 5, (
+            f"clamped raster is {w}x{h} - the extreme aspect was not preserved"
+        )
+
+
+#: A mermaid-shaped SVG root: mermaid stamps `width="100%"` plus an inline
+#: `max-width: <natural>px` and a viewBox tight to the drawing. The max-width
+#: caps the element, so a rasterizer that only sets `width` paints the diagram
+#: at natural size inside the target canvas and the rest becomes whitespace.
+MERMAID_LIKE_SVG = (
+    '<svg id="m0" width="100%" xmlns="http://www.w3.org/2000/svg" '
+    'class="flowchart" style="max-width: 800px;" viewBox="0 0 800 70">'
+    '<rect x="10" y="10" width="780" height="50" fill="#0284c7"/>'
+    '</svg>'
+)
+
+
+def _ink_bbox(img):
+    """Bounding box of real ink, trimming both transparent and white margin."""
+    from PIL import Image as PILImage
+    rgba = img.convert("RGBA")
+    bbox = rgba.getbbox()  # trims fully transparent margin
+    if bbox is not None and (bbox[2] - bbox[0]) < rgba.size[0]:
+        return bbox
+    # Opaque (white-matted) export: trim near-white instead
+    flat = PILImage.new("RGB", rgba.size, (255, 255, 255))
+    flat.paste(rgba, mask=rgba.split()[-1])
+    gray = flat.convert("L")
+    mask = gray.point(lambda p: 255 if p < 245 else 0)
+    return mask.getbbox()
+
+
+class TestMermaidDocxNoWhitespace:
+    """DEF-7 (regression): a mermaid diagram embedded in the DOCX must fill its
+    image rather than sit in whitespace. Deterministic check - pull the image
+    back out of the .docx, trim the blank margin, and measure what fraction of
+    the image the drawing actually occupies."""
+
+    async def test_docx_mermaid_image_is_not_mostly_whitespace(self, jp_fetch, jp_root_dir):
+        import base64
+        from PIL import Image as PILImage
+
+        (jp_root_dir / "mm.md").write_text(
+            "# M\n\n```mermaid\nflowchart LR\n    A --> B\n```\n", encoding="utf-8"
+        )
+        data_uri = ("data:image/svg+xml;base64,"
+                    + base64.b64encode(MERMAID_LIKE_SVG.encode()).decode())
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST",
+            body=json.dumps({"path": "mm.md",
+                             "mermaidDiagrams": [{"index": 0, "svg": data_uri}]}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        with zipfile.ZipFile(io.BytesIO(response.body)) as z:
+            media = [n for n in z.namelist() if n.startswith("word/media/")]
+            assert media, "mermaid diagram was not embedded in the DOCX"
+            blobs = [z.read(n) for n in media]
+
+        widest = max((PILImage.open(io.BytesIO(b)) for b in blobs),
+                     key=lambda im: im.size[0])
+        w, h = widest.size
+        bbox = _ink_bbox(widest)
+        assert bbox is not None, "embedded mermaid image is blank"
+        ink_w = bbox[2] - bbox[0]
+        assert ink_w / w >= 0.85, (
+            f"mermaid diagram fills only {100 * ink_w / w:.0f}% of its image "
+            f"width ({ink_w}px of {w}px) - the rest is whitespace; mermaid's "
+            f"inline max-width caps the element so the raster width is ignored"
+        )
+
 
 TEST_MARKDOWN_EMPTY_HEADER_GRID = """# Grid
 
@@ -3125,11 +3313,12 @@ def test_empty_header_grid_file(jp_root_dir):
 
 
 class TestEmptyHeaderGrid:
-    """DEF-5: a Markdown grid written with an empty header row (`|  |  |`) must
-    not treat that row as a repeating, styled header - it would detach a blank
-    header bar from its rows across a page break."""
+    """DEF-5 / DEF-8: a Markdown grid written with an empty header row
+    (`|  |  |`) renders nothing for that row in markdown, so the export must
+    drop it outright rather than emit a blank bordered row - and must not
+    promote the body row behind it into a header in its place."""
 
-    async def test_docx_empty_header_not_marked_repeating(
+    async def test_docx_empty_header_row_is_dropped(
         self, jp_fetch, test_empty_header_grid_file
     ):
         from docx import Document
@@ -3144,17 +3333,252 @@ class TestEmptyHeaderGrid:
         doc = Document(io.BytesIO(response.body))
         assert doc.tables, "expected a table in the export"
         table = doc.tables[0]
-        assert not any(c.text.strip() for c in table.rows[0].cells), (
-            "fixture's first row should be empty"
+        # The fixture is an empty header plus two content rows; the blank
+        # header must be gone, leaving only the content rows.
+        assert len(table.rows) == 2, (
+            f"expected the empty header row to be dropped (2 content rows), "
+            f"got {len(table.rows)} rows"
+        )
+        assert [c.text.strip() for c in table.rows[0].cells] == ["cell one", "cell two"], (
+            "the first surviving row should be the first content row"
         )
         trPr = table.rows[0]._tr.find(qn("w:trPr"))
         has_header = trPr is not None and trPr.find(qn("w:tblHeader")) is not None
         assert not has_header, (
-            "empty header row must not be marked as a repeating header"
+            "the content row must not be promoted to a repeating header"
         )
         tblLook = table._tbl.tblPr.find(qn("w:tblLook"))
         assert tblLook is not None and tblLook.get(qn("w:firstRow")) == "0", (
-            "empty header row must not carry first-row header emphasis"
+            "a headerless grid must not carry first-row header emphasis"
+        )
+
+    async def test_headerless_grid_columns_are_not_skewed_by_bold_widening(
+        self, jp_fetch, jp_root_dir
+    ):
+        """Row 0 of a headerless grid is body text, so it must not be measured
+        as bold. The width estimate widens a header row by 8% for its bold
+        face; after the blank header is dropped that factor lands on ordinary
+        content and steals width from the column beside it.
+
+        The fixture is symmetric - each column's widest cell is the same
+        string, one in row 0 and one in row 1 - so a correct measurement gives
+        two equal columns and any 8% skew is unambiguous.
+        """
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        long_a = " ".join(["alpha"] * 16)
+        long_b = " ".join(["bravo"] * 16)
+        (jp_root_dir / "test_headerless_widths.md").write_text(
+            "|  |  |\n"
+            "| --- | --- |\n"
+            f"| {long_a} | short |\n"
+            f"| short | {long_b} |\n",
+            encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST",
+            body=json.dumps({"path": "test_headerless_widths.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        doc = Document(io.BytesIO(response.body))
+        table = doc.tables[0]
+        assert len(table.rows) == 2, "the blank header row should be gone"
+        layout = table._tbl.tblPr.find(qn("w:tblLayout"))
+        assert layout is not None and layout.get(qn("w:type")) == "fixed", (
+            "the fixture must be wide enough to be fitted, or the widths "
+            "below are never written and the test proves nothing"
+        )
+
+        grid = table._tbl.find(qn("w:tblGrid"))
+        widths = [int(col.get(qn("w:w")))
+                  for col in grid.findall(qn("w:gridCol"))]
+        assert len(widths) == 2
+        skew = abs(widths[0] - widths[1]) / max(widths)
+        assert skew < 0.01, (
+            f"symmetric columns came back skewed by {skew:.1%} "
+            f"({widths}) - row 0 was measured as a bold header"
+        )
+
+    async def test_image_only_header_row_is_kept_with_its_images(
+        self, jp_fetch, jp_root_dir
+    ):
+        """A header row holding pictures and no text is NOT empty. An
+        image-on-top/caption-below grid puts its images in the header row;
+        dropping it on a text-only predicate silently loses them."""
+        from docx import Document
+        from docx.oxml.ns import qn
+        from PIL import Image as PILImage
+        import fitz
+
+        images_dir = jp_root_dir / "images"
+        images_dir.mkdir(exist_ok=True)
+        # Distinct colours: identical bytes would be deduplicated into one
+        # PDF XObject and the count could not tell one image from two.
+        for n, colour in (("a", (20, 120, 90)), ("b", (200, 60, 140))):
+            PILImage.new("RGB", (300, 200), color=colour).save(
+                images_dir / f"{n}.png"
+            )
+        (jp_root_dir / "imghdr.md").write_text(
+            "# G\n\n"
+            "| ![A](images/a.png) | ![B](images/b.png) |\n"
+            "|---|---|\n"
+            "| caption A | caption B |\n",
+            encoding="utf-8",
+        )
+
+        rd = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "imghdr.md"}), raise_error=False,
+        )
+        assert rd.code == 200
+        doc = Document(io.BytesIO(rd.body))
+        table = doc.tables[0]
+        assert len(table.rows) == 2, (
+            f"the picture-bearing header row was deleted (got {len(table.rows)} rows)"
+        )
+        assert len(doc.inline_shapes) >= 2, (
+            f"header-row images were lost: {len(doc.inline_shapes)} embedded, expected 2"
+        )
+
+        rp = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "imghdr.md"}), raise_error=False,
+        )
+        assert rp.code == 200
+        pdf = fitz.open(stream=rp.body, filetype="pdf")
+        n_images = sum(len(pg.get_images()) for pg in pdf)
+        pdf.close()
+        assert n_images >= 2, (
+            f"header-row images were lost from the PDF: {n_images} rendered, expected 2"
+        )
+
+        # HTML strips tags to test emptiness, which erases an <img> along with
+        # them - the same row must survive there or one format of three loses
+        # the figures while the other two keep them.
+        rh = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "imghdr.md"}), raise_error=False,
+        )
+        assert rh.code == 200
+        html = rh.body.decode("utf-8")
+        assert html.count("<img") >= 2, (
+            f"header-row images were lost from the HTML: {html.count('<img')} "
+            f"embedded, expected 2"
+        )
+
+        # Kept, but it is a figure row, not a header: no banded emphasis and no
+        # repeat, matching what the PDF does with the same row
+        tblLook = table._tbl.tblPr.find(qn("w:tblLook"))
+        assert tblLook is not None and tblLook.get(qn("w:firstRow")) == "0", (
+            "a picture-only first row must not carry header emphasis"
+        )
+        trPr = table.rows[0]._tr.find(qn("w:trPr"))
+        assert trPr is None or trPr.find(qn("w:tblHeader")) is None, (
+            "a picture-only first row must not repeat as a header"
+        )
+
+    async def test_docx_rows_are_marked_unbreakable(
+        self, jp_fetch, test_empty_header_grid_file
+    ):
+        """DEF-9 in Word: reportlab's conditional `splitInRow` has no effect on
+        the .docx, where Word breaks a row wherever the page ends unless the row
+        carries `w:cantSplit`. Without it the same caption-and-image row the PDF
+        now keeps whole is still torn in Word."""
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "test_empty_header_grid.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        doc = Document(io.BytesIO(response.body))
+        table = doc.tables[0]
+        for index, row in enumerate(table.rows):
+            trPr = row._tr.find(qn("w:trPr"))
+            assert trPr is not None and trPr.find(qn("w:cantSplit")) is not None, (
+                f"row {index} may be torn across a page break in Word"
+            )
+
+    async def test_pdf_headerless_grid_columns_are_not_skewed(
+        self, jp_fetch, jp_root_dir
+    ):
+        """The PDF twin of the DOCX bold-widening skew: `string_width` measures
+        row 0 in the bold header face, so after the blank header is dropped the
+        first content row inflates its own column. Symmetric content must
+        produce a symmetric split, which shows as the second column's text
+        starting at the horizontal midpoint of the text frame."""
+        import fitz
+
+        long_a = " ".join(["alpha"] * 16)
+        long_b = " ".join(["bravo"] * 16)
+        (jp_root_dir / "pdf_headerless.md").write_text(
+            "|  |  |\n"
+            "| --- | --- |\n"
+            f"| {long_a} | short |\n"
+            f"| short | {long_b} |\n",
+            encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "pdf_headerless.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+
+        pdf = fitz.open(stream=response.body, filetype="pdf")
+        page = pdf[0]
+        words = page.get_text("words")
+        page_width = page.rect.width
+        pdf.close()
+        alphas = [w for w in words if w[4] == "alpha"]
+        bravos = [w for w in words if w[4] == "bravo"]
+        assert alphas and bravos, "expected both columns' text in the PDF"
+        left = min(w[0] for w in alphas)          # left edge of column 0's text
+        right = min(w[0] for w in bravos)         # left edge of column 1's text
+        far = max(w[2] for w in bravos)           # right edge of column 1's text
+        # Two equal columns put column 1's left edge halfway across the table,
+        # so the split sits at the midpoint of the text's own span (the cell
+        # padding is a few points and cancels out on both ends)
+        split, half = right - left, (far - left) / 2
+        assert abs(split - half) < 8, (
+            f"column 0 took {split:.1f}pt of a {2 * half:.1f}pt span, not its "
+            f"{half:.1f}pt half - row 0 was measured in the bold header face"
+        )
+
+    async def test_html_empty_header_row_is_dropped(
+        self, jp_fetch, test_empty_header_grid_file, jp_root_dir
+    ):
+        """Cross-format parity: HTML must drop the blank header row too, or the
+        same document renders with an extra blank banded strip in one format
+        and not the others. A real header must survive."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "test_empty_header_grid.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert "<thead>" not in html, (
+            "the empty header row must not be emitted in HTML either"
+        )
+        assert "cell one" in html, "grid content was lost with the header row"
+
+        # A real header still gets a thead
+        (jp_root_dir / "realhdr.md").write_text(
+            "# T\n\n| Name | Age |\n|---|---|\n| ann | 3 |\n", encoding="utf-8"
+        )
+        r2 = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "realhdr.md"}), raise_error=False,
+        )
+        assert r2.code == 200
+        html2 = r2.body.decode("utf-8")
+        assert "<thead>" in html2 and "Name" in html2, (
+            "a real header row must still render in HTML"
         )
 
     async def test_pdf_empty_header_grid_has_no_header_bar(

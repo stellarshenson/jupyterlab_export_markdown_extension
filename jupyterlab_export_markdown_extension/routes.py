@@ -15,6 +15,7 @@ import re
 import io
 import socket
 import tempfile
+from html import unescape
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -102,6 +103,10 @@ class PlaywrightSvgRenderer:
         self._browser = None
         self._pw = None
 
+    # Chromium refuses a viewport, and silently fails a texture, past roughly
+    # 16384px. Held a little under it for the compositor's own overhead.
+    MAX_RASTER_PX = 16000
+
     @staticmethod
     def _viewbox_dims(svg_text: str) -> tuple[float, float]:
         m = re.search(r'viewBox\s*=\s*"([^"]+)"', svg_text)
@@ -182,7 +187,15 @@ class PlaywrightSvgRenderer:
                 fill_w = bbox['width'] / declared_w if declared_w > 0 else 0.0
                 fill_h = bbox['height'] / declared_h if declared_h > 0 else 0.0
                 if min(fill_w, fill_h) < 0.8:  # >20% empty in some dimension
-                    pad = max(6.0, 0.04 * max(bbox['width'], bbox['height']))
+                    # One pad, taken from the SMALLER extent, on both axes. The
+                    # crop is scaled uniformly to the page, so an equal pad here
+                    # is an equal printed margin all round. Taking it from the
+                    # larger extent swamps the short axis - 4% of an 844pt width
+                    # is 34pt, which nearly doubles a 70pt-tall flowchart - and
+                    # padding each axis by its own extent instead trades that for
+                    # a diagram whose side gutters are five times its top ones,
+                    # and stretches an already extreme aspect ratio further.
+                    pad = max(6.0, 0.04 * min(bbox['width'], bbox['height']))
                     tighten = (bbox['x'] - pad, bbox['y'] - pad,
                                bbox['width'] + 2 * pad, bbox['height'] + 2 * pad)
 
@@ -193,6 +206,17 @@ class PlaywrightSvgRenderer:
             nominal_h = max(1, round(vb_h * nominal_w / vb_w)) if vb_w > 0 else nominal_w
             target_w = max(1, nominal_w * supersample)
             target_h = max(1, nominal_h * supersample)
+            # A long single-column flowchart is many times taller than it is
+            # wide, and at the configured export width its raster passes the
+            # ~16384px Chromium caps on a viewport and a texture. The screenshot
+            # then throws and the diagram is dropped from the export entirely,
+            # so scale the whole raster down instead - the aspect ratio and the
+            # page fit are unaffected, only the pixel density.
+            longest = max(target_w, target_h)
+            if longest > self.MAX_RASTER_PX:
+                shrink = self.MAX_RASTER_PX / longest
+                target_w = max(1, int(target_w * shrink))
+                target_h = max(1, int(target_h * shrink))
 
             # Rewrite the viewBox only when cropping; otherwise keep the SVG's
             # own (honouring a non-zero origin). Size the element either way.
@@ -202,6 +226,13 @@ class PlaywrightSvgRenderer:
                     if (!svg) return;
                     if (vb) svg.setAttribute('viewBox', vb);
                     svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+                    // Mermaid stamps an inline `max-width: <natural>px` on the
+                    // root. It caps the element at its natural size, so the
+                    // width set below is ignored and the diagram paints small
+                    // inside the target canvas - the rest rasterizing as
+                    // whitespace. Clear both caps before sizing.
+                    svg.style.maxWidth = 'none';
+                    svg.style.maxHeight = 'none';
                     svg.setAttribute('width', w);
                     svg.setAttribute('height', h);
                     svg.style.width = w + 'px';
@@ -1048,6 +1079,46 @@ class ExportHandlerBase(APIHandler):
                 html = html.replace(f'\u200b{alert_type}\u200b', '')
             html = html.replace('\u200b', '')
         return html
+
+    def drop_empty_table_headers(self, html: str) -> str:
+        """Remove a table's header row when every header cell is empty.
+
+        Markdown requires a header row, so a borderless image/layout grid is
+        written with an empty one (`|  |  |  |`) and the converter emits a
+        `<thead>` of blank `<th>`. DOCX and PDF drop that row; HTML must drop it
+        too, or the same document renders with an extra blank banded strip in
+        one format and not the others.
+
+        Matched with a regex rather than a soup round-trip: this runs on the
+        finished standalone document, and reparsing it would risk disturbing the
+        embedded KaTeX/Pygments markup for a change this local.
+        """
+        if '<thead' not in html:
+            return html
+
+        def strip_tags(text):
+            return unescape(re.sub(r'<[^>]+>', '', text)).strip()
+
+        def replace(match):
+            block = match.group(0)
+            # Stripping tags erases an <img> along with them, so a header row
+            # of pictures would read as blank - the DOCX and PDF paths keep
+            # such a row for the same reason (image-on-top/caption-below grid)
+            if re.search(r'<(img|svg|picture|video|object|iframe|input)\b',
+                         block, re.I):
+                return block
+            cells = re.findall(r'<t[hd][^>]*>(.*?)</t[hd]>', block, re.S)
+            if cells and not any(strip_tags(c) for c in cells):
+                return ''
+            return block
+
+        # Only when a body row survives the delete, as on the other two paths.
+        # The tag pattern admits attributes so it cannot silently miss a
+        # `<thead class="...">` the guard above already let through.
+        if not re.search(r'</thead>\s*<tbody[^>]*>\s*<tr', html, re.I | re.S):
+            return html
+        return re.sub(r'<thead\b[^>]*>.*?</thead\s*>\s*', replace, html,
+                      flags=re.S | re.I)
 
     def wrap_html_tables(self, html: str) -> str:
         """Put every table in a horizontal scroll box.
@@ -2105,32 +2176,76 @@ class ExportHandlerBase(APIHandler):
         return side_padding, cls.measured_column_widths(
             table_data, available, measure, floors)
 
+    # Cell content a `w:t` run does not carry, so `cell.text` cannot see it.
+    # The blank-row predicate is the only thing between the header delete below
+    # and silent data loss, so it tests every kind this pipeline can emit.
+    DOCX_CONTENT_ELEMENTS = (
+        'w:drawing',                                  # inline/floating picture
+        'w:pict', 'w:object',                         # VML / embedded object
+        'm:oMath', 'm:oMathPara',                     # OMML equation
+        '{urn:schemas-microsoft-com:vml}imagedata',   # VML image reference
+    )
+
+    @classmethod
+    def docx_row_is_blank(cls, row) -> bool:
+        """True when a table row holds neither text nor embedded content.
+
+        Shared by the DOCX and PDF paths so the two cannot drift: 'no text'
+        alone is not 'no content' - an image-on-top/caption-below grid puts its
+        pictures in the header row, and deleting that row would drop them.
+        """
+        from docx.oxml.ns import qn
+
+        if any(c.text.strip() for c in row.cells):
+            return False
+        tr = row._tr
+        return not any(
+            tr.findall('.//' + (tag if tag.startswith('{') else qn(tag)))
+            for tag in cls.DOCX_CONTENT_ELEMENTS
+        )
+
     def style_docx_table(self, table) -> None:
-        """Apply the banded style and 100% page width to a content table."""
+        """Style a content table, and drop its blank header row if it has one.
+
+        Two jobs: the banded style plus 100% page width, and - because Markdown
+        forces a header row that a borderless image/layout grid does not want -
+        deleting that row when it is genuinely blank. The delete is structural,
+        so it runs first; the PDF path applies the same rule separately in
+        ``process_table`` because its intermediate DOCX skips this function.
+        """
         from docx.oxml.ns import qn
         from docx.oxml import OxmlElement
 
         table.style = 'Light List Accent 1'
-        tblPr = table._tbl.tblPr
-        if tblPr is None:
-            return
 
         # A Markdown table needs a header row, so a borderless image/layout
-        # grid is written with an empty one (`|  |  |  |`). That empty row must
-        # not be treated as a header: styled and marked repeating, it becomes a
-        # blank banded bar that repeats and detaches from its image rows across
-        # a page break.
-        first_row_empty = (
-            len(table.rows) >= 1
-            and not any(c.text.strip() for c in table.rows[0].cells)
-        )
+        # grid is written with an empty one (`|  |  |  |`). The rendered
+        # markdown shows nothing for it, so drop the row outright - left in, it
+        # is a blank banded bar that Word repeats and strands above its image
+        # rows.
+        rows = table.rows
+        first_row_empty = len(rows) >= 1 and self.docx_row_is_blank(rows[0])
 
-        # Disable first column emphasis (and first row emphasis for a grid whose
-        # header row is empty, so no blank header bar is drawn)
+        # Header CHROME is a separate question from whether the row is blank: a
+        # picture-only first row is content and is kept, but it is a figure, not
+        # a header, and banding or repeating it would be wrong. Read on the
+        # ORIGINAL first row, so a body row left in position 0 by the delete is
+        # not promoted into a header in its place. The PDF path decides the same
+        # way (`has_header` reads text only), so both formats look alike.
+        header_has_text = bool(rows) and any(
+            c.text.strip() for c in rows[0].cells)
+
+        if first_row_empty and len(rows) > 1:
+            tr = rows[0]._tr
+            tr.getparent().remove(tr)
+
+        tblPr = table._tbl.tblPr
+        # Disable first column emphasis, and first row emphasis for any table
+        # whose first row is not a real (text-bearing) header
         tblLook = tblPr.find(qn('w:tblLook'))
         if tblLook is not None:
             tblLook.set(qn('w:firstColumn'), '0')
-            if first_row_empty:
+            if not header_has_text:
                 tblLook.set(qn('w:firstRow'), '0')
         # Set table to 100% page width. Update in place, or insert at the slot
         # w:tblPr's schema sequence gives it - appending would put it after
@@ -2146,12 +2261,24 @@ class ExportHandlerBase(APIHandler):
         tblW.set(qn('w:type'), 'pct')
         # Mark the first row as a repeating header: Word then repeats it at the
         # top of each page the table spans and does not strand it alone at a
-        # page bottom. Only a table with a real (non-empty) header row to
-        # repeat qualifies - an empty grid header would just repeat a blank bar.
-        if len(table.rows) > 1 and not first_row_empty:
+        # page bottom. Only a table with a real (text-bearing) header row to
+        # repeat qualifies - a blank or picture-only first row is not a header.
+        if len(table.rows) > 1 and header_has_text:
             trPr = table.rows[0]._tr.get_or_add_trPr()
             if trPr.find(qn('w:tblHeader')) is None:
                 trPr.append(OxmlElement('w:tblHeader'))
+
+        # Keep each row whole across a page break, the DOCX counterpart of the
+        # PDF's conditional `splitInRow`: without it Word breaks a row wherever
+        # the page ends, stranding a caption on one page and its image on the
+        # next when the whole row would have fitted the next page. A row taller
+        # than a page still breaks - `w:cantSplit` is a request Word drops when
+        # it cannot be met, and nothing here sets an exact `w:trHeight`, which
+        # is what would make Word clip the overflow instead.
+        for row in table.rows:
+            trPr = row._tr.get_or_add_trPr()
+            if trPr.find(qn('w:cantSplit')) is None:
+                trPr.insert(0, OxmlElement('w:cantSplit'))
 
     def fit_docx_table_to_page(self, table, available_twips: int) -> None:
         """Pin an over-wide table to the page with proportional columns.
@@ -2173,10 +2300,23 @@ class ExportHandlerBase(APIHandler):
         # for the text measurement only Word itself can make.
         char_twips = 120
         cell_margin_twips = self.DOCX_CELL_MARGIN_TWIPS
+
+        # Row 0 is only bold when the table actually has a header. A borderless
+        # grid whose blank header row was dropped upstream has plain body text
+        # in row 0, and style_docx_table records that by clearing tblLook's
+        # firstRow flag - widening it by the bold factor would over-allocate
+        # that column at its neighbours' expense.
+        tblPr = table._tbl.tblPr
+        tblLook = tblPr.find(qn('w:tblLook')) if tblPr is not None else None
+        header_is_bold = not (
+            tblLook is not None and tblLook.get(qn('w:firstRow')) == '0'
+        )
+
         def measure(text, row_index):
             # The header row carries the table style's bold face
             width = len(text) * char_twips
-            return (width * 1.08 if row_index == 0 else width) + cell_margin_twips
+            bold = row_index == 0 and header_is_bold
+            return (width * 1.08 if bold else width) + cell_margin_twips
 
         # Walk the grid once, by row: _Column.cells rebuilds the whole cell
         # list on every access, which turns this into O(rows x cols x cols)
@@ -3059,7 +3199,11 @@ class ExportHandlerBase(APIHandler):
             """A full-width box with a coloured left bar and background shading.
 
             Shared by blockquotes and GitHub alert boxes. ``splitInRow`` lets a
-            callout taller than a page carry over instead of raising LayoutError.
+            callout taller than a page carry over instead of raising
+            LayoutError - but it is enabled only for such a callout. Left on,
+            it also tears a box that merely runs past the space left on the
+            current page, splitting a quote or alert mid-frame when the whole
+            box would have fit the next page.
             """
             t = Table([[flowables]], colWidths=[frame_width],
                       hAlign='LEFT', splitInRow=1)
@@ -3072,6 +3216,10 @@ class ExportHandlerBase(APIHandler):
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ]))
+            t.wrap(frame_width, frame_height)
+            heights = getattr(t, '_rowHeights', None)
+            if heights:
+                t.splitInRow = 1 if max(heights) > frame_height else 0
             return [t, Spacer(1, trailing * inch)]
 
         def blockquote_info(para):
@@ -3168,6 +3316,28 @@ class ExportHandlerBase(APIHandler):
             if not table_data:
                 return []
 
+            # A borderless image/layout grid is written with an empty header row
+            # (`|  |  |  |`) because Markdown requires a header. The rendered
+            # markdown shows nothing for it, so drop it entirely rather than
+            # emitting a blank bordered first row above the grid.
+            rows = list(tbl.rows)
+            dropped_empty_header = False
+
+            if len(table_data) > 1 and self.docx_row_is_blank(rows[0]):
+                table_data = table_data[1:]
+                rows = rows[1:]
+                dropped_empty_header = True
+
+            # A Markdown layout grid carries an empty header row (`|  |  |  |`);
+            # it must not be styled or repeated as a header, or a blank blue bar
+            # detaches from its rows across a page break. Row 0 is a real header
+            # only when it holds text - a picture-only row is a figure, and the
+            # DOCX path reads it the same way. A grid whose empty header was
+            # dropped has no header at all: the row now in position 0 is body
+            # content and must not be promoted into one.
+            has_header = (not dropped_empty_header
+                          and any(text.strip() for text in table_data[0]))
+
             def cell_markup(text):
                 markup = (text.replace('&', '&amp;')
                               .replace('<', '&lt;').replace('>', '&gt;'))
@@ -3175,7 +3345,13 @@ class ExportHandlerBase(APIHandler):
                 return markup.replace('\n', '<br/>')
 
             def string_width(text, row_index):
-                font = font_name_bold if row_index == 0 else font_name
+                # Only a real header row is drawn bold, so only it may be
+                # measured bold - after the blank-header delete row 0 is
+                # ordinary content, and widening it would over-allocate its
+                # column at its neighbours' expense (the DOCX path carries the
+                # same rule through tblLook)
+                font = (font_name_bold if row_index == 0 and has_header
+                        else font_name)
                 return pdfmetrics.stringWidth(
                     text, font, table_cell_style.fontSize)
 
@@ -3186,7 +3362,7 @@ class ExportHandlerBase(APIHandler):
             from docx.shared import Emu
             ncols = max((len(r) for r in table_data), default=0)
             image_widths = [0.0] * ncols
-            for row in tbl.rows:
+            for row in rows:
                 for c, cell in enumerate(row.cells):
                     if c >= ncols:
                         continue
@@ -3198,12 +3374,6 @@ class ExportHandlerBase(APIHandler):
 
             side_padding, col_widths = self.pdf_table_column_layout(
                 table_data, frame_width, string_width, image_widths)
-
-            # A Markdown layout grid carries an empty header row (`|  |  |  |`);
-            # it must not be styled or repeated as a header, or a blank blue bar
-            # detaches from its rows across a page break. Row 0 is a real header
-            # only when it holds text.
-            has_header = any(text.strip() for text in table_data[0])
 
             # A cell adds 4pt top + 4pt bottom padding around its content, and
             # the header row overrides its bottom padding to 8pt (12pt total).
@@ -3236,7 +3406,7 @@ class ExportHandlerBase(APIHandler):
 
             # Paragraph/Image cells wrap and fit inside the column.
             wrapped = []
-            for r, row in enumerate(tbl.rows):
+            for r, row in enumerate(rows):
                 style = (table_header_style if (r == 0 and has_header)
                          else table_cell_style)
                 wrapped.append([
@@ -3297,6 +3467,24 @@ class ExportHandlerBase(APIHandler):
                     _atomic_floor(r) > avail for r in wrapped[1:]
                 ):
                     t.repeatRows = 0
+
+            # Tear a row across pages ONLY when it cannot fit whole anywhere.
+            # splitInRow is per-table, so leaving it on breaks any row that
+            # merely runs past the space left on the current page - a cell's
+            # caption stranded on one page and its image on the next - when
+            # moving the whole row to the next page would have fit. The limit is
+            # the space a row actually gets: a repeated header re-emits above
+            # every continuation, so it comes off the top. Decided after the
+            # repeat guard above so it sees the final repeatRows.
+            row_heights = getattr(t, '_rowHeights', None)
+            if row_heights:
+                if t.repeatRows:
+                    limit = frame_height - row_heights[0]
+                    oversized = any(h > limit for h in row_heights[1:])
+                else:
+                    limit = frame_height
+                    oversized = any(h > limit for h in row_heights)
+                t.splitInRow = 1 if oversized else 0
             return [t, Spacer(1, 0.15 * inch)]
 
         def process_image(drawing_element, doc, max_width=None, max_height=None):
@@ -3836,6 +4024,7 @@ class ExportHtmlHandler(ExportHandlerBase):
 
             # Style GitHub alert boxes with colored borders and shading
             html = self.style_html_alert_boxes(html, show_labels=show_alert_labels)
+            html = self.drop_empty_table_headers(html)
             html = self.wrap_html_tables(html)
 
             self.set_header('Content-Type', 'text/html; charset=utf-8')
