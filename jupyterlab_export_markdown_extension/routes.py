@@ -17,9 +17,10 @@ import io
 import socket
 import tempfile
 import time
+import unicodedata
 from html import unescape
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from jupyter_server.base.handlers import APIHandler
 from jupyter_server.utils import url_path_join
@@ -1334,6 +1335,42 @@ class ExportHandlerBase(APIHandler):
         # because something else may already expose one.
         self.add_header('Access-Control-Expose-Headers', 'X-Export-Warnings')
 
+    def set_attachment_filename(self, filename: str) -> None:
+        """Name the download, including when the name is not ASCII.
+
+        Tornado refuses any header value outside latin-1, so interpolating a
+        name straight into `Content-Disposition` raises `Unsafe header value`
+        before a byte of the document is written - the export fails outright
+        rather than downloading under an ugly name. Polish, Czech and Greek
+        source files all hit this; `zniesławienie-....docx` is the case that
+        found it.
+
+        RFC 6266 is the way out: send both an ASCII `filename` for anything
+        that predates the standard and `filename*`, which carries the real
+        name percent-encoded. Every current browser prefers `filename*`.
+        """
+        # NFKD splits the accented Latin letters into base + combining mark,
+        # which 'ignore' then drops to the base. It leaves stroked letters
+        # alone (they have no decomposition), so map those first or 'ł' would
+        # vanish rather than degrade to 'l'.
+        stroked = str.maketrans({'ł': 'l', 'Ł': 'L', 'đ': 'd', 'Đ': 'D',
+                                 'ø': 'o', 'Ø': 'O'})
+        stem, _, suffix = filename.rpartition('.')
+        ascii_stem = unicodedata.normalize('NFKD', (stem or filename).translate(stroked))
+        ascii_stem = ascii_stem.encode('ascii', 'ignore').decode('ascii')
+        # Anything left that could close the quoted string or inject a header
+        ascii_stem = re.sub(r'[^A-Za-z0-9._-]', '_', ascii_stem).strip('_')
+        # A name in a non-Latin script leaves nothing behind, and ".docx" alone
+        # is a hidden file rather than a document
+        fallback = f'{ascii_stem or "export"}.{suffix}' if suffix else (ascii_stem or 'export')
+
+        self.set_header(
+            'Content-Disposition',
+            'attachment; filename="{}"; filename*=UTF-8\'\'{}'.format(
+                fallback, quote(filename, safe='')
+            ),
+        )
+
     # Inline images carrying an explicit display size at or below this many
     # CSS px are treated as small badges/pills, not full-width diagrams.
     _BADGE_MAX_PX = 200
@@ -1832,8 +1869,13 @@ class ExportHandlerBase(APIHandler):
         `XPreformatted` draws every source line as exactly one line whatever
         its width - it never wraps - so an over-long line is laid off the page
         and the glyphs past the page edge are not drawn at all. The code font
-        is fixed-width, so a character count is an exact width measure and the
-        line can be split before it is ever handed to reportlab.
+        is fixed-width, so for the characters it carries a column count is an
+        exact width measure and the line can be split before it is ever handed
+        to reportlab. A character the code font lacks (an emoji, a CJK glyph)
+        renders through a wider substitute, so a line dense with those can
+        still overrun - rare in code, and still far better than the whole line
+        running off the page. A tab counts as one column, which is also how
+        reportlab draws it here (it does not expand tab stops).
 
         Returns 0 when there is nothing to measure against, which the callers
         read as "do not wrap" - the old behaviour.
@@ -3852,21 +3894,25 @@ class ExportHandlerBase(APIHandler):
 
         registered_fonts = set()
 
-        # Try each font set until we find one with at least normal and bold
-        for font_set in font_sets:
-            if 'UnicodeSans' in registered_fonts:
-                break
-
-            if font_set['normal'] and os.path.exists(font_set['normal']):
-                for variant, path in font_set.items():
-                    if path and os.path.exists(path):
-                        font_name = font_names[variant]
-                        if font_name not in registered_fonts:
-                            try:
-                                pdfmetrics.registerFont(TTFont(font_name, path))
-                                registered_fonts.add(font_name)
-                            except Exception:
-                                pass
+        # Fill each variant from the first family that ships it, rather than
+        # committing to one family and stopping. DejaVu (first, best Unicode
+        # coverage) has no oblique files on many boxes, so the old loop left
+        # the italic faces unregistered and every italic - body emphasis and
+        # now the H4/H6 heading faces - fell back to a Helvetica core font, a
+        # visible typeface switch mid-document. Normal and bold still come from
+        # the highest-priority family present, so the dominant text keeps that
+        # family's glyph coverage; only the italic slots reach past it.
+        for variant in ('normal', 'bold', 'italic', 'boldItalic'):
+            font_name = font_names[variant]
+            for font_set in font_sets:
+                path = font_set.get(variant)
+                if path and os.path.exists(path):
+                    try:
+                        pdfmetrics.registerFont(TTFont(font_name, path))
+                        registered_fonts.add(font_name)
+                    except Exception:
+                        continue
+                    break
 
         # Register font family to enable <b> and <i> tags in Paragraph
         if 'UnicodeSans' in registered_fonts:
@@ -3914,10 +3960,13 @@ class ExportHandlerBase(APIHandler):
         font_name = 'UnicodeSans' if 'UnicodeSans' in registered else 'Helvetica'
         font_name_bold = ('UnicodeSansBold' if 'UnicodeSansBold' in registered
                           else 'Helvetica-Bold')
-        # Heading 4 and 6 need faces the body never asks for
+        # The minor headings need faces the body and H1-H3 never ask for: H5 is
+        # regular (already `font_name`), H6 italic, H4 bold italic. Only those
+        # two italic faces are looked up here; a missing oblique file falls to
+        # the Helvetica core face, which _register_unicode_fonts now avoids by
+        # taking the italics from a family that ships them.
         heading_faces = {
             (False, False): font_name,
-            (True, False): font_name_bold,
             (False, True): ('UnicodeSansItalic' if 'UnicodeSansItalic' in
                             registered else 'Helvetica-Oblique'),
             (True, True): ('UnicodeSansBoldItalic' if 'UnicodeSansBoldItalic'
@@ -4819,8 +4868,7 @@ class ExportPdfHandler(ExportHandlerBase):
 
             self.set_export_warnings(export_warnings)
             self.set_header('Content-Type', 'application/pdf')
-            self.set_header('Content-Disposition',
-                          f'attachment; filename="{file_path.stem}.pdf"')
+            self.set_attachment_filename(f'{file_path.stem}.pdf')
             self.finish(pdf_content)
 
         except ChromiumUnavailableError as e:
@@ -5061,8 +5109,7 @@ class ExportDocxHandler(ExportHandlerBase):
             self.set_export_warnings(export_warnings)
             self.set_header('Content-Type',
                           'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-            self.set_header('Content-Disposition',
-                          f'attachment; filename="{file_path.stem}.docx"')
+            self.set_attachment_filename(f'{file_path.stem}.docx')
             self.finish(docx_content)
 
         except ChromiumUnavailableError as e:
@@ -5139,8 +5186,7 @@ class ExportHtmlHandler(ExportHandlerBase):
 
             self.set_export_warnings(export_warnings)
             self.set_header('Content-Type', 'text/html; charset=utf-8')
-            self.set_header('Content-Disposition',
-                          f'attachment; filename="{file_path.stem}.html"')
+            self.set_attachment_filename(f'{file_path.stem}.html')
             self.finish(html.encode('utf-8'))
 
         except ImportError as e:

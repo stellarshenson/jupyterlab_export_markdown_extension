@@ -2712,8 +2712,10 @@ def _color_near(colors, target, tol=0.02):
 
 def _is_italic_font(font_name):
     """Slanted faces are named Italic or Oblique depending on the family that
-    was found on the box - DejaVu ships Oblique, Liberation ships Italic."""
-    return "Italic" in font_name or "Oblique" in font_name
+    was found on the box - DejaVu ships Oblique, Liberation ships Italic.
+    Matched on the stem, since fitz truncates an embedded subset name to 24
+    characters (`LiberationSans-BoldItali`, the trailing `c` cut)."""
+    return "Ital" in font_name or "Obli" in font_name
 
 
 TEST_MARKDOWN_TASK_LIST = """# Tasks
@@ -3649,8 +3651,10 @@ class TestEmptyHeaderGrid:
 
 
 #: Every spelling of a break tag, so an assertion cannot miss `<BR>` or
-#: `<br clear="all">` - the spellings these tests exist to cover.
-BREAK_RE = re.compile(r'<br(?:\s[^>]*?)?/?>', re.IGNORECASE)
+#: `<br clear="all">` - the spellings these tests exist to cover. Imported
+#: from the module under test rather than re-declared, so a change to the
+#: pattern cannot leave the tests validating against a stale copy.
+from jupyterlab_export_markdown_extension.routes import BREAK_TAG_RE as BREAK_RE  # noqa: E402
 
 
 class TestExplicitLineBreakNotDoubled:
@@ -4312,13 +4316,31 @@ class TestPdfMinorHeadings:
 
     async def test_minor_headings_match_the_docx_faces(
             self, jp_fetch, jp_root_dir):
-        """Word's own template draws H4 bold italic in the H3 blue, H5 regular
-        and H6 italic in a darker navy. The PDF must agree with the DOCX it is
-        built from, or the same document reads differently in two formats."""
+        """The PDF colours must equal the colours of the DOCX it is built from,
+        read off the exported document itself - not a copy in the test. If the
+        template python-docx builds from ever moves, the DOCX moves, and this
+        catches the two formats disagreeing instead of freezing beside them."""
+        from docx import Document
+
+        (jp_root_dir / "heads.md").write_text(self.DOC, encoding="utf-8")
+        d = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "heads.md"}),
+            raise_error=False)
+        assert d.code == 200
+        styles = Document(io.BytesIO(d.body)).styles
+        docx_color = {}
+        for word, level in (("Four", 4), ("Five", 5), ("Six", 6)):
+            rgb = styles[f"Heading {level}"].font.color.rgb
+            assert rgb is not None, f"Heading {level} has no colour in the DOCX"
+            docx_color[word] = int(str(rgb), 16)
+
         faces = await self._faces(jp_fetch, jp_root_dir)
-        assert faces["Four"][1] == 0x4F81BD, f"H4 colour: {faces['Four']}"
-        assert faces["Five"][1] == 0x243F60, f"H5 colour: {faces['Five']}"
-        assert faces["Six"][1] == 0x243F60, f"H6 colour: {faces['Six']}"
+        for word in ("Four", "Five", "Six"):
+            assert faces[word][1] == docx_color[word], (
+                f"PDF {word} is #{faces[word][1]:06X} but the DOCX draws it "
+                f"#{docx_color[word]:06X} - the two formats disagree"
+            )
         h4_font, h5_font, h6_font = (faces[k][0] for k in ("Four", "Five", "Six"))
         assert "Bold" in h4_font and _is_italic_font(h4_font), (
             f"H4 is not bold italic: {h4_font}"
@@ -4358,6 +4380,22 @@ class TestPdfMinorHeadings:
         assert sizes == sorted(sizes, reverse=True) and sizes[2] > sizes[3], (
             f"heading sizes do not descend into H4: {sizes}"
         )
+
+    async def test_italic_headings_do_not_fall_back_to_a_core_font(
+            self, jp_fetch, jp_root_dir):
+        """The italic minor headings must draw in the document's Unicode font,
+        not a Helvetica core face. DejaVu (best coverage, so the body's font)
+        ships no oblique on many boxes; committing to it and stopping left
+        every italic falling to Helvetica-Oblique - a typeface switch visible
+        in the heading ladder. H4/H6 must share the embedded family, not a
+        core-14 substitute."""
+        faces = await self._faces(jp_fetch, jp_root_dir)
+        for level in ("Four", "Six"):
+            font = faces[level][0]
+            assert "Helvetica" not in font and "Times" not in font, (
+                f"H{level} italic fell back to a core font: {font}"
+            )
+            assert _is_italic_font(font), f"H{level} is not italic: {font}"
 
 
 class TestPdfCodeLineWrapping:

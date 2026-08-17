@@ -260,8 +260,13 @@ The PDF is built from the DOCX, so the two must draw the same document the same 
 - [x] **An unrecognised heading style still gets a heading face** - a style named `Heading` with no number, or beyond level 6, falls to Heading 3 as it did before
   - log: 2026-07-23 criterion added - replacing a catch-all with a lookup is where a level quietly stops being a heading
   - log: 2026-07-23 held - the dispatch parses the level and falls back to the Heading 3 style on any miss
+- [x] **The italic heading faces draw in the document's own font, not a core substitute** - H4 and H6 must not fall back to Helvetica
+  - log: 2026-07-23 criterion added after the confirming UX round measured H4/H6 in `Helvetica-BoldOblique`/`-Oblique` while H1-H3, H5 and body were DejaVu - `_register_unicode_fonts` committed to DejaVu (no oblique on this box) and stopped, so every italic fell to a core face
+  - log: 2026-07-23 held - the registration now fills each variant from the first family that ships it; normal and bold stay DejaVu, the italics come from Liberation. Test `test_italic_headings_do_not_fall_back_to_a_core_font`, mutation-proved
 - [ ] **A heading is not stranded at the foot of a page** - no PDF heading style sets `keepWithNext`, so a page break can fall between a heading and its first paragraph
   - log: 2026-07-23 criterion added and left open; a pagination question rather than a face question. Registered as DEF-15
+- [ ] **H5 is legible against body text** - H5 is regular navy at body size, told from black body text by colour alone (~2:1)
+  - log: 2026-07-23 criterion added and left open as an accepted trade-off; the face is copied from Word's own Heading 5, so raising the contrast would break the PDF/DOCX parity above. Recorded in DEF-12
 
 ## Code line wrapping
 
@@ -279,6 +284,8 @@ The PDF is built from the DOCX, so the two must draw the same document the same 
 - [x] **The split is measured on real characters, not on markup** - escaping before the split would count `&amp;` as five columns where the reader sees one
   - log: 2026-07-23 criterion added; the token loop was rewritten to carry raw `(colour, text)` segments and escape at render time
   - log: 2026-07-23 held by construction - `render()` is the only place escaping happens, and it runs after `wrap()`
+- [ ] **Accepted limits** - a line dense with glyphs the fixed-width code font lacks (emoji, CJK) can still overrun, and a wrapped continuation carries no hanging indent to set it apart from a new statement
+  - log: 2026-07-23 both raised in the adversarial round and left as accepted trade-offs - the wide-glyph case is rare in code and still far better than the whole line running off the page; the continuation marker is the universal soft-wrap tradeoff. Both stated in the `code_columns` docstring
 
 ## Mermaid without a browser
 
