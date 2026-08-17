@@ -2,6 +2,13 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.23
+
+### Fixed
+
+- Exporting a document whose filename is not ASCII no longer fails. A name such as `zniesławienie-milena-kabza-2026.md` returned HTTP 500 from every format, through the JupyterLab UI and the REST endpoints alike: the filename went into the `Content-Disposition` header unencoded, and header values are limited to latin-1, so the export aborted before any of the document was written. The header now follows RFC 6266 - an ASCII name for older clients alongside the real name UTF-8 encoded - so Polish, Czech, Greek, Cyrillic and CJK filenames all download under their own name
+- PDF italic headings no longer switch typeface mid-document. Heading 4 and Heading 6 are italic, and the font registration stopped at the first family shipping a regular face, which has no oblique here - both levels fell back to a Helvetica core font while the rest of the ladder stayed on DejaVu. Each weight and slant is now taken from the first family providing it
+
 ## 1.6.22
 
 ### Added
