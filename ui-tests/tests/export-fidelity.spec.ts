@@ -90,7 +90,7 @@ test.describe('Word export fidelity', () => {
     const xml = new AdmZip(file).readAsText('word/document.xml');
     expect(xml.length, 'word/document.xml is empty').toBeGreaterThan(0);
 
-    // A glyph Calibri has no shape for names a font that does, and one it can
+    // A glyph Cambria has no shape for names a font that does, and one it can
     // draw keeps the body face - a symbol font on `·` would switch typeface
     // mid-sentence for nothing
     expect(runWith(xml, '★')).toContain('w:ascii="Segoe UI Symbol"');

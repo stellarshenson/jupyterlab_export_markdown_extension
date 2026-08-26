@@ -131,3 +131,6 @@ dmypy.json
 
 # project-local node environment (Makefile 1.32)
 .nodeenv/
+
+# graphify knowledge-graph artefacts
+tmp/

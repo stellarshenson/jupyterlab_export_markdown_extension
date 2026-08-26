@@ -13,6 +13,8 @@ Acceptance criteria for the markdown export extension across PDF, DOCX and HTML.
 - [Alert box integrity](#alert-box-integrity)
 - [Heading level fidelity](#heading-level-fidelity)
 - [Code line wrapping](#code-line-wrapping)
+- [Symbol glyph fonts](#symbol-glyph-fonts)
+- [Inline HTML fidelity](#inline-html-fidelity)
 
 ## Export page fitting
 
@@ -378,3 +380,37 @@ Mermaid is a browser library. The extension renders each diagram in the page and
   - log: 2026-07-23 held - `TestFenceScannerParity` extracts `mermaidBlocksFromSource` from `src/index.ts`, runs it under node, and compares block-for-block against `iter_mermaid_blocks` over twenty-three shapes, every one of which also has its expected count re-derived from marked. Mutation-proved in both directions - removing the in-list rule or the blockquote termination from the TypeScript side fails it
   - log: 2026-07-23 held again after the sixth round moved six rules into both scanners at once: a differential over 12,000 generated documents finds no shape they disagree on, including the indented bodies inside quoted blocks that exposed a double-counted dedent column
   - log: 2026-07-23 held through the seventh round (both adversarial lenses CLEAN): the one asymmetry with teeth was that Python `str.strip()` keeps a U+FEFF that JS `.trim()` drops, so ` ```mermaid<BOM> ` shifted a count; the info trim now uses the exact ECMAScript trim set (`_JS_TRIM`), byte-equivalent to marked over 5,000 BOM-injected documents, `bom_info` in the parity table
+
+## Symbol glyph fonts
+
+Cambria, the DOCX body face, has no glyph for a star, a box-drawing rule or most dingbats. A run that names no font leaves the choice to Word, which substitutes from whatever the reading machine has installed - so the same file can draw a solid star on one PC and a hollow box on the next. The export names a font on exactly those characters and leaves the rest of the text alone.
+
+- [x] **A character the body face cannot draw names a font that can** - the decision belongs in the file, not in the reader's font list
+  - log: 2026-08-25 criterion added with DEF-22; measured on a court filing carrying 31 star markers - every star run exported with no `w:rFonts` at all
+  - log: 2026-08-25 held - test `test_symbols_the_body_face_lacks_name_a_font`; mutation-proved. On the reported document all 31 star runs now name `Segoe UI Symbol`
+- [x] **A character the body face does draw keeps it** - naming a symbol font for `·` or `→` would switch typeface mid-sentence for nothing
+  - log: 2026-08-25 criterion added; the arrow range starts at U+2194 because Cambria carries U+2190-2193
+  - log: 2026-08-25 held - test `test_body_characters_keep_the_body_font`. The reported document's 46 middot runs stay in the body face
+- [x] **Splitting a run to font it loses no text** - the pass cuts each run into per-font pieces, and a cut that drops a character is worse than the box it was fixing
+  - log: 2026-08-25 criterion added; the same split already served the task checkboxes
+  - log: 2026-08-25 held - tests `test_no_text_is_lost_splitting_the_runs` and `test_symbols_survive_inside_a_table_cell`
+- [x] **The export works through the real UI, not only through the handlers** - a rendering fix is worth nothing if the command, the menu entry or the download is broken
+  - log: 2026-08-25 criterion added with DEF-22/DEF-23; the Python suite calls the endpoints directly and cannot see any of that
+  - log: 2026-08-25 held - galata spec `ui-tests/tests/export-fidelity.spec.ts` opens the document in Lab, exports from File > Export Markdown As > Microsoft Word (.docx), and reads the downloaded `word/document.xml` back. Proved live against the released build: it fails on the star assertion, passes against the fix
+- [ ] **Accepted limit** - the font is named, not embedded; a machine without `Segoe UI Symbol` (a Mac, a bare Linux) substitutes as before
+
+## Inline HTML fidelity
+
+Markdown files carry HTML, and a Jupyter one carries more than most - `<font color>` and `<span style>` are how a notebook cell colours its text. htmldocx reads a handful of tags and two CSS properties; everything else arrives in Word as unstyled text. The gap is closed by rewriting the HTML into the markup htmldocx does read, before conversion. The PDF rebuilds from that same intermediate DOCX, so it inherits every run property `format_run` reads - weight, slant, underline, strike, colour and the mark fill - in a table cell as much as in a body paragraph, and `process_paragraph` maps the paragraph's own alignment onto its reportlab style.
+
+- [x] **A styled span carries every property it declares, not just colour** - `font-weight`, `font-style` and `text-decoration` sit beside `color` in the same attribute and were the ones being dropped
+  - log: 2026-08-25 criterion added with DEF-23; measured each property through the pipeline and found colour and background the only two that survived
+  - log: 2026-08-25 held - tests `test_span_style_properties_become_run_formatting` and `test_colour_and_weight_in_one_span_both_survive`; mutation-proved
+- [x] **A semantic inline tag reaches Word as formatting** - `<mark>`, `<del>`, `<kbd>` and `<font color>` all have a Word equivalent and were all arriving plain
+  - log: 2026-08-25 criteria added; `<font color>` is the notebook colouring idiom, so it matters more here than its deprecation suggests
+  - log: 2026-08-25 held - tests `test_semantic_inline_tags_reach_word` and `test_font_colour_attribute_reaches_word`; mutation-proved
+- [x] **A `<div>` opens its own block** - with no handler its content joined whatever paragraph was already open, so two blocks ran together and one alignment overwrote the other
+  - log: 2026-08-25 criterion added after measuring `<p align="center">A</p><div align="right">B</div>` arrive as one right-aligned paragraph holding both
+  - log: 2026-08-25 held - test `test_aligned_div_is_its_own_centred_paragraph` asserts the block is centred and has not swallowed the paragraph after it
+- [ ] **Accepted limit** - PDF alignment reaches a body paragraph and a heading only. `process_paragraph` maps `para.alignment` onto those two styles; a list item, a blockquote and a table cell keep the indent their own style sets, so a centred `<div>` inside one draws at that style's left edge. Registered as `DEF-25`
+- [ ] **Accepted limit** - `font-size`, `font-family` and `<small>` are still dropped; every property closed above had an equivalent tag to be rewritten into and these have none, so they need a marker and a run pass of their own. Registered as `DEF-24`

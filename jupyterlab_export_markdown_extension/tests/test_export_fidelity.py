@@ -5812,3 +5812,875 @@ console.log(JSON.stringify(docs.map(d => {{ const o = []; walk(marked.lexer(d), 
                 f"diagram would receive the wrong picture"
             )
 
+
+
+class TestDocxSymbolFonts:
+    """DEF-22: a symbol the DOCX body face cannot draw names a font that can,
+    instead of leaving Word to substitute whatever the machine happens to
+    have - which is how a star arrives as a hollow box on one reader's PC."""
+
+    DOC = (
+        "# Symbols\n\n"
+        "Dowod D677 ★ i D688 ☆, separator · · ·, "
+        "strzalki → ↔, bullets • ◦, znak §, "
+        "zazolc gesla jazn łęążóśćń.\n"
+    )
+
+    async def _docx(self, jp_fetch, jp_root_dir, doc=None):
+        from docx import Document
+
+        (jp_root_dir / "symbols.md").write_text(doc or self.DOC, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "symbols.md"}),
+            raise_error=False)
+        assert r.code == 200, f"docx export returned {r.code}"
+        return Document(io.BytesIO(r.body))
+
+    @staticmethod
+    def _run_fonts(doc):
+        """Map every run's text to the font its rFonts names ('' when none)."""
+        from docx.oxml.ns import qn
+
+        out = []
+        for r in doc.element.body.iter(qn("w:r")):
+            t = r.find(qn("w:t"))
+            if t is None or not t.text:
+                continue
+            rPr = r.find(qn("w:rPr"))
+            rFonts = rPr.find(qn("w:rFonts")) if rPr is not None else None
+            out.append((t.text, rFonts.get(qn("w:ascii")) if rFonts is not None else ""))
+        return out
+
+    async def test_symbols_the_body_face_lacks_name_a_font(self, jp_fetch, jp_root_dir):
+        doc = await self._docx(jp_fetch, jp_root_dir)
+        fonts = self._run_fonts(doc)
+        for glyph in ("★", "☆", "↔", "◦"):
+            named = [f for text, f in fonts if glyph in text]
+            assert named, f"{glyph!r} is missing from the DOCX entirely"
+            assert all(f == "Segoe UI Symbol" for f in named), (
+                f"{glyph!r} carries font {named!r}, not the symbol font - Word "
+                f"is left to substitute and may draw a box"
+            )
+
+    async def test_body_characters_keep_the_body_font(self, jp_fetch, jp_root_dir):
+        doc = await self._docx(jp_fetch, jp_root_dir)
+        # Cambria carries all of these; overriding the font here would switch
+        # typeface mid-sentence for no gain
+        for text, font in self._run_fonts(doc):
+            for glyph in ("·", "→", "•", "§", "ł"):
+                if glyph in text:
+                    assert font != "Segoe UI Symbol", (
+                        f"{glyph!r} was moved to the symbol font in run "
+                        f"{text!r} - the body face already draws it"
+                    )
+
+    async def test_no_text_is_lost_splitting_the_runs(self, jp_fetch, jp_root_dir):
+        doc = await self._docx(jp_fetch, jp_root_dir)
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "Dowod D677 ★ i D688 ☆" in text
+        assert "zazolc gesla jazn łęążóśćń" in text
+
+    async def test_symbols_survive_inside_a_table_cell(self, jp_fetch, jp_root_dir):
+        doc = await self._docx(
+            jp_fetch, jp_root_dir,
+            "| Dowod | Uwaga |\n| --- | --- |\n| D677 ★ | · · · |\n")
+        cells = [c.text for t in doc.tables for row in t.rows for c in row.cells]
+        assert any("D677 ★" in c for c in cells), (
+            f"the starred reference did not reach the table: {cells!r}")
+        assert any("· · ·" in c for c in cells), (
+            f"the middot separator did not reach the table: {cells!r}")
+
+
+    @staticmethod
+    def _flow(doc):
+        """Text and line breaks of the whole body, in document order.
+
+        `paragraph.text` is the projection that ignores `w:br`, so it cannot
+        see a break that moved - which is exactly how the run splitting went
+        wrong the first time.
+        """
+        from docx.oxml.ns import qn
+
+        out = []
+        for run in doc.element.body.iter(qn("w:r")):
+            for child in run:
+                if child.tag == qn("w:t"):
+                    out.append(child.text or "")
+                elif child.tag == qn("w:br"):
+                    out.append("\n")
+        return "".join(out)
+
+    async def test_a_break_after_a_symbol_stays_where_the_author_put_it(
+            self, jp_fetch, jp_root_dir):
+        doc = await self._docx(
+            jp_fetch, jp_root_dir,
+            "Dowod D677 ★ pierwsza linia\ndruga linia bez symbolu\n")
+        flow = self._flow(doc)
+        assert "Dowod D677 ★ pierwsza linia\ndruga linia bez symbolu" in flow, (
+            f"the soft break moved when the run was split for its symbol: {flow!r}")
+
+    async def test_a_code_block_keeps_its_line_order(self, jp_fetch, jp_root_dir):
+        doc = await self._docx(
+            jp_fetch, jp_root_dir,
+            "```text\nDiagram ★ ponizej:\nLINIA-DRUGA\nLINIA-TRZECIA\n```\n")
+        flow = self._flow(doc)
+        assert "Diagram ★ ponizej:\nLINIA-DRUGA\nLINIA-TRZECIA" in flow, (
+            f"the code block's lines were reordered around its symbol: {flow!r}")
+
+    async def test_inline_code_keeps_its_monospace_around_a_symbol(
+            self, jp_fetch, jp_root_dir):
+        doc = await self._docx(jp_fetch, jp_root_dir,
+                               "Text `code ★ here` and `plain code` done.\n")
+        fonts = dict(self._run_fonts(doc))
+        assert fonts.get("code ") == "Courier" and fonts.get(" here") == "Courier", (
+            f"a symbol inside inline code cost its neighbours their monospace: "
+            f"{fonts!r}")
+        assert fonts.get("★") == "Segoe UI Symbol"
+
+    async def test_an_emoji_keeps_the_face_word_would_give_it(
+            self, jp_fetch, jp_root_dir):
+        # A character carrying U+FE0F asks for emoji presentation, and one
+        # whose block is half emoji is left alone entirely - Word draws those
+        # in colour from its own emoji font, which no named face here can do
+        doc = await self._docx(
+            jp_fetch, jp_root_dir,
+            "Uwaga ⚠️ i ▪️ punkt, bare ✅ emoji, "
+            "oraz ★ gwiazda.\n")
+        for text, font in self._run_fonts(doc):
+            for glyph in ("⚠", "▪", "✅"):
+                if glyph in text:
+                    assert font != "Segoe UI Symbol", (
+                        f"{glyph!r} was pinned to a monochrome face in {text!r}")
+            if "️" in text:
+                assert "⚠️" in text or "▪️" in text, (
+                    f"a variation selector was split from its base: {text!r}")
+        assert any(f == "Segoe UI Symbol" for t, f in self._run_fonts(doc)
+                   if "★" in t), "the star lost its font with the emoji rule"
+
+
+class TestInlineHtmlInDocx:
+    """DEF-23: inline HTML written into the markdown reaches Word as
+    formatting. htmldocx reads only a handful of tags and CSS properties, so
+    the rest is rewritten into what it does read before conversion."""
+
+    async def test_inline_math_in_a_link_label_exports(
+            self, jp_fetch, jp_root_dir):
+        """Walking hyperlink runs brought the marker-splitting branch its first
+        run under `w:hyperlink`. When the marker OPENS the run, clearing the
+        run's text drops its `w:t`, and the copy taken afterwards had none to
+        write the tail into - so the export died with HTTP 500."""
+        doc = (
+            "Formula [$x^2$ label](https://x.example) inline.\n\n"
+            "- [$x^2$ item](https://x.example)\n\n"
+            "> [$x^2$ quoted](https://x.example)\n"
+        )
+        (jp_root_dir / "mathlink.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "mathlink.md"}),
+            raise_error=False)
+        assert r.code == 200, f"the export died: {r.body[:300]!r}"
+        from docx import Document as _Doc
+
+        document = _Doc(io.BytesIO(r.body))
+        xml = document.element.body.xml
+        assert "MATH_INLINE" not in xml, "a marker survived as visible text"
+        assert xml.count("}oMath") >= 3 or xml.count(":oMath") >= 3, (
+            "an equation is missing from the document")
+        text = "".join(p.text for p in document.paragraphs)
+        for label in ("label", "item", "quoted"):
+            assert label in text, f"the link label {label!r} was lost"
+
+    async def test_a_div_inside_a_text_holder_keeps_the_block_whole(
+            self, jp_fetch, jp_root_dir):
+        """A list item, a heading and a table cell already own a run of text,
+        so a `<div>` inside one is in inline position however it was written.
+        Renaming it to `<p>` there nested a block in a block: htmldocx ended
+        the item, the heading or the cell early and the rest of the line
+        became a paragraph of its own - the highlight going with it."""
+        doc = (
+            "- x <div style=\"background-color:#ffff00\">LIHL</div> y\n\n"
+            "# H1 <div>H1MID</div> tail\n\n"
+            "| a | b |\n| --- | --- |\n| c <div>TDMID</div> d | e |\n"
+        )
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        (jp_root_dir / "divctx.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "divctx.md"}),
+            raise_error=False)
+        assert r.code == 200
+        from docx import Document as _Doc
+
+        document = _Doc(io.BytesIO(r.body))
+        # The heading keeps its tail and its style
+        heads = [p for p in document.paragraphs
+                 if p.style.name.startswith("Heading")]
+        assert heads and "tail" in heads[0].text, (
+            f"the heading was cut in two: "
+            f"{[(p.style.name, p.text) for p in document.paragraphs]!r}")
+        # The cell is one paragraph, not two
+        cell = document.tables[0].rows[1].cells[0]
+        assert len([p for p in cell.paragraphs if p.text.strip()]) == 1, (
+            f"the cell was split: {[p.text for p in cell.paragraphs]!r}")
+        assert "TDMID" in cell.text and cell.text.strip().startswith("c")
+        # The list item keeps the background the identical span would give it
+        fills = [ExportHandlerBase.docx_run_shading(run)
+                 for p in document.paragraphs for run in p.runs
+                 if run.text.strip() == "LIHL"]
+        assert fills and fills[0] == "FFFF00", (
+            f"the list item lost its highlight: {fills!r}")
+
+    async def test_a_div_written_inline_carries_its_style(
+            self, jp_fetch, jp_root_dir):
+        """A `<div>` markdown left inside a `<p>` is unwrapped so it does not
+        nest one paragraph in another - and unwrapping took its style
+        attribute with it, before the pass that reads style attributes ran."""
+        doc = (
+            'Lead <div style="color:#ff0000;font-weight:bold">DIVSTYLED</div> tail\n\n'
+            'Lead <span style="color:#ff0000;font-weight:bold">SPANSTYLED</span> tail\n'
+        )
+        (jp_root_dir / "inlinediv.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "inlinediv.md"}),
+            raise_error=False)
+        assert r.code == 200
+        from docx import Document as _Doc
+
+        document = _Doc(io.BytesIO(r.body))
+        props = {}
+        for para in document.paragraphs:
+            for run in para.runs:
+                if run.text.strip() not in ("DIVSTYLED", "SPANSTYLED"):
+                    continue
+                props[run.text.strip()] = (
+                    run.bold,
+                    str(run.font.color.rgb)
+                    if run.font.color and run.font.color.rgb else None)
+        assert props.get("DIVSTYLED") == props.get("SPANSTYLED") != (None, None), (
+            f"the div lost what the identical span kept: {props!r}")
+
+    async def test_a_literal_twin_does_not_unbold_the_tail(
+            self, jp_fetch, jp_root_dir):
+        """htmldocx keys its open tags by name and pops on the first close,
+        so wrapping `hot <b>stuff</b> more` in a second `<b>` let the inner
+        close end the outer wrapper and ` more` arrived plain - bold in the
+        browser, regular in Word. The wrapper subsumes a same-name twin."""
+        doc = '<p style="font-weight:bold">hot <b>stuff</b> more</p>\n'
+        (jp_root_dir / "twin.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "twin.md"}),
+            raise_error=False)
+        assert r.code == 200
+        from docx import Document as _Doc
+
+        document = _Doc(io.BytesIO(r.body))
+        runs = [(run.text, bool(run.bold))
+                for para in document.paragraphs for run in para.runs
+                if run.text.strip()]
+        assert runs and all(bold for _, bold in runs), (
+            f"the tail after the literal twin lost its weight: {runs!r}")
+
+    async def test_a_twin_keeps_its_colour_anchor_and_cell(
+            self, jp_fetch, jp_root_dir):
+        """Subsuming a literal twin must take only its NAME: unwrapping it
+        destroyed the twin's own colour and anchor id with the tag, and a
+        twin inside a nested table lost its weight to a wrapper that cannot
+        reach that cell's runs - htmldocx scopes each cell, so the twin there
+        is kept whole instead."""
+        doc = (
+            '<p style="font-weight:bold">hot <b style="color:red">red</b>'
+            ' <b id="t1">anchor</b> tail</p>\n\n'
+            '<table><tr><td style="font-weight:bold">outer'
+            ' <table><tr><td><b>inner</b></td></tr></table>'
+            ' tail</td></tr></table>\n'
+        )
+        (jp_root_dir / "twinattr.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "twinattr.md"}),
+            raise_error=False)
+        assert r.code == 200
+        from docx import Document as _Doc
+
+        document = _Doc(io.BytesIO(r.body))
+        by_text = {run.text: run for para in document.paragraphs
+                   for run in para.runs if run.text.strip()}
+        red = by_text.get("red")
+        assert red is not None and red.font.color and \
+            str(red.font.color.rgb) == "FF0000", (
+            f"the twin's own colour was destroyed with its tag: "
+            f"{[(t, str(r.font.color.rgb) if r.font.color and r.font.color.rgb else None) for t, r in by_text.items()]!r}")
+        assert all(run.bold for run in by_text.values()), (
+            f"a run lost the weight the styled paragraph gives it: "
+            f"{[(t, bool(r.bold)) for t, r in by_text.items()]!r}")
+        # The anchor id survives into a bookmark
+        from docx.oxml.ns import qn
+
+        marks = [bm.get(qn("w:name")) for bm in
+                 document.element.body.iter(qn("w:bookmarkStart"))]
+        assert "t1" in marks, f"the twin's anchor id was destroyed: {marks!r}"
+        # The nested-table twin keeps the weight the wrapper cannot deliver
+        inner = [run for t in document.tables
+                 for row in t.rows for cell in row.cells
+                 for para in cell.paragraphs for run in para.runs
+                 if run.text.strip() == "inner"]
+        assert inner and inner[0].bold, "the nested-table twin lost its bold"
+
+    async def test_the_last_declaration_wins(self, jp_fetch, jp_root_dir):
+        """CSS is last-wins per property, and a rich-text paste is exactly
+        where a self-overriding `underline;none` or `bold;normal` pair comes
+        from. Accumulating every declaration kept the earlier value alive, so
+        Word underlined what a browser drew plain."""
+        doc = (
+            '<span style="text-decoration:underline;'
+            'text-decoration:none">UNONE</span> and '
+            '<span style="font-weight:bold;font-weight:normal">BNORM</span>\n'
+        )
+        (jp_root_dir / "cascade.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "cascade.md"}),
+            raise_error=False)
+        assert r.code == 200
+        from docx import Document as _Doc
+
+        document = _Doc(io.BytesIO(r.body))
+        styles = {run.text: (bool(run.bold), bool(run.underline))
+                  for para in document.paragraphs for run in para.runs
+                  if run.text.strip() in ("UNONE", "BNORM")}
+        assert styles.get("UNONE") == (False, False), (
+            f"an overridden underline survived: {styles!r}")
+        assert styles.get("BNORM") == (False, False), (
+            f"an overridden weight survived: {styles!r}")
+
+    async def test_a_div_inside_a_quote_stays_inside_it(
+            self, jp_fetch, jp_root_dir):
+        """Markdown wraps a div written in inline position in a paragraph of
+        its own, so renaming the div to <p> nested one <p> in another and
+        htmldocx opened a second. A blockquote and a GitHub alert are each one
+        paragraph per marker, so the content fell out of the callout."""
+        import fitz
+
+        doc = (
+            "> quoted text\n"
+            ">\n"
+            '> <div align="center">QDIV</div>\n'
+            "\n"
+            "> [!NOTE]\n"
+            "> <div>ADIV</div>\n"
+        )
+        (jp_root_dir / "quotediv.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "quotediv.md"}),
+            raise_error=False)
+        assert r.code == 200
+        pdf = fitz.open(stream=r.body, filetype="pdf")
+        spans = {s["text"].strip(): round(s["bbox"][0], 1)
+                 for b in pdf[0].get_text("dict")["blocks"]
+                 for line in b.get("lines", []) for s in line["spans"]
+                 if s["text"].strip()}
+        pdf.close()
+        # Both callouts indent their body past the page margin at 42pt; a div
+        # that escaped its callout draws at the margin instead
+        assert spans.get("QDIV", 0) > 60, (
+            f"the div fell out of the blockquote - spans: {spans!r}")
+        assert spans.get("ADIV", 0) > 50, (
+            f"the div fell out of the alert box - spans: {spans!r}")
+
+    async def test_a_link_label_survives_a_quote_and_an_alert_in_the_pdf(
+            self, jp_fetch, jp_root_dir):
+        """`Paragraph.runs` is `./w:r` and never returns a run Word nested in
+        `<w:hyperlink>`. The callout builders rebuilt their text from it, so
+        the PDF dropped the label while the DOCX kept it."""
+        import fitz
+
+        doc = (
+            "> quoted with a [LINKLABEL](http://example.com) inside\n"
+            "\n"
+            "> [!NOTE]\n"
+            "> alert with a [ALERTLINK](http://example.com) inside\n"
+        )
+        (jp_root_dir / "quotelink.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "quotelink.md"}),
+            raise_error=False)
+        assert r.code == 200
+        pdf = fitz.open(stream=r.body, filetype="pdf")
+        text = "".join(page.get_text() for page in pdf)
+        pdf.close()
+        assert "LINKLABEL" in text, f"blockquote lost the label: {text!r}"
+        assert "ALERTLINK" in text, f"alert box lost the label: {text!r}"
+
+    async def test_an_anchor_target_does_not_kill_the_export(
+            self, jp_fetch, jp_root_dir):
+        """`<a id="x">` is the markdown-portable way to name a spot to link
+        to, and htmldocx reads every anchor's text through
+        `self.tags['a']['href']` without checking it is there - so one in the
+        document took the whole export down with HTTP 500 and an error
+        message reading only `'href'`."""
+        doc = (
+            "Zobacz [wykaz](#zal1) oraz [drugi](#zal2).\n\n"
+            '<a id="zal1"></a>Pierwszy.\n\n'
+            '<a id="zal2">Drugi</a> zalacznik.\n'
+        )
+        (jp_root_dir / "anchor.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "anchor.md"}),
+            raise_error=False)
+        from docx import Document as _Doc
+
+        assert r.code == 200, f"the export died: {r.body[:400]!r}"
+        document = _Doc(io.BytesIO(r.body))
+        xml = document.element.body.xml
+        for name in ("zal1", "zal2"):
+            assert f'w:name="{name}"' in xml, (
+                f"no bookmark for {name} - the link has nothing to reach")
+        # The anchor's own text is content, not scaffolding
+        assert "Drugi" in "".join(p.text for p in document.paragraphs)
+
+    DOC = (
+        "# HTML\n\n"
+        'Colour: <span style="color:#c00000">RED</span>.\n\n'
+        'Weight: <span style="font-weight:bold">HEAVY</span>.\n\n'
+        'Slant: <span style="font-style:italic">SLANTED</span>.\n\n'
+        'Rule: <span style="text-decoration:underline">RULED</span>.\n\n'
+        'Struck: <span style="text-decoration:line-through">GONE</span>.\n\n'
+        'Both: <span style="color:#008000;font-weight:bold">GREENBOLD</span>.\n\n'
+        "Marked: <mark>HIGHLIT</mark>.\n\n"
+        "Deleted: <del>DROPPED</del>.\n\n"
+        "Key: <kbd>CTRL</kbd>.\n\n"
+        'Legacy: <font color="#0000ff">BLUEFONT</font>.\n\n'
+        '<div align="center">CENTRED</div>\n\n'
+        "TRAILING\n"
+    )
+
+    async def _docx(self, jp_fetch, jp_root_dir, doc=None):
+        from docx import Document
+
+        (jp_root_dir / "inline.md").write_text(doc or self.DOC, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "inline.md"}),
+            raise_error=False)
+        assert r.code == 200, f"docx export returned {r.code}"
+        return Document(io.BytesIO(r.body))
+
+    @staticmethod
+    def _run(doc, text):
+        for p in doc.paragraphs:
+            for r in p.runs:
+                if r.text.strip() == text:
+                    return r
+        raise AssertionError(f"no run holding {text!r} - the text never reached Word")
+
+    async def test_span_colour_reaches_word(self, jp_fetch, jp_root_dir):
+        doc = await self._docx(jp_fetch, jp_root_dir)
+        assert str(self._run(doc, "RED").font.color.rgb) == "C00000"
+
+    async def test_span_style_properties_become_run_formatting(
+            self, jp_fetch, jp_root_dir):
+        doc = await self._docx(jp_fetch, jp_root_dir)
+        assert self._run(doc, "HEAVY").bold, "font-weight:bold arrived unbolded"
+        assert self._run(doc, "SLANTED").italic, "font-style:italic arrived upright"
+        assert self._run(doc, "RULED").underline, (
+            "text-decoration:underline arrived unruled")
+        assert self._run(doc, "GONE").font.strike, (
+            "text-decoration:line-through arrived unstruck")
+
+    async def test_colour_and_weight_in_one_span_both_survive(
+            self, jp_fetch, jp_root_dir):
+        doc = await self._docx(jp_fetch, jp_root_dir)
+        run = self._run(doc, "GREENBOLD")
+        assert str(run.font.color.rgb) == "008000" and run.bold, (
+            "a span declaring both colour and weight lost one of them")
+
+    async def test_semantic_inline_tags_reach_word(self, jp_fetch, jp_root_dir):
+        from docx.oxml.ns import qn
+
+        doc = await self._docx(jp_fetch, jp_root_dir)
+        shd = self._run(doc, "HIGHLIT")._r.find(qn("w:rPr") + "/" + qn("w:shd"))
+        assert shd is not None and shd.get(qn("w:fill")) == "FFFF00", (
+            "<mark> did not become a highlighted run")
+        assert self._run(doc, "DROPPED").font.strike, "<del> arrived unstruck"
+        assert self._run(doc, "CTRL").font.name == "Courier", (
+            "<kbd> arrived in the body font, not monospace")
+
+    async def test_font_colour_attribute_reaches_word(self, jp_fetch, jp_root_dir):
+        doc = await self._docx(jp_fetch, jp_root_dir)
+        assert str(self._run(doc, "BLUEFONT").font.color.rgb) == "0000FF", (
+            '<font color="..."> - the notebook colouring idiom - lost its colour')
+
+    async def test_aligned_div_is_its_own_centred_paragraph(
+            self, jp_fetch, jp_root_dir):
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        doc = await self._docx(jp_fetch, jp_root_dir)
+        centred = [p for p in doc.paragraphs if p.text.strip() == "CENTRED"]
+        assert centred, "the <div> text never reached Word as its own paragraph"
+        assert centred[0].alignment == WD_ALIGN_PARAGRAPH.CENTER, (
+            'align="center" did not centre the block')
+        assert "TRAILING" not in centred[0].text, (
+            "the <div> swallowed the paragraph after it")
+
+    async def test_a_styled_table_cell_keeps_its_cell(self, jp_fetch, jp_root_dir):
+        # The emphasis has to go around the cell's CONTENTS: a `<b>` between
+        # `<tr>` and `<td>` is not a parent htmldocx looks through, and the
+        # cell is dropped - or the whole export dies on the short row
+        doc = await self._docx(
+            jp_fetch, jp_root_dir,
+            '<table><tr><td style="font-weight:bold">BOLDCELL</td><td>PLAIN</td></tr>'
+            "<tr><td>c</td><td>d</td></tr></table>\n")
+        grid = [[c.text for c in row.cells] for t in doc.tables for row in t.rows]
+        assert grid == [["BOLDCELL", "PLAIN"], ["c", "d"]], (
+            f"the styled cell did not survive the rewrite: {grid!r}")
+        assert self._run(doc_or_cell_runs(doc), "BOLDCELL").bold, (
+            "the cell survived but arrived unbolded")
+
+    async def test_a_table_carrying_emphasis_keeps_its_rows(
+            self, jp_fetch, jp_root_dir):
+        doc = await self._docx(
+            jp_fetch, jp_root_dir,
+            '<table style="font-weight:bold"><tr><td>X</td><td>Y</td></tr></table>\n')
+        grid = [[c.text for c in row.cells] for t in doc.tables for row in t.rows]
+        assert grid == [["X", "Y"]], (
+            f"an emphasis declaration on the table itself lost its rows: {grid!r}")
+
+    async def test_a_highlight_around_emphasis_shades_every_run(
+            self, jp_fetch, jp_root_dir):
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        doc = await self._docx(
+            jp_fetch, jp_root_dir,
+            "Text <mark>plain and **bold** inside</mark> end.\n")
+        shaded = {r.text: ExportHandlerBase.docx_run_shading(r)
+                  for p in doc.paragraphs for r in p.runs if r.text.strip()}
+        for fragment in ("plain and ", "bold", " inside"):
+            assert shaded.get(fragment) == "FFFF00", (
+                f"{fragment!r} inside the highlight was not shaded: {shaded!r}")
+        assert not any("PILL:" in t for t in shaded), "a shading marker leaked as text"
+
+    async def test_a_highlight_keeps_a_colour_the_author_declared(
+            self, jp_fetch, jp_root_dir):
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        doc = await self._docx(
+            jp_fetch, jp_root_dir,
+            'Text <mark style="background-color:#00ff00">GREEN</mark> end.\n')
+        run = self._run(doc, "GREEN")
+        assert ExportHandlerBase.docx_run_shading(run) == "00FF00", (
+            "the default yellow overwrote the colour the author asked for")
+
+    async def test_emphasis_nested_in_its_own_tag_keeps_the_tail(
+            self, jp_fetch, jp_root_dir):
+        # htmldocx keys open tags by name and pops on the first close, so a
+        # generated twin inside an identical tag would end the outer one early
+        doc = await self._docx(
+            jp_fetch, jp_root_dir,
+            '<b>outer <span style="font-weight:bold">inner</span> tail</b>\n')
+        bold = [r.bold for p in doc.paragraphs for r in p.runs if r.text.strip()]
+        assert all(bold), f"the text after the nested tag lost its bold: {bold!r}"
+
+
+def doc_or_cell_runs(doc):
+    """A stand-in document whose `paragraphs` reach into every table cell too."""
+    class _Flat:
+        paragraphs = [p for t in doc.tables for row in t.rows
+                      for c in row.cells for p in c.paragraphs] + list(doc.paragraphs)
+    return _Flat
+
+
+class TestPdfRunShading:
+    """DEF-23: a highlight the reader sees in Word and in the browser has to
+    reach the PDF too - `format_run` read every run property except shading."""
+
+    DOC = "Text <mark>HIGHLIT</mark> end.\n"
+
+    async def test_the_pdf_paints_the_highlight(self, jp_fetch, jp_root_dir):
+        import fitz
+
+        (jp_root_dir / "shade.md").write_text(self.DOC, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "shade.md"}),
+            raise_error=False)
+        assert r.code == 200
+        pdf = fitz.open(stream=r.body, filetype="pdf")
+        fills = [d.get("fill") for page in pdf for d in page.get_drawings()]
+        text = "".join(page.get_text() for page in pdf)
+        pdf.close()
+        assert "HIGHLIT" in text
+        yellow = [f for f in fills if f and round(f[0], 2) == 1.0
+                  and round(f[1], 2) == 1.0 and round(f[2], 2) == 0.0]
+        assert yellow, (
+            f"the highlight is absent from the PDF - fills drawn: {fills!r}")
+
+    async def test_the_pdf_paints_a_highlight_inside_a_table_cell(
+            self, jp_fetch, jp_root_dir):
+        """A cell was rebuilt from `cell_markup(p.text)` - a plain-string
+        projection - so every run property reached Word and none reached the
+        PDF. The fill has to land inside the first column, not merely exist:
+        the body-paragraph half of this class already draws a yellow rect, so
+        an existence check passes with the cell still plain."""
+        import fitz
+
+        doc = (
+            "| head | x |\n"
+            "| --- | --- |\n"
+            "| <mark>CELLMARK</mark> | plain |\n"
+        )
+        (jp_root_dir / "cellshade.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "cellshade.md"}),
+            raise_error=False)
+        assert r.code == 200
+        pdf = fitz.open(stream=r.body, filetype="pdf")
+        page = pdf[0]
+        cell = next((s for b in page.get_text("dict")["blocks"]
+                     for line in b.get("lines", [])
+                     for s in line["spans"] if "CELLMARK" in s["text"]), None)
+        yellow = [tuple(round(v, 1) for v in d["rect"])
+                  for d in page.get_drawings()
+                  if d.get("fill") and [round(c, 2) for c in d["fill"]] == [1.0, 1.0, 0.0]]
+        pdf.close()
+        assert cell is not None, "the cell text is missing from the PDF"
+        # Column 1's own band, not the page's left margin: a fill drawn for the
+        # body paragraph would sit outside it
+        assert any(r0 <= cell["bbox"][0] + 1 and r2 >= cell["bbox"][2] - 1
+                   and r1 <= cell["bbox"][1] + 1 and r3 >= cell["bbox"][3] - 1
+                   for r0, r1, r2, r3 in yellow), (
+            f"no yellow fill behind the cell at {cell['bbox']!r} - "
+            f"yellow rects drawn: {yellow!r}")
+
+    async def test_a_bold_cell_fits_the_column_it_was_measured_for(
+            self, jp_fetch, jp_root_dir):
+        """Rendering a cell's run formatting widened its text without telling
+        the column measurement, which still sized every body cell in the
+        regular face. reportlab then hard-split the word rather than overflow,
+        so `bold` came out as `bol` on one line and `d` on the next."""
+        import fitz
+
+        doc = (
+            "| a | b |\n"
+            "| --- | --- |\n"
+            "| **important warning text** | ok |\n"
+        )
+        (jp_root_dir / "boldcell.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "boldcell.md"}),
+            raise_error=False)
+        assert r.code == 200
+        pdf = fitz.open(stream=r.body, filetype="pdf")
+        spans = [s for b in pdf[0].get_text("dict")["blocks"]
+                 for line in b.get("lines", [])
+                 for s in line["spans"] if s["text"].strip()]
+        pdf.close()
+        # One span carrying the whole phrase, not fragments of it on two lines
+        whole = [s for s in spans if s["text"].strip() == "important warning text"]
+        assert whole, (
+            "the bold cell was split across lines - spans drawn: "
+            f"{[(s['text'], s['font'], round(s['bbox'][1], 1)) for s in spans]!r}")
+        assert "Bold" in whole[0]["font"], (
+            f"the cell lost its weight: {whole[0]['font']!r}")
+
+    async def test_a_minor_heading_keeps_its_symbols(
+            self, jp_fetch, jp_root_dir):
+        """H4 and H6 take their slant from the paragraph STYLE, not from a run,
+        so the per-run glyph gate never saw them and the star stayed blank in
+        exactly the heading a filing numbers its exhibits with."""
+        import fitz
+
+        doc = (
+            "#### \u2605 H4 \u2713\n\n"
+            "###### \u2605 H6 \u2713\n\n"
+            "#### Zazalenie H4 bez gwiazdki\n"
+        )
+        (jp_root_dir / "headsym.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "headsym.md"}),
+            raise_error=False)
+        assert r.code == 200
+        pdf = fitz.open(stream=r.body, filetype="pdf")
+        spans = [(s["text"], s["font"])
+                 for b in pdf[0].get_text("dict")["blocks"]
+                 for line in b.get("lines", []) for s in line["spans"]
+                 if s["text"].strip()]
+        pdf.close()
+        text = "".join(t for t, _ in spans)
+        assert "\x00" not in text, f"a heading glyph is notdef: {spans!r}"
+        assert text.count("\u2605") == 2 and text.count("\u2713") == 2, (
+            f"a minor heading lost its markers: {spans!r}")
+        # A heading with nothing uncoverable keeps the slant it was given
+        plain = [f for t, f in spans if "Zazalenie" in t]
+        # fitz truncates a font name at 24 chars: 'LiberationSans-BoldItali'
+        assert plain and "Itali" in plain[0], (
+            f"an ordinary minor heading lost its slant: {plain!r}")
+
+    async def test_a_multi_line_quote_keeps_its_slant(
+            self, jp_fetch, jp_root_dir):
+        """The glyph-coverage gate asks a font whether it can draw each
+        character, and `run.text` renders a `<w:br>` as a newline - which no
+        cmap carries. Every multi-line italic run answered False for a reason
+        that has nothing to do with coverage and came out upright."""
+        import fitz
+
+        doc = "> line one\n> line two\n> line three\n"
+        (jp_root_dir / "multiquote.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "multiquote.md"}),
+            raise_error=False)
+        assert r.code == 200
+        pdf = fitz.open(stream=r.body, filetype="pdf")
+        fonts = {s["text"].strip(): s["font"]
+                 for b in pdf[0].get_text("dict")["blocks"]
+                 for line in b.get("lines", []) for s in line["spans"]
+                 if s["text"].strip()}
+        pdf.close()
+        assert fonts and all("Italic" in f or "Oblique" in f
+                             for f in fonts.values()), (
+            f"a line of the quote lost its slant: {fonts!r}")
+
+    async def test_a_symbol_survives_an_italic_run_in_the_pdf(
+            self, jp_fetch, jp_root_dir):
+        """DejaVu ships no oblique on most Linux boxes, so the PDF italic slot
+        is filled from Liberation, which has no glyph for a star. reportlab
+        draws a missing glyph as a blank advance, so rendering a cell's own
+        formatting deleted the reader's evidence marker instead of un-slanting
+        it - silently, with nothing in the output to say so."""
+        import fitz
+
+        doc = (
+            "| a | b |\n"
+            "| --- | --- |\n"
+            "| *\u2605 kursywa* | x |\n"
+            "\n"
+            "> Cytat \u2605 w kursywie\n"
+        )
+        (jp_root_dir / "italicstar.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "italicstar.md"}),
+            raise_error=False)
+        assert r.code == 200
+        pdf = fitz.open(stream=r.body, filetype="pdf")
+        text = "".join(page.get_text() for page in pdf)
+        pdf.close()
+        assert "\x00" not in text, "a glyph was drawn as notdef"
+        assert text.count("\u2605") == 2, (
+            f"the star is missing from an italic run - text: {text!r}")
+
+    async def test_the_pdf_keeps_a_link_label_in_a_highlighted_paragraph(
+            self, jp_fetch, jp_root_dir):
+        """`Paragraph.runs` is `./w:r`, so it never returns a run Word nested
+        in `<w:hyperlink>`. The formatted rebuild used it while the plain path
+        used `para.text` (which does reach the link), so adding a highlight to
+        a paragraph deleted its link label from the PDF."""
+        import fitz
+
+        doc = "See <mark>HIGHLIT</mark> and [LINKTEXT](http://example.com) end.\n"
+        (jp_root_dir / "linkshade.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "linkshade.md"}),
+            raise_error=False)
+        assert r.code == 200
+        pdf = fitz.open(stream=r.body, filetype="pdf")
+        text = "".join(page.get_text() for page in pdf)
+        pdf.close()
+        assert "LINKTEXT" in text, (
+            f"the link label was dropped from the highlighted paragraph: {text!r}")
+        assert "HIGHLIT" in text
+
+
+class TestDocxHyperlinkRunsAreReached:
+    """A run Word nests in `<w:hyperlink>` is invisible to `Paragraph.runs`,
+    so every pass that walks a paragraph run by run skips the link."""
+
+    async def _export(self, jp_fetch, jp_root_dir, name, doc):
+        from docx import Document
+
+        (jp_root_dir / name).write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": name}),
+            raise_error=False)
+        assert r.code == 200
+        return Document(io.BytesIO(r.body))
+
+    async def test_a_highlight_over_a_link_leaks_no_marker_into_the_text(
+            self, jp_fetch, jp_root_dir):
+        """style_docx_color_runs reads a `⁣PILL:<hex>⁣` sentinel off a run and
+        strips it. Missing the link run left the sentinel in the visible
+        document - U+2063 is zero-width, so Word draws the bare `PILL:FFFF00`
+        mid-sentence."""
+        doc = "See <mark>a [LINKTEXT](http://example.com) b</mark> end.\n"
+        d = await self._export(jp_fetch, jp_root_dir, "pilllink.md", doc)
+        text = "\n".join(p.text for p in d.paragraphs)
+        assert "PILL:" not in text, f"the pill sentinel leaked: {text!r}"
+        assert "LINKTEXT" in text
+
+    async def test_the_link_run_carries_the_shading_the_rest_of_the_span_has(
+            self, jp_fetch, jp_root_dir):
+        """The marker is per text node, so the link is a shaded run in its own
+        right - not merely a run the strip pass has to leave alone."""
+        from docx.oxml.ns import qn
+
+        doc = "See <mark>a [LINKTEXT](http://example.com) b</mark> end.\n"
+        d = await self._export(jp_fetch, jp_root_dir, "pillfill.md", doc)
+        fills = {}
+        for p in d.paragraphs:
+            for run in p._p.iter(qn("w:r")):
+                txt = "".join(t.text or "" for t in run.findall(qn("w:t")))
+                if not txt.strip():
+                    continue
+                rPr = run.find(qn("w:rPr"))
+                shd = rPr.find(qn("w:shd")) if rPr is not None else None
+                fills[txt] = shd.get(qn("w:fill")) if shd is not None else None
+        assert fills.get("LINKTEXT") == "FFFF00", (
+            f"the link run inside the highlight is unshaded: {fills!r}")
+
+
+class TestDocxRunShadingElementOrder:
+    """CT_RPr is a sequence, not a bag: `w:shd` is index 29 and `w:vertAlign`
+    31, so appending the shading after a `<sub>`'s vertAlign gives Word a file
+    it refuses to open."""
+
+    async def test_a_highlight_over_a_subscript_writes_schema_valid_order(
+            self, jp_fetch, jp_root_dir):
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        doc = "Text <mark>H<sub>2</sub>O</mark> end.\n"
+        (jp_root_dir / "shdorder.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "shdorder.md"}),
+            raise_error=False)
+        assert r.code == 200
+        d = Document(io.BytesIO(r.body))
+
+        checked = 0
+        for p in d.paragraphs:
+            for run in p._p.iter(qn("w:r")):
+                rPr = run.find(qn("w:rPr"))
+                if rPr is None:
+                    continue
+                tags = [re.sub(r"^\{.*\}", "", c.tag) for c in rPr]
+                if "shd" not in tags or "vertAlign" not in tags:
+                    continue
+                checked += 1
+                assert tags.index("shd") < tags.index("vertAlign"), (
+                    f"w:shd written after w:vertAlign - Word rejects this rPr: "
+                    f"{tags!r}")
+        assert checked, "no run carried both shading and a vertical alignment"

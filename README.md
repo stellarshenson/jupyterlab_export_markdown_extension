@@ -26,6 +26,8 @@ Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No extern
 - **Syntax Highlighting** - Code blocks with Pygments-powered coloring
 - **Wide Tables** - Tables wider than the page wrap within a fitted column layout instead of running past the margin, in PDF, DOCX and HTML
 - **Task Lists** - `- [x]` / `- [ ]` render as checkbox glyphs in HTML, DOCX and PDF
+- **Inline HTML** - `<span style="color:...">`, `font-weight`, `font-style`, `text-decoration`, `<mark>`, `<del>`, `<ins>`, `<kbd>`, `<font color>`, `align=` and `<div>` render as written in DOCX and PDF
+- **Symbol Glyphs** - `★ ☆ ✓ ✗ ☐ ☒`, arrows and box drawing name a font of their own in DOCX, so they look the same in every reader's Word
 - **Export Spinner** - Modal dialog shows progress during export operations
 - **File Menu Integration** - "Export Markdown As" submenu appears when markdown is active
 - **Command Palette** - All export commands available via Ctrl+Shift+C

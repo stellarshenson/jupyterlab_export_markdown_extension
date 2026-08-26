@@ -2056,9 +2056,48 @@ class ExportHandlerBase(APIHandler):
     #: Task-list checkbox glyphs - Word's own checkbox defaults (U+2612 ballot
     #: box with X for done, U+2610 empty box), which DejaVu (PDF) and every
     #: browser (HTML) also carry. In DOCX they are tagged MS Gothic - the font
-    #: Word draws its native checkboxes in - by style_docx_task_checkboxes().
+    #: Word draws its native checkboxes in - by style_docx_symbol_runs().
     TASK_CHECKBOX_DONE = '☒'
     TASK_CHECKBOX_OPEN = '☐'
+
+    #: Font DOCX gives a symbol glyph. Word ships it on every Windows since 7,
+    #: it covers each range below, and it is the face Word's own substitution
+    #: usually lands on - naming it just makes the choice the same everywhere.
+    DOCX_SYMBOL_FONT = 'Segoe UI Symbol'
+
+    #: Font DOCX gives the task checkboxes - the one Word draws its own in, so
+    #: they render solid beside Word's rather than as a thin outline.
+    DOCX_CHECKBOX_FONT = 'MS Gothic'
+
+    #: Ranges Cambria - the DOCX body face - has no glyphs in. A character here
+    #: is left to Word's per-machine font substitution otherwise, which is what
+    #: turns a star into a box on a machine with a thin font set. The arrow
+    #: block starts at U+2194 on purpose: Cambria does carry U+2190-2193, so the
+    #: everyday `->` keeps the body typeface instead of switching mid-sentence.
+    DOCX_SYMBOL_RANGES = (
+        (0x2194, 0x21FF),  # Arrows, less the four Cambria has
+        (0x2500, 0x257F),  # Box Drawing
+        (0x2580, 0x259F),  # Block Elements
+        (0x25A0, 0x25FC),  # Geometric Shapes, less the two default emoji
+        (0x25FF, 0x25FF),  # U+25FD/U+25FE are Emoji_Presentation=Yes
+    )
+
+    #: Symbols named one at a time because their blocks cannot be taken whole.
+    #: Miscellaneous Symbols, Dingbats and Miscellaneous Symbols and Arrows
+    #: interleave text symbols with emoji, and Word's own fallback draws an
+    #: emoji in colour from Segoe UI Emoji - better than anything named here.
+    #: So only the text-presentation symbols this project actually renders are
+    #: listed: evidence stars and the check and cross marks its documents use.
+    DOCX_SYMBOL_CHARS = frozenset('★☆✓✔✗✘')
+
+    #: Codepoints that modify the character before them - the emoji and text
+    #: presentation selectors, and the enclosing keycap. They carry no glyph of
+    #: their own and must stay in the run their base character is in.
+    DOCX_VARIATION_SELECTORS = '\ufe0e\ufe0f\u20e3'
+
+    #: The selector that asks for emoji presentation. A character carrying it
+    #: is left unnamed so Word's colour emoji fallback still applies.
+    DOCX_EMOJI_SELECTOR = '\ufe0f'
 
     def preprocess_task_lists(self, content: str) -> str:
         """Render GitHub task-list markers as Unicode checkbox glyphs.
@@ -2544,12 +2583,15 @@ class ExportHandlerBase(APIHandler):
                             paragraph._p, f'{{{OMML_NS}}}oMathPara'
                         )
                         omath_para.append(omml_elem)
-                        # Remove all existing runs (marker text)
-                        for run in paragraph.runs:
+                        # Remove all existing runs (marker text). The link
+                        # walk, not `paragraph.runs`: a marker inside a link
+                        # label sits in a run under `w:hyperlink`, which that
+                        # property never returns, and it would print raw.
+                        for run in self.docx_paragraph_runs(paragraph):
                             run._r.getparent().remove(run._r)
                     except Exception:
                         # Fallback: leave marker text (will show raw LaTeX)
-                        for run in paragraph.runs:
+                        for run in self.docx_paragraph_runs(paragraph):
                             if marker in run.text:
                                 run.text = run.text.replace(marker, latex)
 
@@ -2560,7 +2602,7 @@ class ExportHandlerBase(APIHandler):
                     continue
 
                 # Find the run containing the marker
-                for run in list(paragraph.runs):
+                for run in self.docx_paragraph_runs(paragraph):
                     if marker not in run.text:
                         continue
 
@@ -2583,7 +2625,11 @@ class ExportHandlerBase(APIHandler):
                     # Create after-text run if needed
                     if parts[1]:
                         after_run = copy.deepcopy(run._r)
-                        after_run.find(qn('w:t')).text = parts[1]
+                        # CT_R's own setter, not a reach for a w:t that may
+                        # not be there: when the marker opens the run, the
+                        # `run.text = parts[0]` above cleared its content, so
+                        # the copy has no w:t at all and .find returned None
+                        after_run.text = parts[1]
                         parent.insert(run_index + 2, after_run)
 
                     break  # Only one marker per run expected
@@ -2714,19 +2760,65 @@ class ExportHandlerBase(APIHandler):
 
         return alert_tables
 
-    def style_docx_task_checkboxes(self, document):
-        """Draw task-list checkbox glyphs in MS Gothic - the font Word uses for
-        its own checkboxes - so they render solid on Windows instead of via a
-        thin Calibri fallback. Each glyph is split into its own run and only
-        that run gets the font, leaving the item text in the body font.
+    @staticmethod
+    def docx_run_shading(run) -> str:
+        """Six-hex fill of a run's ``w:shd``, or '' when it carries none."""
+        from docx.oxml.ns import qn
+
+        rPr = run._r.find(qn('w:rPr'))
+        shd = rPr.find(qn('w:shd')) if rPr is not None else None
+        fill = shd.get(qn('w:fill')) if shd is not None else None
+        if not fill or fill == 'auto' or len(fill) != 6:
+            return ''
+        return fill
+
+    @staticmethod
+    def docx_paragraph_runs(paragraph):
+        """Every run under ``paragraph``, the ones inside a link included.
+
+        ``Paragraph.runs`` is ``./w:r`` - direct children only - so a run Word
+        nested in ``<w:hyperlink>`` is invisible to it. Anything that walks a
+        paragraph run by run therefore skips the link: a sentinel marker left
+        on it leaks into the visible text, and a rebuild from those runs drops
+        the link label outright. The element walk reaches both, and the Run
+        wrapper keeps the callers unchanged.
+        """
+        from docx.oxml.ns import qn
+        from docx.text.run import Run
+
+        return [Run(r, paragraph) for r in paragraph._p.iter(qn('w:r'))]
+
+    @classmethod
+    def docx_symbol_font(cls, char: str) -> str:
+        """Font a DOCX run must name to draw ``char``, or '' for the body font.
+
+        Only characters the body face has no glyph for get an answer. Word does
+        substitute on its own, but it picks from whatever is installed, so the
+        same document can come out with a star in one machine's fallback face
+        and a hollow box on the next. Naming the font settles it.
+        """
+        if char in (cls.TASK_CHECKBOX_DONE, cls.TASK_CHECKBOX_OPEN):
+            return cls.DOCX_CHECKBOX_FONT
+        if char in cls.DOCX_SYMBOL_CHARS:
+            return cls.DOCX_SYMBOL_FONT
+        code = ord(char)
+        if any(low <= code <= high for low, high in cls.DOCX_SYMBOL_RANGES):
+            return cls.DOCX_SYMBOL_FONT
+        return ''
+
+    def style_docx_symbol_runs(self, document):
+        """Name a font on every run character the DOCX body face cannot draw.
+
+        Each stretch of symbol text is split into its own run and only that run
+        gets the font, so the surrounding words keep the body typeface. Task
+        checkboxes take MS Gothic and every other symbol DOCX_SYMBOL_FONT - see
+        docx_symbol_font() for why the font is named rather than left to Word.
         """
         from docx.oxml.ns import qn
         from docx.oxml import OxmlElement
         import copy
 
-        glyphs = (self.TASK_CHECKBOX_DONE, self.TASK_CHECKBOX_OPEN)
-
-        def set_gothic(r_elem):
+        def set_font(r_elem, name):
             rPr = r_elem.find(qn('w:rPr'))
             if rPr is None:
                 rPr = OxmlElement('w:rPr')
@@ -2741,53 +2833,88 @@ class ExportHandlerBase(APIHandler):
                 else:
                     rPr.insert(0, rFonts)
             for attr in ('w:ascii', 'w:hAnsi', 'w:eastAsia', 'w:cs'):
-                rFonts.set(qn(attr), 'MS Gothic')
+                rFonts.set(qn(attr), name)
+
+        def font_of(text, index):
+            """Font for the character at ``index``, given what follows it."""
+            char = text[index]
+            if char in self.DOCX_VARIATION_SELECTORS:
+                # No glyph of its own - it modifies the character before it
+                return None
+            if text[index + 1:index + 2] == self.DOCX_EMOJI_SELECTOR:
+                # The author asked for the emoji face. Word's own fallback
+                # draws it in colour; anything named here draws it flat.
+                return ''
+            return self.docx_symbol_font(char)
 
         def segment(text):
-            out, buf, buf_glyph = [], '', None
-            for ch in text:
-                is_g = ch in glyphs
-                if buf and is_g != buf_glyph:
-                    out.append((buf, buf_glyph))
+            """Split text into stretches of one font each, body font as ''."""
+            out, buf, buf_font = [], '', ''
+            for index in range(len(text)):
+                font = font_of(text, index)
+                if font is not None and buf and font != buf_font:
+                    out.append((buf, buf_font))
                     buf = ''
-                buf += ch
-                buf_glyph = is_g
+                buf += text[index]
+                if font is not None:
+                    buf_font = font
             if buf:
-                out.append((buf, buf_glyph))
+                out.append((buf, buf_font))
             return out
 
+        def text_node(text):
+            node = OxmlElement('w:t')
+            node.text = text
+            node.set(qn('xml:space'), 'preserve')
+            return node
+
         for r_elem in list(document.element.body.iter(qn('w:r'))):
-            t_elem = r_elem.find(qn('w:t'))
-            if t_elem is None or not t_elem.text:
-                continue
-            if not any(g in t_elem.text for g in glyphs):
+            children = [c for c in r_elem if c.tag != qn('w:rPr')]
+            texts = [c.text or '' for c in children if c.tag == qn('w:t')]
+            if not any(self.docx_symbol_font(ch) for t in texts for ch in t):
                 continue
 
-            segments = segment(t_elem.text)
+            # Rebuild the whole run as a sequence of runs, one font each.
+            # Content that carries no glyph - a line break, a tab, a picture -
+            # keeps its place in that sequence: left behind on the original run
+            # it would jump ahead of every split-off segment, moving a break to
+            # the middle of the line and welding the next line onto it.
+            groups, group, group_font = [], [], ''
+            for child in children:
+                if child.tag != qn('w:t') or not child.text:
+                    group.append(child)
+                    continue
+                for seg_text, seg_font in segment(child.text):
+                    if seg_font != group_font and group:
+                        groups.append((group_font, group))
+                        group = []
+                    group_font = seg_font
+                    group.append(text_node(seg_text))
+            groups.append((group_font, group))
 
             # Formatting-only template: carries the run's rPr but none of its
-            # content (w:t/w:br/w:tab/w:drawing), so cloned segment runs get a
-            # fresh single w:t and never duplicate the original's breaks/tabs.
+            # content, so each cloned run starts empty and takes exactly the
+            # nodes its group holds.
             template = copy.deepcopy(r_elem)
             for child in list(template):
                 if child.tag != qn('w:rPr'):
                     template.remove(child)
 
-            first_text, first_glyph = segments[0]
-            t_elem.text = first_text
-            t_elem.set(qn('xml:space'), 'preserve')
-            if first_glyph:
-                set_gothic(r_elem)
+            for child in children:
+                r_elem.remove(child)
+            first_font, first_nodes = groups[0]
+            for node in first_nodes:
+                r_elem.append(node)
+            if first_font:
+                set_font(r_elem, first_font)
 
             anchor = r_elem
-            for seg_text, seg_glyph in segments[1:]:
+            for group_font, group_nodes in groups[1:]:
                 new_r = copy.deepcopy(template)
-                nt = OxmlElement('w:t')
-                nt.text = seg_text
-                nt.set(qn('xml:space'), 'preserve')
-                new_r.append(nt)
-                if seg_glyph:
-                    set_gothic(new_r)
+                for node in group_nodes:
+                    new_r.append(node)
+                if group_font:
+                    set_font(new_r, group_font)
                 anchor.addnext(new_r)
                 anchor = new_r
 
@@ -2940,6 +3067,75 @@ class ExportHandlerBase(APIHandler):
         'darkred': '8B0000', 'darkblue': '00008B',
     }
 
+    #: Fill a ``<mark>`` gets when the author declared none. The HTML export
+    #: writes no rule for ``mark``, so it takes the browser default - which is
+    #: this same yellow, and the two formats agree without being told to.
+    _HTML_MARK_FILL = _CSS_NAMED_COLORS['yellow']
+
+    #: Inline tags htmldocx has no handler for, and the tag it does handle that
+    #: means the same thing. ``<ins>`` is underline and ``<del>`` strike-through
+    #: because that is how a browser draws them.
+    _HTML_TAG_ALIASES = {
+        'del': 's', 'strike': 's', 'ins': 'u', 'kbd': 'code', 'samp': 'code',
+    }
+
+    #: CSS declarations htmldocx drops, and the tag that carries the same
+    #: meaning through it. Keyed by property; the value maps a declared CSS
+    #: value to a tag name, or to '' when the declaration asks for nothing
+    #: (``font-weight: normal``, ``text-decoration: none``). 600 is the weight
+    #: CSS itself calls bold; a lambda in a class body cannot read a class
+    #: constant, so the number stays inline.
+    _CSS_STYLE_TAGS = {
+        'font-weight': lambda v: 'b' if v in ('bold', 'bolder') or (
+            v.isdigit() and int(v) >= 600) else '',
+        'font-style': lambda v: 'i' if v in ('italic', 'oblique') else '',
+        'text-decoration': lambda v: ''.join(
+            t for t, k in (('u', 'underline'), ('s', 'line-through')) if k in v),
+    }
+
+    #: Elements that open a block of their own. A ``<div>`` wrapping any of
+    #: these is a container, not a paragraph - see restructure_html_for_docx.
+    _HTML_BLOCK_TAGS = ('p', 'div', 'table', 'ul', 'ol', 'pre', 'blockquote',
+                        'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6')
+
+    #: Elements an inline tag may legally wrap. Everything else takes the
+    #: emphasis around its CONTENTS instead: htmldocx reaches a cell with a
+    #: direct-child walk, so a ``<b>`` between ``<tr>`` and ``<td>`` costs the
+    #: cell - the row comes out short, or the export dies outright.
+    _HTML_INLINE_TAGS = ('span', 'a', 'code', 'b', 'i', 'u', 's', 'em',
+                         'strong', 'sub', 'sup', 'small', 'abbr', 'q',
+                         'cite', 'time', 'var')
+
+    #: Elements that already own a run of text, so a <div> inside one is in
+    #: inline position however it was written. Renaming it to <p> there nests
+    #: a block in a block: htmldocx ends the list item, the heading or the
+    #: cell early and the rest of the line becomes a paragraph of its own.
+    _HTML_TEXT_HOLDERS = ('p', 'li', 'td', 'th',
+                          'h1', 'h2', 'h3', 'h4', 'h5', 'h6')
+
+    #: Table scaffolding, which holds no text of its own. An emphasis
+    #: declaration here has nowhere to go - Word has no run inside a ``<tr>`` -
+    #: and either placement breaks that same direct-child walk.
+    _HTML_TABLE_TAGS = ('table', 'thead', 'tbody', 'tfoot', 'tr')
+
+    @staticmethod
+    def _css_text_align(style: str) -> str:
+        """Return the ``text-align`` value declared in ``style``, or ''."""
+        for decl in style.split(';'):
+            prop, _, value = decl.partition(':')
+            if prop.strip().lower() == 'text-align':
+                value = value.strip().lower()
+                if value in ('left', 'right', 'center', 'justify'):
+                    return value
+        return ''
+
+    @staticmethod
+    def _add_css(el, declaration: str) -> None:
+        """Append one CSS declaration to an element's style attribute."""
+        el['style'] = ';'.join(
+            part for part in (el.get('style', '').strip().rstrip(';'),
+                              declaration) if part)
+
     @classmethod
     def _normalize_css_color(cls, value: str) -> str:
         """Return a 6-hex (no #) for a CSS colour value, or '' if not resolvable."""
@@ -2956,7 +3152,7 @@ class ExportHandlerBase(APIHandler):
     def restructure_html_for_docx(self, html: str) -> str:
         """Fix htmldocx structural and styling blind spots before conversion.
 
-        Handles four htmldocx limitations:
+        Handles five htmldocx limitations:
 
         1. Loose list items (``<li><p>text</p>...</li>``) - ``handle_li``
            opens a bullet paragraph, then the inner ``<p>`` opens a fresh
@@ -2973,17 +3169,18 @@ class ExportHandlerBase(APIHandler):
            arbitrary hex becomes ``lightGray``. The background is stripped
            from the style and re-encoded as a ``⁣PILL:<hex>⁣`` marker
            that style_docx_color_runs() turns into true run shading.
+        5. Inline HTML htmldocx has no handler for - ``<mark>``, ``<del>``,
+           ``<kbd>``, ``<font color>``, an ``align=`` attribute, a bare
+           ``<div>``, and the ``font-weight`` / ``font-style`` /
+           ``text-decoration`` half of a style attribute. Each is rewritten
+           into the markup htmldocx does read, so the formatting arrives in
+           Word instead of the text landing there plain. A ``<div>`` wrapping
+           blocks is the exception: it hands its children only its
+           ``text-align`` and is then unwrapped, so the rest of its style
+           attribute is lost.
         """
-        from bs4 import BeautifulSoup
+        from bs4 import BeautifulSoup, NavigableString
         soup = BeautifulSoup(html, 'html.parser')
-
-        # 1. Loose list items: merge a leading <p> into the <li> itself
-        for li in soup.find_all('li'):
-            first_el = next(
-                (c for c in li.children if getattr(c, 'name', None)), None
-            )
-            if first_el is not None and first_el.name == 'p':
-                first_el.unwrap()
 
         # 2. Blockquote paragraphs: prefix an indent-encoding marker
         for bq in soup.find_all('blockquote'):
@@ -2998,18 +3195,102 @@ class ExportHandlerBase(APIHandler):
             else:
                 bq.insert(0, marker)
 
+        # 5. Inline tags htmldocx cannot read, swapped for ones it can
+        for el in soup.find_all(list(self._HTML_TAG_ALIASES)):
+            el.name = self._HTML_TAG_ALIASES[el.name]
+        for el in soup.find_all('mark'):
+            el.name = 'span'
+            # The style loop below takes the LAST background it sees, so adding
+            # the default unconditionally would discard the author's own colour
+            if 'background' not in el.get('style', '').lower():
+                self._add_css(el, f'background-color:#{self._HTML_MARK_FILL}')
+        # <font color> is the colouring a notebook markdown cell is most often
+        # written with, and htmldocx reads colour off the style attribute only
+        # An <a> carrying no href is a link TARGET, not a link - the
+        # markdown-portable way to name a spot mid-document. htmldocx reads a
+        # link's text through self.tags['a']['href'] without checking it is
+        # there, so any such anchor holding text raises KeyError and the whole
+        # export dies with HTTP 500. As a <span> it keeps its id for
+        # inject_anchor_markers and htmldocx never sees an anchor at all.
+        for el in soup.find_all('a', href=False):
+            el.name = 'span'
+            if el.has_attr('name') and not el.has_attr('id'):
+                el['id'] = el['name']
+            el.attrs.pop('name', None)
+        for el in soup.find_all('font'):
+            color = el.get('color', '')
+            el.name = 'span'
+            for attr in ('color', 'face', 'size'):
+                el.attrs.pop(attr, None)
+            if color:
+                self._add_css(el, f'color:{color}')
+        # `align="center"` is how a markdown file centres a block; htmldocx
+        # reads the CSS property, so move the attribute onto the style
+        for el in soup.find_all(align=True):
+            align = str(el['align']).strip().lower()
+            del el['align']
+            if align in ('left', 'right', 'center', 'justify'):
+                self._add_css(el, f'text-align:{align}')
+        # A <div> has no handler either, so its text joins whatever paragraph
+        # is already open and two blocks run together. One holding only inline
+        # content becomes the paragraph it stands for; one wrapping blocks
+        # hands them its alignment and steps out of the way.
+        for div in soup.find_all('div'):
+            children = div.find_all(self._HTML_BLOCK_TAGS, recursive=False)
+            if not children:
+                # Only when it stands on its own. Markdown wraps a div written
+                # in inline position in a paragraph of its own making, and a
+                # <p> nested in a <p> makes htmldocx open a second one - which
+                # drops the content out of the blockquote or alert box whose
+                # body it was, both of those being one paragraph per marker.
+                if not div.find_parents(self._HTML_TEXT_HOLDERS):
+                    div.name = 'p'
+                else:
+                    # A span, not unwrapped: the style loop below reads the
+                    # style attribute off the element, and unwrapping takes it
+                    # with the tag - so a div written inline arrived plain in
+                    # the one pass whose whole purpose is that it does not
+                    div.name = 'span'
+                continue
+            align = self._css_text_align(div.get('style', ''))
+            if align:
+                for child in children:
+                    if not self._css_text_align(child.get('style', '')):
+                        self._add_css(child, f'text-align:{align}')
+            div.unwrap()
+
+        # 1. Loose list items: merge a leading <p> into the <li> itself.
+        # After the div pass above, which can turn a <li>'s <div> into exactly
+        # that <p>.
+        for li in soup.find_all('li'):
+            first_el = next(
+                (c for c in li.children if getattr(c, 'name', None)), None
+            )
+            if first_el is not None and first_el.name == 'p':
+                first_el.unwrap()
+
         # 3 & 4. Inline colour / pill styling on any element with a style attr
         for el in soup.find_all(style=True):
             style = el.get('style', '')
             decls = [d.strip() for d in style.split(';') if d.strip()]
-            kept, fg_hex, bg_hex = [], '', ''
+            kept, fg_hex, bg_hex, style_props = [], '', '', {}
             for d in decls:
                 if ':' not in d:
                     kept.append(d)
                     continue
                 prop, val = d.split(':', 1)
                 prop = prop.strip().lower()
-                if prop == 'color':
+                if prop == 'text-decoration-line':
+                    prop = 'text-decoration'  # the same declaration, longhand
+                if prop in self._CSS_STYLE_TAGS:
+                    # Dropped by htmldocx, so re-expressed as the tag that says
+                    # the same thing. The declaration goes with it - left in, a
+                    # `font-weight:bold` would still read as unstyled text.
+                    # Last value per property, as the cascade says: a pasted
+                    # `underline;none` pair must end with nothing, and a
+                    # duplicated `bold` must not wrap twice
+                    style_props[prop] = val.strip().lower()
+                elif prop == 'color':
                     h = self._normalize_css_color(val)
                     if h:
                         fg_hex = h
@@ -3024,11 +3305,63 @@ class ExportHandlerBase(APIHandler):
                         kept.append(d)
                 else:
                     kept.append(d)
+            wrappers = ''.join(self._CSS_STYLE_TAGS[prop](val)
+                               for prop, val in style_props.items())
+            if bg_hex or fg_hex or style_props:
+                if kept:
+                    el['style'] = ';'.join(kept)
+                else:
+                    del el['style']
             if bg_hex:
-                el['style'] = ';'.join(kept)
-                el.insert(0, f'⁣PILL:{bg_hex}⁣')
-            elif fg_hex:
-                el['style'] = ';'.join(kept)
+                marker = f'⁣PILL:{bg_hex}⁣'
+                # One marker per text node, not one per element: emphasis
+                # inside the background splits it into several runs, and
+                # style_docx_color_runs shades only the run it finds a marker
+                # in - so a `<mark>` around bold text would shade nothing.
+                # Whitespace counts: the space between two inline children
+                # is a text node of its own, and skipping it leaves an
+                # unshaded notch mid-highlight where a browser paints a
+                # continuous band. Empty nodes are still skipped - a marker in
+                # one would shade a run holding nothing.
+                nested = [node for node in el.descendants
+                          if isinstance(node, NavigableString) and node]
+                for node in nested:
+                    node.insert_before(marker)
+                if not nested:
+                    el.insert(0, marker)
+            if el.name in self._HTML_TABLE_TAGS:
+                # Nowhere to put the emphasis: Word has no run inside a row,
+                # and either placement loses the cells
+                wrappers = ''
+            for tag in wrappers:
+                if el.find_parent(tag) is not None:
+                    # htmldocx keys its open tags by name and pops on the first
+                    # close, so a nested twin ends the outer one early and the
+                    # text after it arrives unformatted
+                    continue
+                # The same bookkeeping breaks from below: a literal twin
+                # INSIDE the element closes the wrapper this pass is about
+                # to open and the tail arrives plain. The wrapper subsumes
+                # the twin - bold inside bold is bold - so only the NAME
+                # goes: a rename to <span> keeps the twin's own style, id
+                # and place in the style snapshot, where an unwrap took
+                # its colour and its anchor with the tag. A twin across a
+                # nested-table boundary stays whole - htmldocx scopes each
+                # cell, so no early close crosses a table, and the outer
+                # wrapper cannot reach that cell's runs to replace it
+                for twin in el.find_all(tag):
+                    if twin.find_parent('table') is el.find_parent('table'):
+                        twin.name = 'span'
+                wrapper = soup.new_tag(tag)
+                if el.name in self._HTML_INLINE_TAGS:
+                    el = el.wrap(wrapper)
+                else:
+                    # A block, a cell or a list item cannot sit inside <b> and
+                    # still be found by the direct-child walk that reaches it,
+                    # so the emphasis goes around its contents instead
+                    for child in list(el.contents):
+                        wrapper.append(child.extract())
+                    el.append(wrapper)
 
         return str(soup)
 
@@ -3042,10 +3375,17 @@ class ExportHandlerBase(APIHandler):
         from docx.oxml import OxmlElement
         from docx.text.paragraph import Paragraph
 
+        # Successors of w:shd in the CT_RPr sequence - w:shd is index 29 and
+        # w:vertAlign 31, so appending it after the vertAlign a <sub>/<sup>
+        # writes gives Word a file it refuses to open (mirrors set_font's
+        # handling of w:rFonts in style_docx_symbol_runs).
+        shd_succ = ('w:fitText', 'w:vertAlign', 'w:rtl', 'w:cs', 'w:em',
+                    'w:lang', 'w:eastAsianLayout', 'w:specVanish', 'w:oMath')
+
         body = document.element.body
         for p_elem in body.iter(qn('w:p')):
             paragraph = Paragraph(p_elem, document)
-            for run in paragraph.runs:
+            for run in self.docx_paragraph_runs(paragraph):
                 text = run.text or ''
                 m = self._PILL_MARKER_RE.search(text)
                 if not m:
@@ -3064,7 +3404,12 @@ class ExportHandlerBase(APIHandler):
                 shd.set(qn('w:val'), 'clear')
                 shd.set(qn('w:color'), 'auto')
                 shd.set(qn('w:fill'), fill)
-                rPr.append(shd)
+                succ = next((el for tag in shd_succ
+                             for el in rPr.findall(qn(tag))), None)
+                if succ is not None:
+                    succ.addprevious(shd)
+                else:
+                    rPr.append(shd)
 
     def style_docx_blockquotes(self, document):
         """Apply indent, a gray left bar, light shading and muted italic text
@@ -3140,7 +3485,7 @@ class ExportHandlerBase(APIHandler):
         htmldocx applies Courier font to every ``<code>``/``<pre>`` run, but
         Courier does not contain unicode arrows (U+2190 etc.) and many symbol
         glyphs. Stripping the rFonts override lets Word render these characters
-        in the body font (Cambria), which has full arrow coverage.
+        in the body font (Cambria).
         """
         from docx.oxml.ns import qn
         MONOSPACE_FONTS = {'Courier', 'Courier New', 'Consolas', 'Monaco'}
@@ -3384,7 +3729,7 @@ class ExportHandlerBase(APIHandler):
         if ncols == 0:
             return
 
-        # Nominal width of one character of Calibri body text at the document's
+        # Nominal width of one character of Cambria body text at the document's
         # base size - a stand-in for the measurement only Word itself can make.
         # 120 twips is the figure for the template's 11pt.
         base_pt = self.DOCX_TEMPLATE_BASE_PT if base_pt is None else base_pt
@@ -3856,6 +4201,42 @@ class ExportHandlerBase(APIHandler):
 </html>'''
         return html
 
+    @staticmethod
+    def pdf_face_covers(font_name: str, text: str) -> bool:
+        """Whether the registered PDF face ``font_name`` can draw every
+        character of ``text``.
+
+        reportlab paints a character the face has no glyph for as a blank
+        advance - silently, with nothing in the output to say anything was
+        dropped. It matters for the italic slots: DejaVu ships no oblique on
+        most Linux boxes, so those are filled from Liberation, which carries
+        no star, check mark or ballot box. Slant is decoration and the glyph
+        is content, so a run the italic face cannot draw is rendered upright
+        rather than blank.
+
+        The answer is per RUN, not per character - the PDF path does no run
+        splitting - so one star costs its whole paragraph the slant.
+        """
+        from reportlab.pdfbase import pdfmetrics
+
+        try:
+            face = pdfmetrics.getFont(font_name).face
+        except Exception:
+            # A name nothing registered - keep the styling rather than
+            # suppress it on a guess
+            return True
+        cmap = getattr(face, 'charToGlyph', None)
+        if cmap is None:
+            # A core Type1 face, which reportlab reaches for when no oblique
+            # file exists at all. It is WinAnsi-only and above that swaps in
+            # the symbol encoding, so a star comes out as a dingbat rather
+            # than as a gap - worse than the blank this guard exists to stop
+            return all(ord(ch) < 256 for ch in text if ch not in '\n\r\t')
+        # A break or a tab is layout, not a glyph: no cmap carries U+000A, and
+        # reportlab turns both into markup before it ever looks a glyph up. Ask
+        # about them and every multi-line run answers False for the wrong reason
+        return all(ord(ch) in cmap for ch in text if ch not in '\n\r\t')
+
     def _register_unicode_fonts(self):
         """Register Unicode-supporting fonts from system paths with font family support."""
         from reportlab.pdfbase.pdfmetrics import registerFontFamily
@@ -3915,10 +4296,22 @@ class ExportHandlerBase(APIHandler):
                     break
 
         # Register font family to enable <b> and <i> tags in Paragraph
+        # What the italic slots actually resolved to. pdf_face_covers has to
+        # ask about the face reportlab will draw with: when no oblique file
+        # exists at all the slot falls back to a core Helvetica, and asking
+        # about the unregistered `UnicodeSansItalic` returns True and lets the
+        # blank glyph through - the guard inert on exactly the box it is for.
+        self._pdf_italic_face = (
+            'UnicodeSansItalic' if 'UnicodeSansItalic' in registered_fonts
+            else 'Helvetica-Oblique')
+        self._pdf_bold_italic_face = (
+            'UnicodeSansBoldItalic' if 'UnicodeSansBoldItalic' in registered_fonts
+            else 'Helvetica-BoldOblique')
+
         if 'UnicodeSans' in registered_fonts:
             try:
-                italic_font = 'UnicodeSansItalic' if 'UnicodeSansItalic' in registered_fonts else 'Helvetica-Oblique'
-                bold_italic_font = 'UnicodeSansBoldItalic' if 'UnicodeSansBoldItalic' in registered_fonts else 'Helvetica-BoldOblique'
+                italic_font = self._pdf_italic_face
+                bold_italic_font = self._pdf_bold_italic_face
 
                 registerFontFamily(
                     'UnicodeSans',
@@ -3967,10 +4360,8 @@ class ExportHandlerBase(APIHandler):
         # taking the italics from a family that ships them.
         heading_faces = {
             (False, False): font_name,
-            (False, True): ('UnicodeSansItalic' if 'UnicodeSansItalic' in
-                            registered else 'Helvetica-Oblique'),
-            (True, True): ('UnicodeSansBoldItalic' if 'UnicodeSansBoldItalic'
-                           in registered else 'Helvetica-BoldOblique'),
+            (False, True): self._pdf_italic_face,
+            (True, True): self._pdf_bold_italic_face,
         }
 
         # Create PDF in memory
@@ -4198,7 +4589,12 @@ class ExportHandlerBase(APIHandler):
             # Apply formatting tags (can be combined)
             if run.bold:
                 result = f'<b>{result}</b>'
-            if run.italic:
+            # Slant only when the italic face can actually draw the text:
+            # see pdf_face_covers - an italic table cell or blockquote would
+            # otherwise delete a star rather than un-slant it
+            if run.italic and self.pdf_face_covers(
+                    self._pdf_bold_italic_face if run.bold
+                    else self._pdf_italic_face, run.text):
                 result = f'<i>{result}</i>'
             if run.underline:
                 result = f'<u>{result}</u>'
@@ -4218,7 +4614,27 @@ class ExportHandlerBase(APIHandler):
             except (AttributeError, TypeError):
                 pass
 
+            # Run shading - what a `<mark>` and a coloured pill become in the
+            # intermediate DOCX. python-docx has no accessor for it, and
+            # without this the highlight the reader sees in Word and in the
+            # browser is simply absent from the PDF.
+            fill = self.docx_run_shading(run)
+            if fill:
+                result = f'<font backColor="#{fill}">{result}</font>'
+
             return result
+
+        # Word's alignment enum -> reportlab's. LEFT is the default in both,
+        # so it is left out and an unaligned paragraph keeps its own style.
+        pdf_align = {1: 1, 2: 2, 3: 4}
+
+        def aligned(style, para):
+            """``style``, or a copy of it carrying the paragraph's alignment."""
+            ta = pdf_align.get(para.alignment)
+            if ta is None:
+                return style
+            return ParagraphStyle(f'{style.name}-align{ta}', parent=style,
+                                  alignment=ta)
 
         def process_paragraph(para):
             """Process a single paragraph and return reportlab element(s)."""
@@ -4249,12 +4665,24 @@ class ExportHandlerBase(APIHandler):
             text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             text = text.replace('\n', '<br/>')
 
-            # Check if any run has formatting that needs processing
+            # Check if any run has formatting that needs processing.
+            # docx_paragraph_runs, not para.runs: the rebuild below replaces
+            # para.text, which does include a link's label, so a walk that
+            # stops at direct children would silently delete every hyperlink
+            # from a paragraph that happens to carry any formatting.
             has_formatting = False
-            for run in para.runs:
+            for run in self.docx_paragraph_runs(para):
                 if run.text.strip():
                     if (run.bold or run.italic or run.underline or
                         run.font.strike or run.font.subscript or run.font.superscript):
+                        has_formatting = True
+                        break
+                    # Shading is the one run property with no python-docx
+                    # accessor, so it has to be read off the XML - and a run
+                    # whose only styling is a highlight is exactly the case
+                    # this probe used to miss, sending the paragraph down the
+                    # plain-text path where format_run never runs
+                    if self.docx_run_shading(run):
                         has_formatting = True
                         break
                     try:
@@ -4265,7 +4693,8 @@ class ExportHandlerBase(APIHandler):
                         pass
 
             if has_formatting:
-                formatted_parts = [format_run(run) for run in para.runs]
+                formatted_parts = [format_run(run)
+                                   for run in self.docx_paragraph_runs(para)]
                 text = ''.join(formatted_parts)
 
             # Detect heading styles
@@ -4275,8 +4704,20 @@ class ExportHandlerBase(APIHandler):
                 level = re.match(r'Heading (\d+)', style_name)
                 # An unnumbered or out-of-range 'Heading ...' keeps the old
                 # catch-all target rather than losing its heading face
-                return Paragraph(text, heading_styles.get(
-                    int(level.group(1)) if level else 0, heading3_style))
+                style = heading_styles.get(
+                    int(level.group(1)) if level else 0, heading3_style)
+                # A minor heading takes its slant from the STYLE, not from a
+                # run, so format_run's gate never sees it - and the italic
+                # faces are the ones with no star, check mark or ballot box.
+                # Same trade as a run: upright and visible beats slanted and
+                # blank.
+                upright = (font_name_bold if 'Bold' in style.fontName
+                           else font_name)
+                if (not self.pdf_face_covers(style.fontName, para.text)
+                        and self.pdf_face_covers(upright, para.text)):
+                    style = ParagraphStyle(f'{style.name}-upright',
+                                           parent=style, fontName=upright)
+                return Paragraph(text, aligned(style, para))
 
             # Blockquote: style_docx_blockquotes gave it a left border, shading
             # and indent that process_paragraph would otherwise drop. Render it
@@ -4317,7 +4758,7 @@ class ExportHandlerBase(APIHandler):
                 last_list_level = -1
                 for l in number_counters:
                     number_counters[l] = 0
-                return Paragraph(text, normal_style)
+                return Paragraph(text, aligned(normal_style, para))
 
         # Printable frame: the page area less the frame's own 6pt padding each
         # side. Sizing a flowable to pdf_doc.width/height instead would put its
@@ -4424,7 +4865,7 @@ class ExportHandlerBase(APIHandler):
             normal (not table-header) text, preserving run formatting."""
             flow = []
             for p in tbl.rows[0].cells[0].paragraphs:
-                markup = ''.join(format_run(run) for run in p.runs).strip()
+                markup = ''.join(format_run(run) for run in self.docx_paragraph_runs(p)).strip()
                 if markup:
                     flow.append(Paragraph(markup, callout_body_style))
             if not flow:
@@ -4475,15 +4916,15 @@ class ExportHandlerBase(APIHandler):
                 return markup.replace('\n', '<br/>')
 
             def string_width(text, row_index):
-                # Only a real header row is drawn bold, so only it may be
-                # measured bold - after the blank-header delete row 0 is
-                # ordinary content, and widening it would over-allocate its
-                # column at its neighbours' expense (the DOCX path carries the
-                # same rule through tblLook)
-                font = (font_name_bold if row_index == 0 and has_header
-                        else font_name)
+                # Measured in the bold face for every row, header or not. A
+                # body cell now renders whatever formatting its runs carry, so
+                # measuring it in the regular face under-allocates the column
+                # and reportlab hard-splits a bold word mid-word. Widening one
+                # column costs its neighbours nothing here: every cell is
+                # measured the same way and fit_column_widths renormalises the
+                # row back to the available width.
                 return pdfmetrics.stringWidth(
-                    text, font, table_cell_style.fontSize)
+                    text, font_name_bold, table_cell_style.fontSize)
 
             # Per-column widest image (points): an image-only cell earns no
             # column width from its empty text, so without this floor its column
@@ -4522,7 +4963,12 @@ class ExportHandlerBase(APIHandler):
                 content_width = max(1.0, col_width - 2 * side_padding)
                 flow = []
                 for p in cell.paragraphs:
-                    ptext = cell_markup(p.text)
+                    # format_run per run, not cell_markup(p.text): a cell
+                    # rebuilt from the plain-string projection drops every
+                    # run property the body path keeps. docx_paragraph_runs
+                    # so a link's label survives - p.runs would delete it.
+                    ptext = ''.join(format_run(r)
+                                    for r in self.docx_paragraph_runs(p))
                     if ptext.strip():
                         flow.append(Paragraph(ptext, style))
                     for drawing in p._p.findall('.//' + qn('w:drawing')):
@@ -4682,7 +5128,7 @@ class ExportHandlerBase(APIHandler):
             indent_pts, bar_hex, shd_hex = bq
             flow = []
             for p in paras:
-                markup = ''.join(format_run(run) for run in p.runs).strip()
+                markup = ''.join(format_run(run) for run in self.docx_paragraph_runs(p)).strip()
                 flow.append(Paragraph(markup or '&nbsp;', callout_body_style))
             return make_callout(flow, bar_hex, shd_hex,
                                 left_pad=12 + max(0.0, indent_pts), trailing=0.12)
@@ -4829,7 +5275,6 @@ class ExportPdfHandler(ExportHandlerBase):
                 parser.add_html_to_document(body_html, document)
 
                 self.apply_anchor_bookmarks(document)
-                self.strip_monospace_from_unicode_runs(document)
                 # Style and de-marker blockquotes (also strips the marker so it
                 # never leaks into the PDF text rebuild below)
                 self.style_docx_blockquotes(document)
@@ -4983,10 +5428,6 @@ class ExportDocxHandler(ExportHandlerBase):
                 # hyperlinks from external to internal links.
                 self.apply_anchor_bookmarks(document)
 
-                # Drop Courier font from runs with unicode chars so arrows and
-                # symbols render in the body font instead of failing glyph lookup.
-                self.strip_monospace_from_unicode_runs(document)
-
                 # Style blockquotes (left bar, indent, shading) and strip marker
                 self.style_docx_blockquotes(document)
                 # Apply true run shading to coloured pills (background spans)
@@ -4996,8 +5437,17 @@ class ExportDocxHandler(ExportHandlerBase):
                 alert_tables = self.style_docx_alert_boxes(
                     document, show_labels=show_alert_labels)
 
-                # Draw task-list checkbox glyphs in MS Gothic (Word's checkbox font)
-                self.style_docx_task_checkboxes(document)
+                # Name a font on every glyph the body face cannot draw. After
+                # the marker passes above, which read a sentinel out of a run's
+                # text and would miss it once the run is split; before the
+                # strip below, which is the other half of the font decision.
+                self.style_docx_symbol_runs(document)
+
+                # Drop Courier from runs holding a character it has no glyph
+                # for. It runs after the split, so a symbol now sits in its own
+                # run and its pure-ASCII neighbours keep their monospace -
+                # inline code holding one star used to lose Courier entirely.
+                self.strip_monospace_from_unicode_runs(document)
 
                 # Style tables: banded rows (pale blue), no first column emphasis
                 # Usable page area - one source for both the table grid below

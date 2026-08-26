@@ -2,6 +2,22 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.24
+
+### Added
+
+- Symbol characters name a font of their own in DOCX instead of being left to Word's substitution. Cambria, the body face, has no glyph for `★`, `☆`, `✓`, `✗`, `☐`, `☒`, the wider arrows or box drawing, and those runs named no font at all - so each reader's Word substituted from its own list and a solid star on one machine was a hollow box on the next. The affected characters are split into their own runs tagged `Segoe UI Symbol`, task-list checkboxes keeping MS Gothic; the surrounding text, Polish diacritics and the arrows Cambria does carry are untouched
+- Inline HTML written by hand in a markdown cell now survives the DOCX and PDF export. `<span style="font-weight:bold">`, `font-style`, `text-decoration`, `<mark>`, `<del>`, `<ins>`, `<kbd>`, `<font color>`, an `align=` attribute and a `<div>` were all dropped or merged into whatever paragraph was open; each is now rewritten into markup the converter reads, so a coloured span, a highlight or a centred block renders as written. CSS declarations follow the cascade - the last value for a property wins, as a browser resolves it
+
+### Fixed
+
+- A table cell in the PDF renders the formatting its text carries. Bold, italic, colour and highlighting inside a cell were flattened to plain text, and the column measurement now matches, so a bold word is no longer split across two lines
+- A hyperlink label is no longer dropped from a PDF paragraph that carries any formatting, and a highlight around a link no longer prints its internal marker as visible text. Both came from the same place: a paragraph's runs, as the library reports them, never include a run nested inside a link
+- A symbol inside italic text stays visible in the PDF. The italic face available on most Linux systems has no star, check mark or ballot box, and the character was painted as a blank space; such a run now renders upright rather than losing the character. The same applies to an italic heading
+- An anchor target - an `<a id="...">` written to link to a spot mid-document - no longer fails the whole export with HTTP 500
+- A `<div>` inside a blockquote, an alert box, a list item, a heading or a table cell stays inside it instead of ending the block early and continuing as a separate paragraph
+- Inline math inside a link label exports instead of failing the request
+
 ## 1.6.23
 
 ### Fixed

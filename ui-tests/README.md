@@ -45,6 +45,35 @@ cd ./ui-tests
 jlpm playwright test
 ```
 
+### The server must be running the code you are testing
+
+`export-fidelity.spec.ts` asserts on the bytes of a real `.docx`, so it fails
+against a stale install rather than passing on old behaviour. The test server
+imports `jupyterlab_export_markdown_extension` from `site-packages`, which is a
+copy unless the package was installed editable - a `make install` since the last
+edit, or run the suite with the working tree ahead of it:
+
+```sh
+PYTHONPATH=$(cd .. && pwd) jlpm playwright test
+```
+
+That flag shadows the **Python** module only. The labextension JavaScript is
+discovered from the installed `share/jupyter/labextensions`, so a change to
+`src/` still needs `jlpm build:prod` and a reinstall before the suite can see it.
+
+CI needs neither: it installs the freshly built wheel, which is the artefact
+under test there.
+
+### Port
+
+Galata pins the server to 8888 with `port_retries = 0`, so the suite cannot start
+while a lab of your own holds that port. `JUPYTER_TEST_PORT` moves both the server
+and the browser's base URL:
+
+```sh
+JUPYTER_TEST_PORT=8899 jlpm playwright test
+```
+
 Test results will be shown in the terminal. In case of any test failures, the test report
 will be opened in your browser at the end of the tests execution; see
 [Playwright documentation](https://playwright.dev/docs/test-reporters#html-reporter)
@@ -122,7 +151,7 @@ jlpm start
 
 ```sh
 cd ./ui-tests
-jlpm playwright codegen localhost:8888
+jlpm playwright codegen localhost:${JUPYTER_TEST_PORT:-8888}
 ```
 
 ## Debug tests
