@@ -6522,8 +6522,7 @@ class TestPdfRunShading:
             f"a minor heading lost its markers: {spans!r}")
         # A heading with nothing uncoverable keeps the slant it was given
         plain = [f for t, f in spans if "Zazalenie" in t]
-        # fitz truncates a font name at 24 chars: 'LiberationSans-BoldItali'
-        assert plain and "Itali" in plain[0], (
+        assert plain and _is_italic_font(plain[0]), (
             f"an ordinary minor heading lost its slant: {plain!r}")
 
     async def test_a_multi_line_quote_keeps_its_slant(
