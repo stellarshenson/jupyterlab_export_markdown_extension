@@ -407,3 +407,50 @@ Markdown files carry HTML, and a Jupyter one carries more than most - `<font col
   - log: 2026-08-27T00:00:00Z @kj accepted limit recorded alongside the criteria it bounds
 - [ ] `ACC-HTML-94` **Accepted limit** - `font-size`, `font-family` and `<small>` are still dropped; every property closed above had an equivalent tag to be rewritten into and these have none, so they need a marker and a run pass of their own. Registered as `DEF-MARK-24`
   - log: 2026-08-27T00:00:00Z @kj accepted limit recorded alongside the criteria it bounds
+
+## Indented list and callout rescue `LIST`
+
+Two-space lists, hand-drawn callout divs and per-list numbering in Word, PDF and HTML
+
+- [x] `ACC-LIST-95` **A two-space indented list renders as a list** - A nested list written with two-space indentation, the GitHub and JupyterLab convention, arrives in Word, PDF and HTML as a list at its depth and not as a code block
+  - related: DEF-MARK-99 - the code-block symptom this criterion closes
+  - evidence: tests test_two_space_nesting_still_nests, test_ordered_list_two_spaces_in_is_numbered, galata 'Word gets a real list and a real box'; commit 9480951
+  - test: export a document whose nested items use two-space indentation and read the list depth in each format
+  - test-tags: unit, functional
+  - log: 2026-08-27T22:45:41Z @kj added
+  - log: 2026-08-27T22:46:10Z @kj closed
+- [x] `ACC-LIST-96` **Only a real list is rescued** - The oracle shifts a chunk only when rendering with and without the shift turns exactly one code block into a list made of that chunk; an intended code block, a fence, inline HTML or a link reference definition is left alone
+  - evidence: tests test_a_raw_block_inside_an_item_refuses_the_rescue, test_a_reference_definition_in_the_chunk_is_never_a_candidate, test_a_candidate_the_converter_cannot_render_is_refused; mutation-proved; commit 9480951
+  - test: export an indented code sample and a reference definition under an item and confirm both survive verbatim
+  - test-tags: unit
+  - log: 2026-08-27T22:45:41Z @kj added
+  - log: 2026-08-27T22:46:10Z @kj closed
+- [x] `ACC-LIST-97` **A hand-drawn callout div draws as a box** - A div with a border style, the JupyterLab alert idiom, is a bordered box with its coloured bar in Word and PDF, matching the HTML export
+  - evidence: tests test_docx_bordered_div_becomes_a_box, test_pdf_bordered_div_becomes_a_box, test_a_plain_div_is_not_boxed, galata 'Word gets a real list and a real box'; commit 9480951
+  - test: export a bordered div and read the box border and bar in DOCX and PDF
+  - test-tags: unit, functional
+  - log: 2026-08-27T22:45:41Z @kj added
+  - log: 2026-08-27T22:46:10Z @kj closed
+- [x] `ACC-LIST-98` **Each ordered list restarts at 1** - Every ordered list carries its own numbering instance in Word and the PDF follows it, so a second list on the page starts at 1 instead of continuing the first
+  - related: DEF-MARK-100, DEF-MARK-103
+  - evidence: test test_docx_each_ordered_list_has_its_own_numbering_instance, test_pdf_ordered_numbering_restarts_after_a_heading; commit 9480951
+  - test: export two ordered lists separated by a paragraph and read the first number of the second
+  - test-tags: unit
+  - log: 2026-08-27T22:45:41Z @kj added
+  - log: 2026-08-27T22:46:10Z @kj closed
+- [x] `ACC-LIST-99` **A step interrupted by a block keeps counting** - A table, code sample, quote or paragraph inside a numbered step does not restart the count in Word or PDF; the next step is the next number
+  - evidence: tests test_pdf_ordered_numbering_continues_across_a_block_inside_a_step, test_pdf_an_empty_numbered_item_keeps_its_number; mutation-proved; commit 9480951
+  - test: export a step holding a fenced sample and read the number on the step after it
+  - test-tags: unit
+  - log: 2026-08-27T22:45:41Z @kj added
+  - log: 2026-08-27T22:46:10Z @kj closed
+- [x] `ACC-LIST-100` **No marker character reaches the reader** - The invisible marks the passes use to carry list starts, alerts, math and boxes between passes are all stripped before the document is written
+  - evidence: tests test_docx_each_ordered_list_has_its_own_numbering_instance (no U+2062 in text), test_a_nested_quote_strips_every_marker, test_docx_blockquote_styled_and_no_marker; commit 9480951
+  - test: export a document exercising every marked construct and search the DOCX text for U+2062, U+2063, U+200B, U+200D and U+20E3
+  - test-tags: unit
+  - log: 2026-08-27T22:45:41Z @kj added
+  - log: 2026-08-27T22:46:10Z @kj closed
+- [ ] `ACC-LIST-101` **Accepted limit** - A one-space fence lets the sample extractor cut a rescued chunk (DEF-MARK-106) and a GitHub alert inside a numbered step still splits the list (DEF-MARK-107); both pre-date the rescue and stay open
+  - related: DEF-MARK-106, DEF-MARK-107
+  - test: n/a
+  - log: 2026-08-27T22:45:41Z @kj added

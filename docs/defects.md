@@ -407,6 +407,7 @@
   - test-tags: manual
   - log: 2026-08-27T19:53:14Z @kj added
   - log: 2026-08-27T22:35:03Z @kj closed
+  - log: 2026-08-27T22:46:10Z @kj shipped in commit 9480951 on main
 - [x] `DEF-MARK-101` **PDF ordered numbering counted on past every separator but a heading and a quote** - MINOR; the DEF-MARK-99 reset named a heading and a quote; a rule, a table, a fence, an image, an alert and a boxed div still let the next procedure continue the count, and a boxed div was a column-0 regression - a paragraph that reset the count became a callout table that did not; a bullet parent also left the ordered run beneath it counting on from the previous parent; fix: one reset_numbering() at every body element that is not a list paragraph, and a bullet clears the counters below its level; `routes.py`
   - evidence: test_pdf_ordered_numbering_restarts_at_every_separator, mutation-proved; galata 5/5, 8,950-file differential 15 changed / 15 better / 0 worse
   - repro: export "1. alpha" / "2. beta" / "---" / " 1. one" / " 2. two" to PDF; the second list reads 3., 4.
@@ -425,16 +426,19 @@
   - repro: export '1. Run:' / blank / ' `' / '   cmd' / '   `' / blank / '2. Then' to PDF; the second step reads 1.
   - log: 2026-08-27T22:34:47Z @kj added
   - log: 2026-08-27T22:35:03Z @kj closed
+  - log: 2026-08-27T22:46:11Z @kj shipped in commit 9480951 on main
 - [x] `DEF-MARK-104` **a reference definition under an indented item vanished in the rescue** - MINOR; the converter consumes a link reference definition as a definition and shows it nowhere, while the control showed the URL inside its code block; every rule-3 check passed because the block census does not see a definition; fix: a chunk holding a line of the shape [name]: is never a candidate; routes.py
   - evidence: test_a_reference_definition_in_the_chunk_is_never_a_candidate, mutation-proved
   - repro: export 'Intro.' / blank / ' - a' / ' [ref]: http://example.com/x' / blank / 'End.'; the URL is absent from every format
   - log: 2026-08-27T22:34:48Z @kj added
   - log: 2026-08-27T22:35:03Z @kj closed
+  - log: 2026-08-27T22:46:11Z @kj shipped in commit 9480951 on main
 - [x] `DEF-MARK-105` **PDF skipped the number of an empty ordered item** - MINOR; an item with no text is a List Number paragraph that Word numbers, but process_paragraph took the empty-text exit before reading the style, so '1. a / 2. / 3. c' printed 3. c as 2. c; pre-existing at HEAD, and round 15 had turned the skip into a restart; fix: the empty-text exit no longer applies to a numbered paragraph; routes.py
   - evidence: test_pdf_an_empty_numbered_item_keeps_its_number, mutation-proved
   - repro: export '1. a' / '2. ' / '3. c' to PDF; the third item reads 2.
   - log: 2026-08-27T22:34:48Z @kj added
   - log: 2026-08-27T22:35:03Z @kj closed
+  - log: 2026-08-27T22:46:11Z @kj shipped in commit 9480951 on main
 - [ ] `DEF-MARK-106` **a one-space fence lets the sample extractor cut a rescued chunk** - MINOR; highlight_code_blocks and extract_code_blocks cut samples with an unanchored backtick regex before the converter runs, so a fence indented one space - a paragraph to python-markdown, a fence to a CommonMark preview - whose body holds a blank line and then a two-space marker chunk is measured as [p, pre, p] -> [p, ul, p] and rescued, and the DOCX and PDF sample then carries the shifted bytes; pre-existing extractor, out of the indent pass's diff; open
   - repro: export ' `' / ' x' / blank / '  - a' / '  - b' / blank / ' `' to DOCX; the sample reads '- a' at column 0
   - log: 2026-08-27T22:34:48Z @kj added
