@@ -1282,8 +1282,139 @@ class TestTableImageScaling:
                 f"2-column cell (< 4 in), not span the page"
             )
 
+    async def test_pdf_ordered_numbering_restarts_at_every_separator(self, jp_fetch, jp_root_dir):
+        """DEF-MARK-101: the DEF-MARK-99 reset named a heading and a quote;
+        a rule, a table, a fence, an alert and a boxed div still let the
+        next procedure count on - and the boxed div is a column-0 regression,
+        a paragraph that reset the count having become a table that did not.
+        A bullet parent also starts the ordered run beneath it afresh."""
+        import fitz
+        seps = ["---", "| a | b |\n| - | - |\n| 1 | 2 |", "```\ncode\n```",
+                "> [!NOTE]\n> note", '<div style="border: 1px solid #333">boxed</div>']
+        doc = "# T\n\n1. alpha\n2. beta\n\n" + "\n\n".join(
+            f"{sep}\n\n  1. one{k}\n  2. two{k}" for k, sep in enumerate(seps))
+        doc += "\n\n<div style=\"border: 1px solid #333\">boxed</div>\n\n1. col0\n2. col0b\n\n"
+        # Prose before the nested chunk: glued under `2. col0b` it would be
+        # that item's child, which the pass rightly leaves alone
+        doc += "Nested.\n\n  - a\n    1. a1\n    2. a2\n  - b\n    1. b1\n    2. b2\n"
+        (jp_root_dir / "olseps.md").write_text(doc, encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "olseps.md"}),
+            raise_error=False)
+        assert response.code == 200
+        text = " ".join(page.get_text() for page in
+                        fitz.open(stream=response.body, filetype="pdf"))
+        for k in range(len(seps)):
+            assert f"1. one{k}" in text and f"3. one{k}" not in text, (
+                f"the list after separator {k} counted on: {text!r}")
+        assert "1. col0" in text and "3. col0" not in text, "the column-0 list after a boxed div counted on"
+        assert "1. b1" in text and "3. b1" not in text, (
+            f"a sub-list under a new parent counted on: {text!r}")
+
+    async def test_pdf_ordered_numbering_continues_across_a_block_inside_a_step(
+            self, jp_fetch, jp_root_dir):
+        """DEF-MARK-103: the DEF-MARK-99 and DEF-MARK-101 resets guessed a
+        list's end from the Word paragraphs, which show a table, a sample or
+        a paragraph inside a step exactly as they show one standing between
+        two lists. The end is now carried: each `<ol>` gets its own numbering
+        instance and the PDF restarts only where that instance changes. A
+        figure between two rescued lists is the other half of the same
+        guess."""
+        import fitz
+        inside = ["   | a | b |\n   | - | - |\n   | 1 | 2 |", "   ---",
+                  "   ```\n   cmd\n   ```", "   Prose of the step.",
+                  "   > quoted in the step"]
+        doc = "# T\n\n" + "\n\n".join(
+            f"1. step{k}\n\n{blk}\n\n2. next{k}\n3. last{k}\n\nBetween."
+            for k, blk in enumerate(inside))
+        doc += "\n\nIntro.\n\n  1. alpha\n  2. beta\n\n![x](nope.png)\n\n  1. one\n  2. two\n"
+        (jp_root_dir / "olin.md").write_text(doc, encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "olin.md"}),
+            raise_error=False)
+        assert response.code == 200
+        text = " ".join(page.get_text() for page in
+                        fitz.open(stream=response.body, filetype="pdf"))
+        for k in range(len(inside)):
+            assert f"2. next{k}" in text and f"3. last{k}" in text, (
+                f"the block inside step {k} restarted the count: {text!r}")
+        assert "1. one" in text and "3. one" not in text, (
+            f"a figure between two lists let the second count on: {text!r}")
+
+    async def test_pdf_an_empty_numbered_item_keeps_its_number(self, jp_fetch, jp_root_dir):
+        """DEF-MARK-105: an item with no text is a List Number paragraph that
+        Word numbers; the PDF took the empty-text exit before looking at the
+        style and skipped the number, so the author's 3. read 2."""
+        import fitz
+        (jp_root_dir / "olempty.md").write_text("1. a\n2. \n3. c\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "olempty.md"}),
+            raise_error=False)
+        assert response.code == 200
+        text = " ".join(page.get_text() for page in
+                        fitz.open(stream=response.body, filetype="pdf"))
+        assert "3. c" in text, f"the empty item lost its number: {text!r}"
+
+    async def test_docx_each_ordered_list_has_its_own_numbering_instance(
+            self, jp_fetch, jp_root_dir):
+        """DEF-MARK-100: htmldocx numbered every List Number paragraph from
+        the template's one instance, so Word counted a second procedure on
+        from the first. Each list now has an instance restarting at 1, a
+        step broken by a table stays on its list's instance, and the mark
+        that carried the boundary does not reach the text."""
+        import io
+        from docx import Document
+        from docx.oxml.ns import qn
+        from docx.text.paragraph import Paragraph
+        doc = ("1. a\n2. b\n\n---\n\n1. c\n\n   | x | y |\n   | - | - |\n   | 1 | 2 |\n\n2. d\n")
+        (jp_root_dir / "olnum.md").write_text(doc, encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "olnum.md"}),
+            raise_error=False)
+        assert response.code == 200
+        document = Document(io.BytesIO(response.body))
+        ids = {}
+        for p in document.paragraphs:
+            if p.style.name == "List Number":
+                ids[p.text.strip()] = p._element.pPr.numPr.numId.val
+        assert set(ids) == {"a", "b", "c", "d"}, ids
+        assert ids["a"] == ids["b"] and ids["c"] == ids["d"], f"a list split its instance: {ids}"
+        assert ids["a"] != ids["c"], f"two lists share one instance: {ids}"
+        numbering = document.part.numbering_part.element
+        for num_id in {ids["a"], ids["c"]}:
+            num = numbering.num_having_numId(num_id)
+            starts = num.findall(qn("w:lvlOverride") + "/" + qn("w:startOverride"))
+            assert starts and starts[0].get(qn("w:val")) == "1", f"instance {num_id} has no restart"
+        all_text = "".join(Paragraph(p, document).text
+                           for p in document.element.body.iter(qn("w:p")))
+        assert "\u2062" not in all_text, "the list mark leaked into the text"
+
+    async def test_pdf_ordered_numbering_restarts_after_a_heading(self, jp_fetch, jp_root_dir):
+        """DEF-MARK-99: the PDF numbered its lists from one document-wide
+        counter that a heading did not reset, so a rescued procedure under
+        `## Section two` read 3., 4. where the author - and the control's
+        literal source - said 1., 2."""
+        import fitz
+        (jp_root_dir / "olheading.md").write_text(
+            "# T\n\n1. alpha\n2. beta\n\n## Section two\n\n  1. one\n  2. two\n\n"
+            "> quoted\n\n  1. uno\n  2. dos\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "olheading.md"}),
+            raise_error=False)
+        assert response.code == 200
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        text = " ".join(page.get_text() for page in doc)
+        assert "1. one" in text and "1. uno" in text, text
+        assert "3. one" not in text and "3. uno" not in text, (
+            f"a list after a heading or a quote continued the count: {text!r}")
+
     async def test_pdf_table_image_is_rendered(self, jp_fetch, test_table_image_file):
-        """DEF-6: an image inside a table cell must render in the PDF, not be
+        """DEF-TABL-6: an image inside a table cell must render in the PDF, not be
         dropped (process_table used to read cell text only)."""
         import fitz
 
@@ -1520,7 +1651,7 @@ class TestTableImageScaling:
         assert n_images >= 1, "near-full-page header image was dropped"
 
     async def test_pdf_row_that_fits_a_page_is_not_split(self, jp_fetch, jp_root_dir):
-        """DEF-9: a row that fits on a page must move to the next page whole,
+        """DEF-TABL-9: a row that fits on a page must move to the next page whole,
         not be torn at the page boundary. A cell holding a caption and its image
         otherwise strands the caption on one page and the image on the next,
         even though the whole row would fit on the following page."""
@@ -2734,7 +2865,7 @@ def test_task_list_file(jp_root_dir):
 
 
 class TestTaskListCheckboxes:
-    """DEF-1: `- [x]` / `- [ ]` render as checkbox glyphs (☒/☐), not literal
+    """DEF-MARK-1: `- [x]` / `- [ ]` render as checkbox glyphs (☒/☐), not literal
     text; DOCX draws them in MS Gothic (Word's own checkbox font)."""
 
     async def test_html_renders_checkbox_glyphs(self, jp_fetch, test_task_list_file):
@@ -2903,7 +3034,7 @@ class TestTaskListCheckboxes:
 
 
 class TestBlockquotePdfCallout:
-    """DEF-2: blockquotes render in PDF with a left bar, shading and indent."""
+    """DEF-MARK-2: blockquotes render in PDF with a left bar, shading and indent."""
 
     async def test_pdf_blockquote_has_bar_shading_and_indent(
         self, jp_fetch, test_quotes_in_list_file
@@ -2942,7 +3073,7 @@ class TestBlockquotePdfCallout:
         )
 
     async def test_pdf_callout_that_fits_a_page_is_not_split(self, jp_fetch, jp_root_dir):
-        """DEF-9 applies to callouts too: a blockquote/alert box that fits a
+        """DEF-TABL-9 applies to callouts too: a blockquote/alert box that fits a
         page must move whole rather than tear mid-box at the page boundary."""
         import fitz
 
@@ -3001,7 +3132,7 @@ class TestBlockquotePdfCallout:
 
 
 class TestAlertPdfCallout:
-    """DEF-3: alerts render in PDF as a coloured-bar callout, not a table header."""
+    """DEF-MARK-3: alerts render in PDF as a coloured-bar callout, not a table header."""
 
     async def test_pdf_alert_renders_as_callout_not_header(
         self, jp_fetch, test_rich_alerts_file
@@ -3080,7 +3211,7 @@ class TestAlertPdfCallout:
 
 
 class TestMermaidViewBoxCrop:
-    """DEF-4: an SVG whose declared viewBox dwarfs its content is cropped
+    """DEF-DIAG-4: an SVG whose declared viewBox dwarfs its content is cropped
     to the real content bounding box before rasterizing."""
 
     async def test_oversized_viewbox_is_cropped_to_content(self):
@@ -3134,7 +3265,7 @@ class TestMermaidViewBoxCrop:
         )
 
     async def test_well_framed_diagram_is_not_cropped(self):
-        """DEF-4 regression (adversarial #4): a diagram that already fills its
+        """DEF-DIAG-4 regression (adversarial #4): a diagram that already fills its
         declared viewBox must be left alone. getBBox reports geometry only - no
         stroke, markers or filters - so re-cropping a well-framed diagram would
         clip node borders and arrowheads. The declared viewBox aspect must
@@ -3162,7 +3293,7 @@ class TestMermaidViewBoxCrop:
         )
 
     async def test_nonzero_viewbox_origin_is_preserved(self):
-        """DEF-4 regression (adversarial #7): when the diagram is not cropped,
+        """DEF-DIAG-4 regression (adversarial #7): when the diagram is not cropped,
         the SVG's own viewBox - including a non-zero origin - must be kept. A
         mermaid viewBox like `-100 -50 200 100` places content around a negative
         origin; zeroing it would shift the drawing off-canvas and blank most of
@@ -3264,7 +3395,7 @@ def _ink_bbox(img):
 
 
 class TestMermaidDocxNoWhitespace:
-    """DEF-7 (regression): a mermaid diagram embedded in the DOCX must fill its
+    """DEF-DIAG-7 (regression): a mermaid diagram embedded in the DOCX must fill its
     image rather than sit in whitespace. Deterministic check - pull the image
     back out of the .docx, trim the blank margin, and measure what fraction of
     the image the drawing actually occupies."""
@@ -3322,7 +3453,7 @@ def test_empty_header_grid_file(jp_root_dir):
 
 
 class TestEmptyHeaderGrid:
-    """DEF-5 / DEF-8: a Markdown grid written with an empty header row
+    """DEF-TABL-5 / DEF-TABL-8: a Markdown grid written with an empty header row
     (`|  |  |`) renders nothing for that row in markdown, so the export must
     drop it outright rather than emit a blank bordered row - and must not
     promote the body row behind it into a header in its place."""
@@ -3492,7 +3623,7 @@ class TestEmptyHeaderGrid:
     async def test_docx_rows_are_marked_unbreakable(
         self, jp_fetch, test_empty_header_grid_file
     ):
-        """DEF-9 in Word: reportlab's conditional `splitInRow` has no effect on
+        """DEF-TABL-9 in Word: reportlab's conditional `splitInRow` has no effect on
         the .docx, where Word breaks a row wherever the page ends unless the row
         carries `w:cantSplit`. Without it the same caption-and-image row the PDF
         now keeps whole is still torn in Word."""
@@ -3658,7 +3789,7 @@ from jupyterlab_export_markdown_extension.routes import BREAK_TAG_RE as BREAK_RE
 
 
 class TestExplicitLineBreakNotDoubled:
-    """DEF-10: a line ended with an explicit `<br>` - the idiom for a question
+    """DEF-MARK-10: a line ended with an explicit `<br>` - the idiom for a question
     above its answer - picked up a second break from the `nl2br` extension,
     which converts the following newline too. The pair then sat further apart
     than the paragraphs around it, so the grouping read backwards."""
@@ -4135,7 +4266,7 @@ class TestExportFontSize:
 
 
 class TestMultiParagraphAlert:
-    """DEF-11: a `> [!NOTE]` whose body has two paragraphs is one alert, not a
+    """DEF-MARK-11: a `> [!NOTE]` whose body has two paragraphs is one alert, not a
     coloured box followed by a stray grey blockquote."""
 
     DOC = (
@@ -4170,7 +4301,7 @@ class TestMultiParagraphAlert:
             f"the alert box lost a paragraph: {body!r}"
         )
         # The orphaned paragraph would survive as an ordinary blockquote,
-        # rendered by the DEF-2 path as a second, grey-barred box
+        # rendered by the DEF-MARK-2 path as a second, grey-barred box
         assert "<blockquote" not in html, (
             "a plain blockquote survived - the alert still split in two"
         )
@@ -4276,7 +4407,7 @@ class TestMultiParagraphAlert:
 
 
 class TestPdfMinorHeadings:
-    """DEF-12: Heading 4, 5 and 6 render distinctly in the PDF instead of all
+    """DEF-MARK-12: Heading 4, 5 and 6 render distinctly in the PDF instead of all
     collapsing onto the Heading 3 face."""
 
     DOC = ("# One\n\ntext\n\n## Two\n\ntext\n\n### Three\n\ntext\n\n"
@@ -4399,7 +4530,7 @@ class TestPdfMinorHeadings:
 
 
 class TestPdfCodeLineWrapping:
-    """DEF-13: a code line wider than the frame wraps instead of running off
+    """DEF-MARK-13: a code line wider than the frame wraps instead of running off
     the page."""
 
     LONG = "a" * 300
@@ -4506,7 +4637,7 @@ def mermaid_markdown_file(jp_root_dir):
 
 
 class TestApiMermaidRendering:
-    """DEF-16: mermaid is a browser library, so the frontend renders each
+    """DEF-DIAG-16: mermaid is a browser library, so the frontend renders each
     diagram and posts it as `mermaidDiagrams`. A caller driving the REST API
     directly sends no such payload, and every diagram used to export as its
     own source code. The server renders what the frontend did not."""
@@ -4729,7 +4860,7 @@ class TestApiMermaidRendering:
 
 
 class TestApiMermaidWarnings:
-    """DEF-16: an export never fails over a diagram - the source is kept and
+    """DEF-DIAG-16: an export never fails over a diagram - the source is kept and
     the response says what happened. The body is a document, so the header is
     the only channel an API caller has."""
 
@@ -4915,7 +5046,7 @@ class TestApiMermaidWarnings:
 
 
 class TestApiMermaidHardening:
-    """Findings from the architect and bug-hunter review of DEF-16."""
+    """Findings from the architect and bug-hunter review of DEF-DIAG-16."""
 
     @staticmethod
     def _warnings(response):
@@ -5670,7 +5801,7 @@ FENCE_SHAPE_COUNTS = {
 
 
 class TestFenceScannerParity:
-    """DEF-16: the frontend posts diagrams by position and the server pairs them
+    """DEF-DIAG-16: the frontend posts diagrams by position and the server pairs them
     by position, so the two scanners must agree on every fence shape. This runs
     BOTH - the TypeScript one is extracted and executed under node - rather than
     reading one and trusting the other."""
@@ -5815,7 +5946,7 @@ console.log(JSON.stringify(docs.map(d => {{ const o = []; walk(marked.lexer(d), 
 
 
 class TestDocxSymbolFonts:
-    """DEF-22: a symbol the DOCX body face cannot draw names a font that can,
+    """DEF-MARK-22: a symbol the DOCX body face cannot draw names a font that can,
     instead of leaving Word to substitute whatever the machine happens to
     have - which is how a star arrives as a hollow box on one reader's PC."""
 
@@ -5960,7 +6091,7 @@ class TestDocxSymbolFonts:
 
 
 class TestInlineHtmlInDocx:
-    """DEF-23: inline HTML written into the markdown reaches Word as
+    """DEF-MARK-23: inline HTML written into the markdown reaches Word as
     formatting. htmldocx reads only a handful of tags and CSS properties, so
     the rest is rewritten into what it does read before conversion."""
 
@@ -6398,7 +6529,7 @@ def doc_or_cell_runs(doc):
 
 
 class TestPdfRunShading:
-    """DEF-23: a highlight the reader sees in Word and in the browser has to
+    """DEF-MARK-23: a highlight the reader sees in Word and in the browser has to
     reach the PDF too - `format_run` read every run property except shading."""
 
     DOC = "Text <mark>HIGHLIT</mark> end.\n"
@@ -6683,3 +6814,1856 @@ class TestDocxRunShadingElementOrder:
                     f"w:shd written after w:vertAlign - Word rejects this rPr: "
                     f"{tags!r}")
         assert checked, "no run carried both shading and a vertical alignment"
+
+
+# A table of contents written the way every markdown generator writes one -
+# two spaces before each top-level marker - plus the two shapes the fix must
+# not break: a nested list, an indented code block, and a fenced sample whose
+# own content looks like an indented list.
+TEST_MARKDOWN_INDENTED_TOC = """# Indented Lists
+
+**Table of Contents**
+
+  - [1. Introduction](#1.-Introduction)
+  - [2. Project objective](#2.-Project-objective)
+
+## 1. Introduction
+
+- top level
+  - nested under top
+
+Ordered, written two spaces in:
+
+  1. first ordered
+  2. second ordered
+
+An indented code block, four spaces in:
+
+    - this is code, not a list
+
+A fenced sample:
+
+```
+para
+
+  - fenced item
+```
+
+## 2. Project objective
+
+Done.
+"""
+
+
+@pytest.fixture
+def test_indented_toc_file(jp_root_dir):
+    md_file = jp_root_dir / "test_indented_toc.md"
+    md_file.write_text(TEST_MARKDOWN_INDENTED_TOC, encoding="utf-8")
+    return md_file
+
+
+class TestIndentedTopLevelList:
+    """DEF-MARK-42: `markdown_to_html` builds the converter with `tab_length=2` so a
+    two-space nested list nests, and that same setting is the indented-code
+    threshold - so a TOP-LEVEL list written two spaces in (every generated
+    table of contents) was classified as code and exported as literal markdown
+    source. `normalize_list_indentation` settles the indentation before the
+    converter sees it, and these assert BOTH sides of the trade: the indented
+    top-level list becomes a list, and the two-space nesting `tab_length=2`
+    exists for still nests."""
+
+    def _norm(self, src):
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+        return ExportHandlerBase.normalize_list_indentation(
+            ExportHandlerBase, src)
+
+    def test_a_sub_list_behind_a_paragraph_is_left_alone(self):
+        """A loose item's own second paragraph carries no list marker, and
+        reading that as the end of the list left the item's child list looking
+        standalone - so it was dedented into the ordered list above it and the
+        author's steps silently renumbered."""
+        src = ("1. Step one\n\n   Explanation of step one.\n\n"
+               "   - detail a\n   - detail b\n\n2. Step two\n")
+        assert self._norm(src) == src, (
+            "a sub-list behind a continuation paragraph was hoisted out of "
+            "its item, which renumbers every step below it")
+
+    def test_a_comment_in_a_sample_is_not_a_heading(self):
+        """`# install` inside a fenced sample is the commonest line in a
+        procedure document. Splitting the chunk on it ended the list that was
+        holding the sample, and the item's own notes below were then read as
+        standalone and hoisted into the numbering."""
+        src = ("1. Install\n\n   ```bash\n   # install\n   pip install foo\n"
+               "   ```\n\n   - note a\n\n2. Run it\n")
+        assert self._norm(src) == src, (
+            "a comment line inside a sample was read as a heading, so the "
+            "item's notes were hoisted into the step numbering")
+
+    def test_a_loose_indented_list_is_left_alone(self):
+        """A blank line between items does not make them separate lists, and
+        the pass has no way to be sure it has found all of one. Moving part of
+        a loose list left the rest one level in; gathering the whole of it put
+        a fenced sample's bytes at risk. Neither is worth an index, so a list
+        written loose is refused."""
+        src = ("Contents.\n\n  1. first\n\n  2. second\n\n  3. third\n\nEnd.\n")
+        assert self._norm(src) == src, (
+            "a loose list was rescued; only a list written as one block is")
+
+    def test_an_item_owning_a_sample_is_left_where_it_was(self):
+        """A sample's bytes stand, so it cannot travel with its item. Moving
+        the marker out from under its own fenced sample leaves the sample
+        indented past the item, where it renders as an indented code block
+        showing its own fence markers - worse than not moving at all."""
+        src = ("  - input as string\n\n    ```shell\n    curl localhost\n"
+               "    ```\n")
+        assert self._norm(src) == src, (
+            "the item was moved out from under the sample it owns")
+
+    def test_a_heading_inside_an_item_does_not_end_the_list(self):
+        """DEF-MARK-58: an author who writes a heading at an item's content
+        column means it to sit inside the item. Reading it as the end of the
+        list hands the item's child list to the numbering above."""
+        src = "- Alpha\n\n  ### Notes\n\n  - n1\n  - n2\n\n- Beta\n"
+        assert self._norm(src) == src, (
+            "an indented heading ended the list, so the item's child list was "
+            "hoisted up to sit beside its own parent")
+
+    def test_a_list_below_an_indented_one_keeps_its_own_nesting(self):
+        """DEF-MARK-59: a column recorded for one list was matched against a
+        later chunk that merely sat at it, flattening a genuinely nested
+        sub-list into its parent. The recorded column is gone - a list is now
+        gathered whole before anything moves - and the shape is refused."""
+        src = "Contents.\n\n  - a\n\n- top\n\n  - nested\n\n- second\n"
+        assert self._norm(src) == src, (
+            "the nested item was dragged to column 0 by a shift belonging to "
+            "the earlier indented list")
+        indented = ("**Contents**\n\n  - [A](#a)\n  - [B](#b)\n\n - Note\n\n"
+                    "  - Child of note\n")
+        assert self._norm(indented) == indented, (
+            "the index was rescued although a list one column in follows it - "
+            "python-markdown reads one leading space as top level, so the two "
+            "merge and the second list's child is torn out from under it")
+
+    def test_a_list_one_column_in_is_left_alone(self):
+        """DEF-MARK-60: `OListProcessor.RE` already allows `tab_length - 1`
+        leading spaces, so a marker one column in is a list without help. The
+        shift of one would move its ragged child off the even-column grid the
+        nesting level is read from, collapsing two levels into one."""
+        src = "Intro.\n\n - Alpha\n  - child\n - Beta\n"
+        assert self._norm(src) == src, (
+            "a list that needed no rescue was shifted by an odd amount and "
+            "lost a nesting level")
+
+    def test_an_index_above_a_numbered_list_is_left_alone(self):
+        """DEF-MARK-61: two lists parted by nothing but a blank line read as
+        one, so a rescued index takes the steps below it as bullets. The
+        control leaves the index as source and keeps the numbering, which is
+        the better of the two."""
+        src = "Contents.\n\n  - a\n  - b\n\n1. one\n2. two\n"
+        assert self._norm(src) == src, (
+            "the index was rescued into the numbered list below it, which "
+            "costs the author's numbering in all three formats")
+        parted = "Contents.\n\n  - a\n\n## Steps\n\n1. one\n"
+        assert self._norm(parted) != parted, (
+            "a heading parts the two lists, so the rescue is safe there and "
+            "must still happen")
+
+    def test_a_loose_list_is_decided_whole(self):
+        """DEF-MARK-63: a loose list is one list. Deciding chunk by chunk left
+        it half moved - the half at column 0 became a list and the half left
+        behind became its child, dragging in whatever followed."""
+        table = ("Contents.\n\n  - [a](#a)\n\n  - [b](#b)\n"
+                 "| x | y |\n| - | - |\n| 1 | 2 |\n")
+        assert self._norm(table) == table, (
+            "half the index moved and swallowed the table under it")
+        steps = ("Contents.\n\n  - [a](#a)\n\n  - [b](#b)\n\n"
+                 "1. Step one\n2. Step two\n")
+        assert self._norm(steps) == steps, (
+            "half the index moved and took the numbered steps as its own "
+            "bullets")
+        whole = "Contents.\n\n  1. first\n\n  2. second\n\nEnd.\n"
+        assert self._norm(whole) == whole, (
+            "a loose list is refused whatever follows it - the pass cannot "
+            "tell it has found the whole of one")
+
+    def test_both_setext_spellings_and_a_borderless_table_are_seen(self):
+        """DEF-MARK-64: `-` is the level-2 setext underline and the commoner of
+        the two, and a markdown table needs no outer pipes."""
+        setext = "Contents.\n\n  - [a](#a)\n  - [b](#b)\nMy Section\n---\n\nBody.\n"
+        assert self._norm(setext) == setext, (
+            "the heading underlined with `---` was swallowed into the list")
+        borderless = ("Contents.\n\n  - [a](#a)\n  - [b](#b)\n"
+                      "Name | Age\n---- | ----\nAnn | 30\n")
+        assert self._norm(borderless) == borderless, (
+            "the table written without outer pipes was swallowed into the "
+            "list")
+
+    def test_two_lists_of_the_same_kind_also_merge(self):
+        """DEF-MARK-65: python-markdown merges two adjacent ordered lists as
+        readily as a mixed pair, and renumbers the second."""
+        src = "Contents.\n\n  1. Overview\n  2. Method\n\n1. Do this\n2. Do that\n"
+        assert self._norm(src) == src, (
+            "the ordered index was rescued into the procedure below it, which "
+            "renumbers the author's steps")
+
+    def test_only_a_column_zero_heading_parts_two_lists(self):
+        """DEF-MARK-66: a break line is never moved by the shift, so an
+        indented heading ends up inside the rescued item and parts nothing -
+        while having already disabled the guard that keeps the list below
+        from being absorbed."""
+        src = ("Contents.\n\n  - [a](#a)\n  - [b](#b)\n\n   ### Steps\n\n"
+               "1. Step one\n2. Step two\n")
+        assert self._norm(src) == src, (
+            "an indented heading was read as parting the two lists, and the "
+            "numbered steps became bullets of the index")
+
+    def test_a_sample_is_never_rewritten_from_inside_a_list(self):
+        """DEF-MARK-67: a chunk was judged by its list markers alone, so a
+        fenced sample whose own body is an indented list joined the list above
+        it and had two columns stripped from inside the fence. `services:`
+        with its items at column 2 is different YAML from one at column 0."""
+        own_chunk = "  - alpha\n  ```yaml\n  services:\n    - one\n    - two\n  ```\n"
+        assert self._norm(own_chunk) == own_chunk, (
+            "the sample shares the item's chunk, and shifting the chunk "
+            "rewrote indentation inside the fence")
+        own_block = ("  - alpha\n\n  - beta\n\n```yaml\nservices:\n  - one\n"
+                     "  - two\n```\n\n  - gamma\n")
+        out = self._norm(own_block)
+        assert "  - one" in out and "  - two" in out, (
+            f"the fenced sample's own indentation was rewritten: {out!r}")
+
+    def test_the_rescue_needs_what_follows_to_end_the_list(self):
+        """DEF-MARK-68: what a rescued list absorbs when it lands is not
+        knowable from the next chunk's first line. The rescue is taken only
+        when what follows certainly ends the list."""
+        note = ("## Contents\n\n  - [Setup](#setup)\n  - [Run it](#run-it)\n\n"
+                "    Generated automatically.\n\n1. Install\n2. Restart\n")
+        assert self._norm(note) == note, (
+            "an indented note stood between the index and the procedure, and "
+            "hid the procedure from the guard")
+        one_in = "  - index\n  - criteria\n\n 1. Prepare\n 2. Train\n"
+        assert self._norm(one_in) == one_in, (
+            "the list below sits one column in, which python-markdown reads "
+            "as top level, so the two merge and the numbering is lost")
+        later = "  - Overview\n\n   - detail\n1. Kick-off\n2. Delivery\n"
+        assert self._norm(later) == later, (
+            "the procedure starts on a later line of the next chunk, where "
+            "reading only its first line cannot see it")
+        # and the three shapes that DO end the list are still rescued
+        for name, src, want in (
+            ('prose', "## C\n\n  - [a](#a)\n\nBody.\n",
+             "## C\n\n- [a](#a)\n\nBody.\n"),
+            ('heading', "## C\n\n  - [a](#a)\n\n## S\n\n1. one\n",
+             "## C\n\n- [a](#a)\n\n## S\n\n1. one\n"),
+            ('comment', "<!-- TOC:BEGIN -->\n\n  - [a](#a)\n<!-- TOC:END -->\n",
+             "<!-- TOC:BEGIN -->\n\n- [a](#a)\n<!-- TOC:END -->\n"),
+        ):
+            assert self._norm(src) == want, (
+                f"the index closed by {name} was not rescued")
+
+    def test_a_rule_inside_the_chunk_refuses_the_rescue(self):
+        """DEF-MARK-70: a `---` standing at the shift column is a rule where it
+        is written and the underline of the line above it once the chunk lands
+        at column 0 - a heading the author never wrote, carrying the raw `- `
+        marker into Word's navigation pane."""
+        dashes = "Contents\n\n  - alpha\n  ---\n  - beta\n\nProse.\n"
+        assert self._norm(dashes) == dashes, (
+            "the rule became a setext underline and fabricated a heading")
+        equals = "Contents\n\n  - alpha\n  - beta\n  ===\n\nProse.\n"
+        assert self._norm(equals) == equals, (
+            "the `===` spelling fabricated a heading the same way")
+
+    def test_a_reopened_pre_block_keeps_its_bytes(self):
+        """DEF-MARK-69: a pass that counted `<pre>` tags itself was fooled by
+        a block that closed and reopened on one line, or a nested one. The
+        converter's raw-HTML extractor keeps the block open, so a shift inside
+        it changes no list into being and is refused by the measurement."""
+        reopened = "Head\n\n<pre>x</pre><pre>\n\n  - a\n  - b\n\n</pre>\n\nProse.\n"
+        assert self._norm(reopened) == reopened, (
+            "indentation was stripped from inside a still-open <pre>")
+        nested = "Head\n\n<pre>\n<pre>\n</pre>\n\n  - a\n  - b\n\n</pre>\n\nProse.\n"
+        assert self._norm(nested) == nested, (
+            "the inner `</pre>` was read as closing the outer block")
+
+    def test_an_indented_heading_after_the_list_refuses_the_rescue(self):
+        """DEF-MARK-71: an ATX line is recorded as a break, not a chunk, and
+        only a column-0 break parts two lists - so an indented heading was
+        neither readable by the refusal nor parting, and `shift_chunk` leaves a
+        break where it is. It ended up inside the item the rescue created."""
+        src = "  - a\n  - b\n  ## Sub\nSection Title\n---\n\nBody.\n"
+        assert self._norm(src) == src, (
+            "the list was rescued out from under an indented heading, which "
+            "stopped being a heading in every format")
+
+    def test_a_chunk_behind_an_indented_heading_does_not_end_the_list(self):
+        """DEF-MARK-73: an ATX line is a break, not a chunk, so the column-0
+        line after an INDENTED heading is a lazy continuation of the item that
+        heading sits in - the list above is still open. Reading it as the end
+        let the child list below be rescued out from under its parent."""
+        src = "- Alpha\n  ### Notes\nSee below.\n\n  1. First\n  2. Second\n"
+        assert self._norm(src) == src, (
+            "the numbered sub-list was dedented out of its parent item and "
+            "merged into the bullet list above, losing its numbers")
+
+    def test_the_fence_tracker_closes_where_the_converter_does(self):
+        """DEF-MARK-74: `FencedBlockPreprocessor.FENCED_BLOCK_RE` anchors the
+        closer after a newline and matches it with a backreference, so neither
+        an indented closer nor a longer inner fence closes the block. A pass
+        that tracked fences itself read either as the close and rewrote bytes
+        inside the sample; measured against the rendered document, a shift
+        inside an open fence changes a code block into a code block and is
+        refused."""
+        indented_closer = ("Intro.\n\n```yaml\nfiller line\n  ```\n\n"
+                           "  - alpha\n  - beta\n\nDone.\n\n```\n\nAfter.\n")
+        assert self._norm(indented_closer) == indented_closer, (
+            "an indented ``` closed the tracker's fence and the pass rewrote "
+            "bytes inside the sample")
+        longer_inner = "```md\n\n````\n\n  - a\n\nProse.\n\n```\n\nAfter.\n"
+        assert self._norm(longer_inner) == longer_inner, (
+            "a longer inner fence closed the tracker's fence")
+
+    def test_a_tab_is_not_read_as_no_indentation(self):
+        """DEF-MARK-75: python-markdown runs `expandtabs(tab_length)` before
+        parsing; every column here is counted in spaces. A tab-indented line
+        therefore measured as column 0 and certified as prose that ends the
+        list, when the converter reads it as a child of that list."""
+        successor = ("Intro.\n\n  - [1. A](#a)\n  - [2. B](#b)\n\n"
+                     "\tNote about the index.\n\n1. Step one\n2. Step two\n")
+        assert self._norm(successor) == successor, (
+            "a tab-indented successor was read as column-0 prose, and the "
+            "numbered procedure below became bullets of the index")
+        rule = "Contents.\n\n  - [Alpha](#alpha)\n\n\t- Beta\n---\n\nAfter.\n"
+        assert self._norm(rule) == rule, (
+            "the same miscount turned the author's rule into a fabricated "
+            "Word heading")
+
+    def test_a_rescued_ordered_index_must_start_at_one(self):
+        """DEF-MARK-76: `LAZY_OL` is on, so no `start` is written and the list
+        renders from 1 whatever the author numbered it."""
+        three = "Contents.\n\n  3. Third section\n  4. Fourth section\n\nEnd.\n"
+        assert self._norm(three) == three, (
+            "an index opening at 3 was rescued, and renders as 1 - pointing "
+            "the reader at the wrong section")
+        one = "Contents.\n\n  1. First\n  2. Second\n\nEnd.\n"
+        assert self._norm(one) == "Contents.\n\n1. First\n2. Second\n\nEnd.\n", (
+            "an index that does start at 1 must still be rescued")
+
+    def test_the_inert_comment_covers_only_itself(self):
+        """DEF-MARK-77: a comment renders as nothing, but the lines behind it
+        in the same chunk still move - and an indented sample shifted to
+        column 0 stops being a code block."""
+        mid = ("Contents.\n\n  - [Alpha](#alpha)\n<!-- end of index -->\n"
+               "  services:\n    web: nginx\n\nNext.\n")
+        assert self._norm(mid) == mid, (
+            "the comment waved through the sample behind it, which lost its "
+            "indentation and its block type")
+        last = "<!-- TOC:BEGIN -->\n\n  - [a](#a)\n<!-- TOC:END -->\n"
+        assert self._norm(last) == "<!-- TOC:BEGIN -->\n\n- [a](#a)\n<!-- TOC:END -->\n", (
+            "a comment that closes the chunk is what a generated index writes "
+            "and must still be waved through")
+
+    def test_a_tab_led_chunk_does_not_end_the_list(self):
+        """DEF-MARK-79: the third site of the tab miscount. A tab-indented
+        continuation paragraph measured as column 0 and cleared the open
+        list, so the item's own child list was judged standalone and hoisted
+        into the numbering above it."""
+        steps = ("1. Step one\n\n\tExplanation of step one.\n\n"
+                 "   - detail a\n   - detail b\n\nEnd.\n")
+        assert self._norm(steps) == steps, (
+            "the child bullets of step one were promoted to steps two and "
+            "three")
+        spaces = ("1. Step one\n\n   Explanation of step one.\n\n"
+                  "   - detail a\n   - detail b\n\nEnd.\n")
+        assert self._norm(spaces) == spaces, (
+            "the space-indented twin must stay refused too")
+
+    def test_a_line_the_converter_does_not_call_blank_is_content(self):
+        """DEF-MARK-80: `NormalizeWhitespace` empties only space-only lines.
+        `str.strip()` also removes an NBSP or a form feed, so a line holding
+        one was read as the blank that ends the chunk, and the converter then
+        took what followed as a lazy continuation of the rescued list."""
+        for sep in ('\xa0', '\x0c', '\u2003'):
+            heading = "  - a\n" + sep + "\nText.\n---\n"
+            assert self._norm(heading) == heading, (
+                "a setext heading was welded into the bullet above it")
+            para = "Intro.\n\n  - alpha\n  - beta\n" + sep + "\nImportant.\n"
+            assert self._norm(para) == para, (
+                "a standalone paragraph was welded into the last bullet")
+        real = "Intro.\n\n  - alpha\n  - beta\n\nImportant.\n"
+        assert self._norm(real) == "Intro.\n\n- alpha\n- beta\n\nImportant.\n", (
+            "a real blank line must still end the chunk and permit the rescue")
+
+    def test_a_heading_with_no_space_after_the_hashes_is_seen(self):
+        """DEF-MARK-81: `HashHeaderProcessor.RE` needs no space after the
+        hashes, so `#Note` is a heading once the shift lands it at column 0.
+        The chunker asked for the space and so never recorded the break the
+        indented-heading refusal reads."""
+        index = "Intro.\n\n  1. one\n  #Note\n  2. two\n\nEnd.\n"
+        assert self._norm(index) == index, (
+            "a Word heading the author never wrote split the index in two, "
+            "and the second half renumbered from 1")
+        bullets = "Intro.\n\n  - a\n  ##Note\n  - b\n\nEnd.\n"
+        assert self._norm(bullets) == bullets
+
+    def test_an_interior_line_that_splits_the_list_refuses_the_rescue(self):
+        """DEF-MARK-82: a raw HTML block, a thematic break or a table row at
+        the shift column is content while the chunk is a code block and its
+        own block once the chunk lands at column 0 - the rescued index splits
+        in two and, `LAZY_OL` being on, the second half renumbers from 1."""
+        for splitter in ('<div>note</div>', '***', '<!-- c -->'):
+            src = ("Intro.\n\n  1. First section\n  " + splitter
+                   + "\n  2. Second section\n\nEnd.\n")
+            assert self._norm(src) == src, (
+                f"{splitter!r} split the rescued index and renumbered its tail")
+
+    def test_a_successor_the_converter_erases_does_not_end_the_list(self):
+        """DEF-MARK-83: a column-0 line made only of whitespace the converter
+        strips - an NBSP, a form feed - looks like prose that ends the list,
+        but renders as nothing, so the list stays open and takes the numbered
+        procedure below it as its own items."""
+        for sep in ('\xa0', '\x0c'):
+            src = ("Intro.\n\n  1. Overview\n  2. Method\n\n" + sep
+                   + "\n\n1. First step\n2. Second step\n")
+            assert self._norm(src) == src, (
+                "the procedure below the index was renumbered as steps 3 and 4")
+
+    def test_a_marker_the_converter_does_not_read_is_not_a_marker(self):
+        """DEF-MARK-84: `OListProcessor.RE` accepts `1.` only, never `1)`, and
+        both list processors want a space after the marker. A chunk opening
+        with `1)` is an indented code sample to the converter, and shifted to
+        column 0 it becomes a paragraph with its line breaks gone."""
+        paren = "Intro.\n\n  1) one\n  2) two\n\nEnd.\n"
+        assert self._norm(paren) == paren, (
+            "a `1)` sample was shifted and its lines ran together")
+        jammed = "Intro.\n\n  -foo\n  -bar\n\nEnd.\n"
+        assert self._norm(jammed) == jammed
+
+    def test_a_sample_in_the_item_own_chunk_keeps_its_fence(self):
+        """A fence four columns in, with no blank line after its item, shares
+        the item's chunk. Shifted with it, the fence is no longer at column 0
+        and the converter reads its markers as the item's own text - the
+        rendered list holds no block a check could see, so a chunk holding a
+        fence is never a candidate at all."""
+        src = ("Steps.\n\n  - run it\n    ```shell\n    make\n    ```\n\n"
+               "End.\n")
+        assert self._norm(src) == src, (
+            "the item was rescued and its sample's fence became item text")
+
+    def test_a_raw_block_inside_an_item_refuses_the_rescue(self):
+        """DEF-MARK-86: the block-level set is the converter's own, not a
+        six-tag copy of it. A `<style>` or `<script>` at the item's content
+        column is inert escaped text in the control's code block and a live
+        element once the chunk is a list."""
+        for raw in ('<style>body{display:none}</style>', '<script>alert(1)</script>',
+                    '<details><summary>s</summary>body</details>'):
+            src = "Intro.\n\n  - a\n    " + raw + "\n  - b\n\nEnd.\n"
+            assert self._norm(src) == src, (
+                f"{raw[:8]} inside an item was rescued into a live element")
+
+    def test_a_nested_ordered_run_must_also_open_at_one(self):
+        """DEF-MARK-88: `LAZY_OL` renumbers a nested list from 1 as readily
+        as a top-level one, and the start-at-one rule read only the chunk's
+        first marker."""
+        nested = "Intro.\n\n  1. a\n    3. b\n    4. c\n  2. d\n\nEnd.\n"
+        assert self._norm(nested) == nested, (
+            "a nested run opening at 3 was rescued and renders 1, 2")
+        ok = "Intro.\n\n  1. a\n    1. b\n    2. c\n  2. d\n\nEnd.\n"
+        assert self._norm(ok) == "Intro.\n\n1. a\n  1. b\n  2. c\n2. d\n\nEnd.\n", (
+            "a nested run that does open at 1 must still be rescued")
+
+    def test_a_raw_element_in_the_chunk_is_never_a_candidate(self):
+        """DEF-MARK-89: the control escapes a tag inside an indented block;
+        a rescue would emit it live, and `is_block_level` is the converter's
+        opinion about layout, not about what a browser acts on - a `<link>`
+        hides the page, a `<meta>` leaves it, an `<img onerror>` runs. A
+        comment is not an element and still closes a generated index."""
+        for raw in ('<link rel="stylesheet" href="data:text/css,body%7Bdisplay%3Anone%7D">',
+                    '<meta http-equiv="refresh" content="0;url=https://example.org">',
+                    '<img src="x" onerror="document.body.style.display=\'none\'">',
+                    '<base href="https://example.org/">'):
+            src = "Intro.\n\n  - a\n    " + raw + "\n  - b\n\nEnd.\n"
+            assert self._norm(src) == src, f"{raw[:6]} went live in a rescued item"
+        toc = "<!-- TOC:BEGIN -->\n\n  - [a](#a)\n<!-- TOC:END -->\n\nText.\n"
+        assert self._norm(toc) == "<!-- TOC:BEGIN -->\n\n- [a](#a)\n<!-- TOC:END -->\n\nText.\n"
+
+    def test_a_reference_definition_in_the_chunk_is_never_a_candidate(self):
+        """DEF-MARK-104: the converter consumes a link reference definition
+        as a definition and shows it nowhere, so a URL the control displays
+        inside its code block vanished from the rescued list."""
+        src = "Intro.\n\n  - a\n  [ref]: http://example.com/x\n\nEnd.\n"
+        assert self._norm(src) == src, "a reference definition was swallowed by the rescue"
+
+    def test_a_candidate_the_converter_cannot_render_is_refused(self):
+        """DEF-MARK-90: a list nested past the parser's depth renders as a
+        code block in the control and raises inside the measurement of the
+        shifted text; the raise took every format's export down."""
+        src = ("Intro.\n\n" + "".join(f"{'  ' * (k + 1)}- lvl{k}\n" for k in range(1500))  # past any default recursion limit
+               + "\nEnd.\n")
+        assert self._norm(src) == src, "a candidate the converter cannot render was kept"
+
+    def test_a_marker_of_the_other_kind_at_one_depth_refuses_the_rescue(self):
+        """DEF-MARK-91: the converter folds a marker into the run already open
+        at its depth whatever its kind, so `- Intro` then `1. First` renders
+        as three bullets and `1. a / - b / 2. c` as 1, 2, 3."""
+        for src in ("Intro.\n\n  - Intro\n  1. First\n  2. Second\n\nEnd.\n",
+                    "Intro.\n\n  1. a\n  - b\n  2. c\n\nEnd.\n"):
+            assert self._norm(src) == src, "mixed marker kinds were rescued and merged"
+        nested = "Intro.\n\n  - a\n    1. x\n    2. y\n  - b\n\nEnd.\n"
+        assert self._norm(nested) == "Intro.\n\n- a\n  1. x\n  2. y\n- b\n\nEnd.\n", (
+            "a different kind at a deeper depth is a nested list and must still be rescued")
+
+    def test_depth_is_the_converter_bucket_not_the_column(self):
+        """DEF-MARK-95: the list processors take up to `tab_length - 1` extra
+        spaces as the same level, so a bullet one column deeper than the
+        numbered items around it is their sibling and merges into their run
+        - `1.`, `2.`, `3.` where the author wrote `1.`, a bullet, `2.`."""
+        for src in ("Intro.\n\n  1. a\n   - b\n  2. c\n\nEnd.\n",
+                    "Intro.\n\n  - a\n   1. b\n\nEnd.\n",
+                    "Intro.\n\n  - a\n    1. x\n     - y\n  - b\n\nEnd.\n"):
+            assert self._norm(src) == src, "a marker one column off its sibling was rescued and merged"
+        ok = "Intro.\n\n  - a\n    1. x\n    2. y\n  - b\n\nEnd.\n"
+        assert self._norm(ok) != ok, "a nested run two columns in is a real level and must still be rescued"
+
+    def test_every_marker_line_must_arrive_as_an_item(self):
+        """DEF-MARK-96: a marker the converter cannot nest - four columns
+        under its parent, where the unit is two - is kept as the parent's
+        text with its `-` or `1.` literal: one list, nothing block-level in
+        it, the author's level gone. Items are counted against marker lines."""
+        for src in ("Intro.\n\n  - a\n      - a1\n      - a2\n  - b\n\nEnd.\n",
+                    "Intro.\n\n  1. o0\n     1. o1\n        1. o2\n        2. o2b\n"
+                    "     2. o1b\n  2. o0b\n\nEnd.\n"):
+            assert self._norm(src) == src, "a collapsed level was rescued as item text"
+        toc = "## C\n\n  - [1. One](#1-one)\n    - [1.1 Sub](#11-sub)\n  - [2. Two](#2-two)\n\nText.\n"
+        assert self._norm(toc) == "## C\n\n- [1. One](#1-one)\n  - [1.1 Sub](#11-sub)\n- [2. Two](#2-two)\n\nText.\n"
+
+    def test_a_line_carrying_two_markers_refuses_the_rescue(self):
+        """DEF-MARK-102: `- 1. Intro` is two items to the converter and one
+        marker line here, so items could no longer be counted against marker
+        lines and a level the converter cannot nest below it went unseen."""
+        for src in ("Intro.\n\n  - 1. Intro\n        - sub\n\nEnd.\n",
+                    "Intro.\n\n  1. - a\n        - a2\n\nEnd.\n"):
+            assert self._norm(src) == src, "a two-marker line was rescued"
+
+    def test_a_commented_closing_tag_does_not_close_a_pre(self):
+        """DEF-MARK-78: the converter's raw-HTML extractor does not close a
+        `<pre>` on a `</pre>` written inside a comment, and neither does the
+        measurement - the block it renders is a `<pre>` either way."""
+        src = ("Intro.\n\n<pre>\n<!-- </pre> -->\n\n  - alpha\n  - beta\n\n"
+               "Done.\n</pre>\n\nAfter.\n")
+        assert self._norm(src) == src, (
+            "the commented tag took the depth to zero and the pass rewrote "
+            "indentation inside the preformatted block")
+
+    def test_a_table_under_an_indented_list_is_left_alone(self):
+        """DEF-MARK-62: a column-0 line stands where the shift would put it,
+        but the arriving list makes it a lazy continuation - and a table is
+        structure the control draws, not prose."""
+        src = ("## Contents\n\n  - [a](#a)\n  - [b](#b)\n"
+               "| x | y |\n| - | - |\n| 1 | 2 |\n")
+        assert self._norm(src) == src, (
+            "the table was swallowed into a list item, where its rows render "
+            "as literal pipe characters")
+        prose = "Intro.\n\n  - item\ncontinues here\n"
+        assert self._norm(prose) == prose, (
+            "a column-0 line under the list was swallowed as a continuation; "
+            "only a line that renders as nothing may stand there")
+
+    async def test_html_renders_the_indented_toc_as_links(
+            self, jp_fetch, test_indented_toc_file):
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "test_indented_toc.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert '<a href="#1.-Introduction">1. Introduction</a>' in html, (
+            "the two-space TOC did not become a list of links"
+        )
+        assert "[1. Introduction](#1.-Introduction)" not in html, (
+            "literal markdown source leaked into the HTML"
+        )
+
+    async def test_docx_renders_the_indented_toc_as_text_not_source(
+            self, jp_fetch, test_indented_toc_file):
+        from docx import Document
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "test_indented_toc.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        doc = Document(io.BytesIO(response.body))
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "1. Introduction" in text, "the TOC entry is missing from the DOCX"
+        assert "](#1.-Introduction)" not in text, (
+            "the TOC exported as literal markdown source"
+        )
+
+    async def test_pdf_renders_the_indented_toc_as_text_not_source(
+            self, jp_fetch, test_indented_toc_file):
+        import fitz
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "test_indented_toc.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert response.body.startswith(b"%PDF-")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        text = "".join(page.get_text() for page in doc)
+        doc.close()
+        assert "](#1.-Introduction)" not in text, (
+            "the TOC exported as literal markdown source"
+        )
+
+    async def test_ordered_list_two_spaces_in_is_numbered(
+            self, jp_fetch, test_indented_toc_file):
+        """An ordered list is classified by the same threshold as a bulleted
+        one, so it needs the same shift."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "test_indented_toc.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert "<ol>" in html and "<li>first ordered</li>" in html, (
+            "the two-space ordered list did not become a numbered list"
+        )
+        assert "1. first ordered" not in html, (
+            "literal ordered-list source leaked into the HTML"
+        )
+
+    async def test_two_space_nesting_still_nests(
+            self, jp_fetch, test_indented_toc_file):
+        """The regression guard on the reason `tab_length=2` was chosen: a list
+        nested by two spaces must stay a child, not become a sibling."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "test_indented_toc.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert re.search(
+            r"<li>top level<ul>\s*<li>nested under top</li>", html), (
+            "the two-space nested item was flattened into a sibling"
+        )
+
+    async def test_indented_code_block_stays_code(
+            self, jp_fetch, test_indented_toc_file):
+        """Four or more spaces is an indented code block - the one shape the
+        shift must never claim."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "test_indented_toc.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        plain = re.sub(r"<[^>]+>", "", html)
+        assert "- this is code, not a list" in plain, (
+            "the indented code block lost its content"
+        )
+        assert "<li>this is code, not a list</li>" not in html, (
+            "an indented code block was promoted to a list"
+        )
+
+    async def test_list_inside_a_fence_survives_verbatim(
+            self, jp_fetch, test_indented_toc_file):
+        """A `  - x` inside a fenced sample is code: its two spaces are part of
+        what the author is showing."""
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "test_indented_toc.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        # Pygments wraps each token in a span; strip tags before reading the text
+        plain = re.sub(r"<[^>]+>", "", html)
+        assert "\n  - fenced item" in plain, (
+            "the fenced sample was dedented with the document around it"
+        )
+
+    async def test_nested_item_after_a_blank_line_is_not_flattened(
+            self, jp_fetch, jp_root_dir):
+        """A loose list puts a blank line before its nested item, so "preceded
+        by a blank line" alone cannot mean "top level" - the open list has to
+        be tracked too, or a nested item is dedented into a sibling."""
+        (jp_root_dir / "loose.md").write_text(
+            "# L\n\n- top level\n\n  - nested under top\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "loose.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert "<ul>\n<li>\n<p>top level</p>\n<ul>" in html, (
+            "a nested item after a blank line was flattened into a sibling"
+        )
+
+    async def test_an_indented_block_keeps_its_own_nesting(
+            self, jp_fetch, jp_root_dir):
+        """Every line of the block moves by the same amount, so nesting inside
+        a block that is itself indented survives the shift."""
+        (jp_root_dir / "shifted.md").write_text(
+            "# S\n\n  - outer item\n    - inner item\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "shifted.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert re.search(r"<li>outer item<ul>\s*<li>inner item</li>", html), (
+            "the shifted block lost the nesting it was written with"
+        )
+
+    async def test_a_fence_left_of_the_shift_keeps_its_body_verbatim(
+            self, jp_fetch, jp_root_dir):
+        """A fence written left of the open marker column ends the block, and
+        must do so before its own lines are read. Shifting the sample lines
+        that reach the marker column while leaving those left of it alone is
+        no translation at all - it rewrites indentation inside content the
+        author wrote to be reproduced exactly. The rescue is measured against
+        the rendered document, so the list above the sample is rescued and
+        the sample's block is byte-identical to the control's."""
+        (jp_root_dir / "fenceleft.md").write_text(
+            "# F\n\nSteps:\n\n  - do this\n\n```python\ndef f():\n"
+            "    return 1\n```\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "fenceleft.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        plain = re.sub(r"<[^>]+>", "", html)
+        assert "<li>do this</li>" in html, (
+            "the list above a fenced sample was left as literal source; the "
+            "sample below it is its own block and nothing the list can absorb")
+        assert "\n    return 1" in plain, (
+            "the fenced body was dedented by the list's shift, so the sample "
+            "exports as invalid Python"
+        )
+
+    async def test_a_display_math_item_does_not_become_a_heading(
+            self, jp_fetch, jp_root_dir):
+        """DEF-MARK-85: the pass measures what the converter renders, so it
+        must see the text the converter gets. Run before the math pass, it
+        certified `- $$a = b$$` as a list item; the math pass then left a
+        bare `- ` line, which is the setext underline of the item above."""
+        (jp_root_dir / "mathitem.md").write_text(
+            "# T\n\nIntro.\n\n  - intro item\n  - $$a = b$$\n  - outro item\n\n"
+            "End.\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "mathitem.md"}),
+            raise_error=False)
+        assert response.code == 200
+        from docx import Document as _Doc
+        document = _Doc(io.BytesIO(response.body))
+        fabricated = [p.text for p in document.paragraphs
+                      if p.style.name.startswith("Heading")
+                      and "intro item" in p.text]
+        assert not fabricated, (
+            f"the item above the formula became a Word heading: {fabricated!r}")
+
+    async def test_docx_keeps_a_fenced_body_the_list_shift_reached(
+            self, jp_fetch, jp_root_dir):
+        """The pass runs before all three handlers, so the same clipped sample
+        reaches Word."""
+        (jp_root_dir / "fencedocx.md").write_text(
+            "# F\n\nSteps:\n\n  - do this\n\n```python\ndef f():\n"
+            "    return 1\n```\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "fencedocx.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        assert "    return 1" in _docx_text(response.body), (
+            "the fenced body reached Word with the list's shift cut off it"
+        )
+
+    async def test_a_closing_fence_ends_the_shifted_block(
+            self, jp_fetch, jp_root_dir):
+        """The block ends at the fence, so what follows the fence is read at
+        the column it was written in - three spaces is still indented code."""
+        (jp_root_dir / "afterfence.md").write_text(
+            "# A\n\nIntro.\n\n  - item\n\n```\nx\n```\n\n"
+            "   indented code block\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "afterfence.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert "<p>indented code block</p>" not in html, (
+            "the shift outlived the fence and demoted an indented code block "
+            "to an ordinary paragraph"
+        )
+        assert "indented code block" in re.sub(r"<[^>]+>", "", html), (
+            "the code block lost its content"
+        )
+
+    async def test_an_unclosed_fence_does_not_dedent_the_rest_of_the_file(
+            self, jp_fetch, jp_root_dir):
+        """A fence tracker with nothing to close it stays open to end of file,
+        so nothing may depend on a fence closing to end the block - or one
+        stray fence flattens every list below it."""
+        (jp_root_dir / "unclosed.md").write_text(
+            "Intro.\n\n  - a\n\n      ```\n      how a fence is written\n\n"
+            "## Heading\n\n- top\n  - nested\n    - deeper\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "unclosed.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert re.search(r"<li>top<ul>\s*<li>nested<ul>\s*<li>deeper</li>", html), (
+            "the open fence carried the shift past a heading and flattened "
+            "the nesting of every list after it"
+        )
+
+    async def test_a_list_written_under_its_heading_is_a_list(
+            self, jp_fetch, jp_root_dir):
+        """A heading ends the block above it, so the marker under it is
+        top-level whether or not a blank line separates the two - which is how
+        a table of contents and most hand-written lists are actually laid
+        out."""
+        (jp_root_dir / "underhead.md").write_text(
+            "## Heading\n  - first entry\n  - second entry\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "underhead.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert "<li>first entry</li>" in html and "<li>second entry</li>" in html, (
+            "a list written directly under its heading still exports as "
+            "literal markdown source"
+        )
+
+    async def test_a_lazy_continuation_leaves_the_list_open(
+            self, jp_fetch, jp_root_dir):
+        """An item's paragraph may run on at column 0 without ending the item,
+        so a line left of the content column closes the list only after a
+        blank one. Read as a close, the item's own nested marker below looks
+        top-level and is dedented into its parent's sibling."""
+        (jp_root_dir / "lazy.md").write_text(
+            "# L\n\n- *Tips*: the first line of the item\n"
+            "runs on at column 0 without ending it.\n"
+            "  - a genuinely nested point\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/html",
+            method="POST", body=json.dumps({"path": "lazy.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200
+        html = response.body.decode("utf-8")
+        assert re.search(r"<ul>\s*<li>a genuinely nested point</li>", html), (
+            "the lazy continuation was read as closing the list, so the "
+            "nested item was flattened into a sibling of its parent"
+        )
+
+
+CALLOUT_BOX_DOC = """# Callout
+
+Intro paragraph.
+
+<div style="border: 2px dashed #9ca3af; background: rgba(244, 244, 245, 0.45); padding: 10px 14px; margin: 10px 0; color: #000000;">
+<b>&#x26A0; DRAFT v12, not for signature.</b> This document is under active preparation.
+</div>
+
+After the box.
+"""
+
+
+@pytest.fixture
+def test_callout_box_file(jp_root_dir):
+    md_file = jp_root_dir / "test_callout_box.md"
+    md_file.write_text(CALLOUT_BOX_DOC, encoding="utf-8")
+    return md_file
+
+
+def _docx_callout_boxes(doc):
+    """(bar_hex, fill_hex, text) of every callout box in a DOCX - the
+    single-cell table with a coloured left border that style_docx_alert_boxes
+    builds for a GitHub alert and for a hand-drawn box alike."""
+    from docx.oxml.ns import qn
+
+    boxes = []
+    for tbl in doc.tables:
+        if len(tbl.rows) != 1 or len(tbl.rows[0].cells) != 1:
+            continue
+        tblPr = tbl._tbl.find(qn("w:tblPr"))
+        borders = tblPr.find(qn("w:tblBorders")) if tblPr is not None else None
+        left = borders.find(qn("w:left")) if borders is not None else None
+        if left is None:
+            continue
+        tcPr = tbl.rows[0].cells[0]._tc.find(qn("w:tcPr"))
+        shd = tcPr.find(qn("w:shd")) if tcPr is not None else None
+        fill = shd.get(qn("w:fill")) if shd is not None else ""
+        boxes.append(((left.get(qn("w:color")) or "").upper(),
+                      (fill or "").upper(),
+                      tbl.rows[0].cells[0].text))
+    return boxes
+
+
+async def _export(jp_fetch, fmt, path):
+    response = await jp_fetch(
+        "jupyterlab-export-markdown-extension", f"export/{fmt}",
+        method="POST", body=json.dumps({"path": path}), raise_error=False,
+    )
+    assert response.code == 200, f"{fmt} export failed"
+    return response
+
+
+class TestCssColorNotation:
+    """DEF-DIAG-29: `rgb()` / `rgba()` is the notation a rich-text paste and every
+    devtools colour copy produces, and an extended colour name is one an author
+    simply writes; both used to resolve to nothing and render black."""
+
+    async def test_docx_rgb_and_rgba_text_colour_resolve(self, jp_fetch, jp_root_dir):
+        """Both notations must arrive, the alpha one composited onto the white
+        page - 45% of DC2626 over white is EF9D9D, which is what the author
+        sees in a browser. The alpha form is also the one that used to take the
+        export down with it: left in the style attribute, htmldocx reads the
+        channels with int() and the whole request dies on `invalid literal for
+        int() with base 10: '0.45'`."""
+        from docx import Document
+
+        (jp_root_dir / "rgb.md").write_text(
+            'Level <span style="color: rgb(220, 38, 38)">alarm</span> and '
+            '<span style="color: rgba(220, 38, 38, 0.45)">faded</span> here.\n',
+            encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "rgb.md")
+        doc = Document(io.BytesIO(response.body))
+        found = {r.text.strip(): r.font.color for p in doc.paragraphs for r in p.runs
+                 if r.text.strip() in ("alarm", "faded")}
+        assert set(found) == {"alarm", "faded"}, "a coloured run is missing from the DOCX"
+        for label, colour in found.items():
+            assert colour is not None and colour.rgb is not None, (
+                f"{label}: the colour resolved to nothing, so the run renders black"
+            )
+        assert str(found["alarm"].rgb) == "DC2626", (
+            f"alarm: exported as {found['alarm'].rgb}, not DC2626"
+        )
+        assert str(found["faded"].rgb) == "EF9D9D", (
+            f"faded: exported as {found['faded'].rgb}, not EF9D9D - the alpha "
+            "was dropped instead of composited, so the run arrives at full "
+            "strength and is darker than the author drew it"
+        )
+
+    async def test_docx_percentage_channels_resolve(self, jp_fetch, jp_root_dir):
+        """CSS states a channel as a number or a percentage, and both are what
+        a stylesheet copied out of a browser can carry."""
+        from docx import Document
+
+        (jp_root_dir / "pct.md").write_text(
+            'A <span style="color: rgb(100%, 0%, 0%)">pct</span> value.\n',
+            encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "pct.md")
+        doc = Document(io.BytesIO(response.body))
+        runs = [r for p in doc.paragraphs for r in p.runs if r.text.strip() == "pct"]
+        assert runs and runs[0].font.color.rgb is not None, "percentage rgb() lost"
+        assert str(runs[0].font.color.rgb) == "FF0000", (
+            f"rgb(100%, 0%, 0%) exported as {runs[0].font.color.rgb}, not FF0000"
+        )
+
+    async def test_docx_rgba_background_shades_the_run(self, jp_fetch, jp_root_dir):
+        """Word has no translucent run, so a half-strength yellow arrives
+        composited onto the white page (FFFF80) and an opaque one at full
+        strength (FFFF00) - both as true run shading rather than the Word
+        highlight htmldocx picks from its fixed palette."""
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        (jp_root_dir / "pill.md").write_text(
+            'Marked <span style="background-color: rgba(255, 255, 0, 0.5)">lit</span> '
+            'and <span style="background-color: rgb(255,255,0)">plain</span>.\n',
+            encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "pill.md")
+        doc = Document(io.BytesIO(response.body))
+        runs = {r.text.strip(): r for p in doc.paragraphs for r in p.runs
+                if r.text.strip() in ("lit", "plain")}
+        assert set(runs) == {"lit", "plain"}, "a shaded run is missing from the DOCX"
+        for label, expected in (("lit", "FFFF80"), ("plain", "FFFF00")):
+            rPr = runs[label]._r.find(qn("w:rPr"))
+            shd = rPr.find(qn("w:shd")) if rPr is not None else None
+            assert shd is not None, f"{label}: the background did not become run shading"
+            assert shd.get(qn("w:fill")) == expected, (
+                f"{label}: shaded {shd.get(qn('w:fill'))}, not {expected}"
+            )
+            assert rPr.find(qn("w:highlight")) is None, (
+                f"{label}: left to htmldocx, which maps any background to the "
+                "nearest of its own few highlight names"
+            )
+
+    async def test_docx_extended_colour_name_is_not_black(self, jp_fetch, jp_root_dir):
+        from docx import Document
+
+        (jp_root_dir / "named.md").write_text(
+            'A <span style="color: lightgray">pale</span> word.\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "named.md")
+        doc = Document(io.BytesIO(response.body))
+        runs = [r for p in doc.paragraphs for r in p.runs if r.text.strip() == "pale"]
+        assert runs and runs[0].font.color.rgb is not None, (
+            "the colour name resolved to nothing, so the run renders black"
+        )
+        assert str(runs[0].font.color.rgb) == "D3D3D3", (
+            f"lightgray exported as {runs[0].font.color.rgb}, not D3D3D3"
+        )
+
+    async def test_a_non_finite_channel_does_not_take_the_export_down(
+            self, jp_fetch, jp_root_dir):
+        """`nan`, `inf` and an overflowing exponent are all values float()
+        accepts and round() refuses, so guarding only the parse leaves the
+        failure this branch was written to remove: HTTP 500 and no document at
+        all, for one malformed declaration anywhere in the file."""
+        (jp_root_dir / "wild.md").write_text(
+            '# W\n\n<span style="color: rgb(nan, 0, 0)">first</span> and '
+            '<span style="color: rgb(1e400, 0, 0)">second</span>.\n\nafter\n',
+            encoding="utf-8")
+        for fmt in ("docx", "pdf", "html"):
+            response = await jp_fetch(
+                "jupyterlab-export-markdown-extension", f"export/{fmt}",
+                method="POST", body=json.dumps({"path": "wild.md"}),
+                raise_error=False,
+            )
+            assert response.code == 200, (
+                f"{fmt}: a non-finite colour channel lost the whole document - "
+                f"{response.body[:120]!r}"
+            )
+        response = await _export(jp_fetch, "docx", "wild.md")
+        assert "after" in _docx_text(response.body), "the document lost its text"
+
+    async def test_a_translucent_wash_arrives_light_not_at_full_strength(
+            self, jp_fetch, jp_root_dir):
+        """Alpha is what makes a colour light. Dropped rather than composited,
+        the commonest soft-grey wash there is - a few percent of black -
+        inverts to solid black and paints out the text sitting on it."""
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        (jp_root_dir / "wash.md").write_text(
+            '# W\n\nA <span style="background: rgba(0, 0, 0, 0.05)">soft wash</span> '
+            'inline.\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "wash.md")
+        doc = Document(io.BytesIO(response.body))
+        runs = [r for p in doc.paragraphs for r in p.runs if r.text.strip() == "soft wash"]
+        assert runs, "the shaded run is missing from the DOCX"
+        shd = runs[0]._r.find(qn("w:rPr")).find(qn("w:shd"))
+        assert shd is not None and shd.get(qn("w:fill")) == "F2F2F2", (
+            f"5% black over white is F2F2F2; shaded "
+            f"{shd.get(qn('w:fill')) if shd is not None else None} instead"
+        )
+
+    async def test_a_fully_transparent_colour_draws_nothing(
+            self, jp_fetch, jp_root_dir):
+        """`rgba(..., 0)` is what generated CSS writes for `transparent`, which
+        the named table already refuses. Read at full strength the two
+        spellings of one value disagree, and the wrong one paints a black
+        block over the text."""
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        (jp_root_dir / "clear.md").write_text(
+            '# C\n\nA <span style="background: rgba(0, 0, 0, 0)">clear</span> word.\n'
+            '\n<div style="background: rgba(255, 255, 255, 0); padding: 8px">'
+            'clear box</div>\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "clear.md")
+        doc = Document(io.BytesIO(response.body))
+        runs = [r for p in doc.paragraphs for r in p.runs if r.text.strip() == "clear"]
+        assert runs, "the run is missing from the DOCX"
+        rPr = runs[0]._r.find(qn("w:rPr"))
+        shd = rPr.find(qn("w:shd")) if rPr is not None else None
+        assert shd is None, (
+            f"a fully transparent background shaded the run "
+            f"{shd.get(qn('w:fill'))}"
+        )
+        assert rPr is None or rPr.find(qn("w:highlight")) is None, (
+            "the declaration was handed to htmldocx, which picked a highlight "
+            "from its own palette for a colour that paints nothing"
+        )
+        assert not _docx_callout_boxes(doc), (
+            "a fully transparent background drew a callout box"
+        )
+        assert any("clear box" in p.text for p in doc.paragraphs), (
+            "the div's text is missing from the DOCX"
+        )
+
+
+class TestHtmlCalloutBox:
+    """DEF-MARK-43: a <div> carrying a border or a background is a callout the author
+    drew by hand, and exports as the box an alert already gets - in the div's
+    own colours, in all three formats."""
+
+    async def test_html_keeps_the_authors_own_box(self, jp_fetch, test_callout_box_file):
+        """The HTML export is the reference the other two are brought into line
+        with: it hands the browser the div's own CSS."""
+        response = await _export(jp_fetch, "html", "test_callout_box.md")
+        html = response.body.decode("utf-8")
+        assert "border: 2px dashed #9ca3af" in html, "the box lost its border CSS"
+        assert "rgba(244, 244, 245, 0.45)" in html, "the box lost its background CSS"
+
+    async def test_docx_bordered_div_becomes_a_box(self, jp_fetch, test_callout_box_file):
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        response = await _export(jp_fetch, "docx", "test_callout_box.md")
+        doc = Document(io.BytesIO(response.body))
+        boxes = [b for b in _docx_callout_boxes(doc) if "DRAFT" in b[2]]
+        assert boxes, (
+            "the bordered div exported as a plain paragraph - no border, no fill"
+        )
+        bar, fill, text = boxes[0]
+        assert bar == "9CA3AF", f"the box bar is {bar}, not the div's own border colour"
+        assert fill == "FAFAFA", (
+            f"the box fill is {fill}, not the div's own background composited "
+            "onto the page - 45% of F4F4F5 over white is FAFAFA"
+        )
+        assert "not for signature" in text, "the box lost the text it was drawn around"
+        from docx.text.paragraph import Paragraph
+        all_text = "".join(Paragraph(p, doc).text
+                           for p in doc.element.body.iter(qn("w:p")))
+        assert "BOX:" not in all_text and "\u2063" not in all_text, (
+            "the callout marker leaked into the visible text"
+        )
+
+    async def test_pdf_bordered_div_becomes_a_box(self, jp_fetch, test_callout_box_file):
+        """The PDF reads the finished DOCX box back, so the two formats draw the
+        same bar and the same fill without being told twice."""
+        import fitz
+
+        response = await _export(jp_fetch, "pdf", "test_callout_box.md")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        fills = [c for page in doc for c in _pdf_fill_colors(page)]
+        strokes = [c for page in doc for c in _pdf_stroke_colors(page)]
+        text = "".join(page.get_text() for page in doc)
+        doc.close()
+        assert _color_near(fills, (0.980, 0.980, 0.980)), (
+            "the box background (FAFAFA) is missing from the PDF"
+        )
+        assert _color_near(strokes, (0.612, 0.639, 0.686)), (
+            "the box border colour (9CA3AF) is missing from the PDF"
+        )
+        assert "not for signature" in text, "the box text is missing from the PDF"
+        assert "BOX:" not in text, "the callout marker leaked into the PDF text"
+
+    async def test_docx_background_only_div_is_a_box(self, jp_fetch, jp_root_dir):
+        """A background alone draws a box too, and it must not be mistaken for a
+        highlighter pill run through the text."""
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        (jp_root_dir / "shaded.md").write_text(
+            'Before.\n\n<div style="background: #ffe9a8;">Only a background.</div>'
+            '\n\nAfter.\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "shaded.md")
+        doc = Document(io.BytesIO(response.body))
+        boxes = [b for b in _docx_callout_boxes(doc) if "Only a background" in b[2]]
+        assert boxes, "the shaded div exported without a box"
+        assert boxes[0][1] == "FFE9A8", f"the box fill is {boxes[0][1]}, not the div's"
+        shaded_runs = [
+            r for tbl in doc.tables for row in tbl.rows for cell in row.cells
+            for para in cell.paragraphs for r in para.runs
+            if r._r.find(qn("w:rPr")) is not None
+            and r._r.find(qn("w:rPr")).find(qn("w:shd")) is not None
+        ]
+        assert not shaded_runs, (
+            "the fill was painted onto the runs as well - a highlighter band "
+            "across text already sitting on the box's own background"
+        )
+
+    async def test_a_border_that_draws_no_line_is_not_a_box(
+            self, jp_fetch, jp_root_dir):
+        """`border-collapse` and `border-image` open with the same word as a
+        border and draw none, and `0px`, `none !important` and a transparent
+        colour each write one off. A callout box is a loud construct - drawn
+        where the CSS draws nothing, it invents an aside the author never
+        wrote."""
+        from docx import Document
+
+        for name, style in (
+                ("zero", "border: 0px; background: none"),
+                ("important", "border: none !important"),
+                ("collapse", "border-collapse: collapse; padding: 4px"),
+                ("image", "border-image: url(x.png)"),
+                ("clear", "border: 1px solid transparent"),
+        ):
+            (jp_root_dir / f"{name}.md").write_text(
+                f'Before.\n\n<div style="{style}">not a box</div>\n\nAfter.\n',
+                encoding="utf-8")
+            response = await _export(jp_fetch, "docx", f"{name}.md")
+            doc = Document(io.BytesIO(response.body))
+            assert not _docx_callout_boxes(doc), (
+                f"`{style}` draws no line, and was boxed anyway"
+            )
+            assert any("not a box" in p.text for p in doc.paragraphs), (
+                f"`{style}`: the div's text is missing from the DOCX"
+            )
+
+    async def test_a_border_still_draws_its_box(self, jp_fetch, jp_root_dir):
+        """The other side of the same test: a width, a style or a colour on
+        any one side is a line, and takes the box."""
+        from docx import Document
+
+        for name, style, bar in (
+                ("solid", "border: 1px solid #123456", "123456"),
+                ("style_only", "border-style: dashed", "BBBBBB"),
+                ("one_side", "border-left: 3px solid #abcdef", "ABCDEF"),
+        ):
+            (jp_root_dir / f"b{name}.md").write_text(
+                f'Before.\n\n<div style="{style}">a box</div>\n\nAfter.\n',
+                encoding="utf-8")
+            response = await _export(jp_fetch, "docx", f"b{name}.md")
+            boxes = _docx_callout_boxes(Document(io.BytesIO(response.body)))
+            assert boxes, f"`{style}` draws a line and lost its box"
+            assert boxes[0][0] == bar, f"`{style}` barred {boxes[0][0]}, not {bar}"
+
+    async def test_a_plain_div_is_not_boxed(self, jp_fetch, jp_root_dir):
+        """A div is a callout only when the author drew one; a bare div must
+        stay the paragraph it already exports as."""
+        from docx import Document
+
+        (jp_root_dir / "plain.md").write_text(
+            "Before.\n\n<div>No box here.</div>\n\nAfter.\n", encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "plain.md")
+        doc = Document(io.BytesIO(response.body))
+        assert not _docx_callout_boxes(doc), "a div with no border and no fill was boxed"
+        assert any("No box here" in p.text for p in doc.paragraphs), (
+            "the div's text is missing from the DOCX"
+        )
+
+    async def test_pdf_black_bordered_box_is_still_a_box(self, jp_fetch, jp_root_dir):
+        """Black is a colour a hand-drawn border is written in, and the PDF
+        recognises the box by that border - so a black one must not be read as
+        an ordinary table's default rule and lose its box."""
+        import fitz
+
+        (jp_root_dir / "black.md").write_text(
+            'Before.\n\n<div style="border: 1px solid black;">Black bordered note.'
+            '</div>\n\nAfter.\n', encoding="utf-8")
+        response = await _export(jp_fetch, "pdf", "black.md")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        strokes = [c for page in doc for c in _pdf_stroke_colors(page)]
+        text = "".join(page.get_text() for page in doc)
+        doc.close()
+        assert _color_near(strokes, (0.0, 0.0, 0.0)), (
+            "a black-bordered box drew no bar in the PDF"
+        )
+        assert "Black bordered note" in text, "the box text is missing from the PDF"
+
+    async def test_a_box_inside_a_list_item_stays_inline(self, jp_fetch, jp_root_dir):
+        """Word has no table inside a list item, so boxing one there moves the
+        whole bullet into the box and the list loses the item."""
+        from docx import Document
+
+        (jp_root_dir / "inli.md").write_text(
+            '- item <div style="border:1px solid #ccc">boxed</div>\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "inli.md")
+        doc = Document(io.BytesIO(response.body))
+        assert not _docx_callout_boxes(doc), "a div in a list item was boxed"
+        bullets = [p for p in doc.paragraphs
+                   if p.style and p.style.name == "List Bullet"]
+        assert bullets and "item boxed" in bullets[0].text, (
+            "the list item lost its text to the box"
+        )
+
+    async def test_a_picture_in_a_bordered_div_keeps_its_place(
+            self, jp_fetch, jp_root_dir):
+        """htmldocx gives a picture a paragraph of its own, which stays outside
+        the table the text is moved into - so boxing the div would drop the
+        picture below the box it was written above."""
+        from docx import Document
+        from PIL import Image as PILImage
+
+        PILImage.new("RGB", (60, 40), color=(30, 90, 200)).save(
+            jp_root_dir / "pic.png")
+        (jp_root_dir / "picbox.md").write_text(
+            'Before.\n\n<div style="border:1px solid #ccc">'
+            '<img src="pic.png" alt="pic"> caption</div>\n\nAfter.\n',
+            encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "picbox.md")
+        doc = Document(io.BytesIO(response.body))
+        assert not _docx_callout_boxes(doc), (
+            "a div holding a picture was boxed, leaving the picture outside it"
+        )
+        with zipfile.ZipFile(io.BytesIO(response.body)) as zf:
+            media = [n for n in zf.namelist() if n.startswith("word/media/")]
+        assert media, "the picture is missing from the DOCX"
+        assert any("caption" in p.text for p in doc.paragraphs), "the caption is missing"
+
+
+BLOCK_CALLOUT_DOC = """# Callout
+
+Intro paragraph.
+
+<div style="border: 2px dashed #9ca3af; background: rgba(244, 244, 245, 0.45); padding: 10px 14px; margin: 10px 0;">
+<h3>Heads up</h3>
+This document is under active preparation.
+</div>
+
+After the box.
+"""
+
+
+@pytest.fixture
+def test_block_callout_file(jp_root_dir):
+    md_file = jp_root_dir / "test_block_callout.md"
+    md_file.write_text(BLOCK_CALLOUT_DOC, encoding="utf-8")
+    return md_file
+
+
+class TestHtmlCalloutBoxWithBlocks:
+    """DEF-MARK-48: the same box drawn around a heading and a line of text. HTML
+    boxes it on the div's own CSS whatever it holds, so DOCX and PDF must box
+    both spellings or the three formats disagree on the same construct."""
+
+    async def test_html_keeps_the_box_around_blocks(
+            self, jp_fetch, test_block_callout_file):
+        response = await _export(jp_fetch, "html", "test_block_callout.md")
+        html = response.body.decode("utf-8")
+        assert "border: 2px dashed #9ca3af" in html, "the box lost its border CSS"
+
+    async def test_docx_bordered_div_holding_blocks_is_a_box(
+            self, jp_fetch, test_block_callout_file):
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        response = await _export(jp_fetch, "docx", "test_block_callout.md")
+        doc = Document(io.BytesIO(response.body))
+        boxes = [b for b in _docx_callout_boxes(doc) if "Heads up" in b[2]]
+        assert boxes, (
+            "the div exported as plain paragraphs - a heading inside the "
+            "callout cost it the box the same div without one gets"
+        )
+        bar, fill, text = boxes[0]
+        assert bar == "9CA3AF", f"the box bar is {bar}, not the div's own border colour"
+        assert fill == "FAFAFA", (
+            f"the box fill is {fill}, not the div's own background composited "
+            "onto the page"
+        )
+        assert "active preparation" in text, "the box lost the text it holds"
+        from docx.text.paragraph import Paragraph
+        all_text = "".join(Paragraph(p, doc).text
+                           for p in doc.element.body.iter(qn("w:p")))
+        assert "BOX" not in all_text and "⁣" not in all_text, (
+            "a callout marker leaked into the visible text"
+        )
+
+    async def test_pdf_bordered_div_holding_blocks_is_a_box(
+            self, jp_fetch, test_block_callout_file):
+        import fitz
+
+        response = await _export(jp_fetch, "pdf", "test_block_callout.md")
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        fills = [c for page in doc for c in _pdf_fill_colors(page)]
+        strokes = [c for page in doc for c in _pdf_stroke_colors(page)]
+        text = "".join(page.get_text() for page in doc)
+        doc.close()
+        assert _color_near(fills, (0.980, 0.980, 0.980)), (
+            "the box background (FAFAFA) is missing from the PDF"
+        )
+        assert _color_near(strokes, (0.612, 0.639, 0.686)), (
+            "the box border colour (9CA3AF) is missing from the PDF"
+        )
+        assert "active preparation" in text, "the box text is missing from the PDF"
+        assert "BOX" not in text, "a callout marker leaked into the PDF text"
+
+    async def test_two_paragraphs_in_one_div_are_one_box(self, jp_fetch, jp_root_dir):
+        """A box is one table, so the paragraphs of one div go into one - a
+        table each would draw a stack of boxes with a gap between them where
+        the author drew a single aside."""
+        from docx import Document
+
+        (jp_root_dir / "twopara.md").write_text(
+            'Before.\n\n<div style="border: 1px solid #123456; background: #eeeeee">\n'
+            '<p>first line</p>\n<p>second line</p>\n</div>\n\nAfter.\n',
+            encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "twopara.md")
+        doc = Document(io.BytesIO(response.body))
+        boxes = _docx_callout_boxes(doc)
+        assert len(boxes) == 1, (
+            f"a two-paragraph div drew {len(boxes)} boxes, expected 1"
+        )
+        assert "first line" in boxes[0][2] and "second line" in boxes[0][2], (
+            f"the box holds {boxes[0][2]!r} - a paragraph fell out of it"
+        )
+
+    async def test_two_adjacent_divs_stay_two_boxes(self, jp_fetch, jp_root_dir):
+        """Two asides written one after the other in the same colours are two
+        boxes, not one: a run of paragraphs is a single box only when one div
+        opened it."""
+        from docx import Document
+
+        (jp_root_dir / "adjacent.md").write_text(
+            'Before.\n\n<div style="border: 1px solid #123456">first note</div>\n\n'
+            '<div style="border: 1px solid #123456">second note</div>\n\nAfter.\n',
+            encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "adjacent.md")
+        boxes = _docx_callout_boxes(Document(io.BytesIO(response.body)))
+        assert len(boxes) == 2, (
+            f"two adjacent divs drew {len(boxes)} boxes, expected 2"
+        )
+
+    async def test_a_div_holding_a_table_is_not_boxed(self, jp_fetch, jp_root_dir):
+        """A table is a structure of its own in Word and stays outside the box
+        the text is moved into, the way a picture does - so the div keeps the
+        plain export rather than dropping its table out of its own box."""
+        from docx import Document
+
+        (jp_root_dir / "tblbox.md").write_text(
+            'Before.\n\n<div style="border: 1px solid #123456">\n'
+            '<p>lead line</p>\n<table><tr><td>cell</td></tr></table>\n</div>\n\n'
+            'After.\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "tblbox.md")
+        doc = Document(io.BytesIO(response.body))
+        assert not _docx_callout_boxes(doc), (
+            "a div holding a table was boxed, leaving the table outside it"
+        )
+        assert any("cell" in c.text for t in doc.tables
+                   for r in t.rows for c in r.cells), "the table is missing"
+
+
+class TestCssColourInFunctionCall:
+    """DEF-MARK-47: a CSS function call carries names that are not colours - a file
+    name in `url()`, a custom property in `var()` - and reading one as a colour
+    paints a fill the browser does not."""
+
+    async def test_a_colour_name_in_a_file_name_is_not_a_box(
+            self, jp_fetch, jp_root_dir):
+        from docx import Document
+
+        (jp_root_dir / "urlbg.md").write_text(
+            'Before.\n\n<div style="background: url(assets/red-banner.png); '
+            'padding:4px">boxed</div>\n\nAfter.\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "urlbg.md")
+        doc = Document(io.BytesIO(response.body))
+        assert not _docx_callout_boxes(doc), (
+            "the image file name was read as a colour, so the div took a "
+            "solid callout box the browser paints nowhere"
+        )
+        assert any("boxed" in p.text for p in doc.paragraphs), (
+            "the div's text is missing from the DOCX"
+        )
+
+    async def test_a_custom_property_name_does_not_shade_a_run(
+            self, jp_fetch, jp_root_dir):
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        (jp_root_dir / "varbg.md").write_text(
+            'A <span style="background: var(--blue-500)">tok</span> word.\n',
+            encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "varbg.md")
+        doc = Document(io.BytesIO(response.body))
+        runs = [r for p in doc.paragraphs for r in p.runs if r.text.strip() == "tok"]
+        assert runs, "the run is missing from the DOCX"
+        rPr = runs[0]._r.find(qn("w:rPr"))
+        shd = rPr.find(qn("w:shd")) if rPr is not None else None
+        assert shd is None, (
+            f"the custom property name was read as a colour and shaded the run "
+            f"{shd.get(qn('w:fill'))}; the browser resolves the variable and "
+            "paints nothing like it"
+        )
+
+    async def test_a_bare_name_and_rgb_still_resolve(self, jp_fetch, jp_root_dir):
+        """The other side of the same test: a value that IS a colour keeps
+        working, in a bare name, in `rgb()`, and beside a `url()` in one
+        shorthand."""
+        from docx import Document
+        from docx.oxml.ns import qn
+
+        (jp_root_dir / "keeps.md").write_text(
+            'A <span style="background-color: rgb(0, 0, 255)">tok</span> word.\n\n'
+            '<div style="background: gold">bare name</div>\n\n'
+            '<div style="background: #ffffff url(bg.png) no-repeat; '
+            'border: 1px solid #123456">beside a url</div>\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "keeps.md")
+        doc = Document(io.BytesIO(response.body))
+        runs = [r for p in doc.paragraphs for r in p.runs if r.text.strip() == "tok"]
+        assert runs, "the run is missing from the DOCX"
+        shd = runs[0]._r.find(qn("w:rPr")).find(qn("w:shd"))
+        assert shd is not None and shd.get(qn("w:fill")) == "0000FF", "rgb() lost"
+        named = [b for b in _docx_callout_boxes(doc) if "bare name" in b[2]]
+        assert named and named[0][1] == "FFD700", (
+            f"a bare colour name lost its fill: {named}"
+        )
+        beside = [b for b in _docx_callout_boxes(doc) if "beside a url" in b[2]]
+        assert beside and beside[0][:2] == ("123456", "FFFFFF"), (
+            f"the colour beside the url() was lost: {beside}"
+        )
+
+
+class TestCssBorderCascade:
+    """DEF-MARK-49: the cascade applies to a border the way DEF-DIAG-39 made it apply to
+    emphasis - declarations folded per property, last value wins - so a later
+    longhand can write a border off and a colour alone is not one."""
+
+    async def test_a_later_longhand_switches_the_border_off(
+            self, jp_fetch, jp_root_dir):
+        from docx import Document
+
+        (jp_root_dir / "offlater.md").write_text(
+            'Before.\n\n<div style="border: 2px solid #9ca3af; border-style: none">'
+            'not a box</div>\n\nAfter.\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "offlater.md")
+        doc = Document(io.BytesIO(response.body))
+        assert not _docx_callout_boxes(doc), (
+            "the border was latched on by the first declaration, so the "
+            "longhand that switched it off drew a box anyway"
+        )
+        assert any("not a box" in p.text for p in doc.paragraphs), (
+            "the div's text is missing from the DOCX"
+        )
+
+    async def test_a_border_colour_alone_is_not_a_border(self, jp_fetch, jp_root_dir):
+        """`border-style` defaults to `none`, so a colour on its own draws no
+        line at all - a browser shows nothing and a box invents an aside."""
+        from docx import Document
+
+        (jp_root_dir / "coloronly.md").write_text(
+            'Before.\n\n<div style="border-color: #9ca3af">not a box</div>\n\n'
+            'After.\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "coloronly.md")
+        doc = Document(io.BytesIO(response.body))
+        assert not _docx_callout_boxes(doc), (
+            "a border colour with no border-style drew a box"
+        )
+        assert any("not a box" in p.text for p in doc.paragraphs), (
+            "the div's text is missing from the DOCX"
+        )
+
+    async def test_the_last_border_declaration_wins(self, jp_fetch, jp_root_dir):
+        """The other direction: a border written off and then back on draws."""
+        from docx import Document
+
+        (jp_root_dir / "onlater.md").write_text(
+            'Before.\n\n<div style="border: none; border: 1px solid #123456">'
+            'a box</div>\n\nAfter.\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "onlater.md")
+        boxes = _docx_callout_boxes(Document(io.BytesIO(response.body)))
+        assert boxes and boxes[0][0] == "123456", (
+            f"the last border declaration lost: {boxes}"
+        )
+
+
+class TestUnresolvableColourValue:
+    """DEF-MARK-50: htmldocx reads a colour with `int()` and slices a hex blind, so
+    a value this code could not resolve either takes the whole export down or
+    paints a colour the browser does not."""
+
+    async def test_a_malformed_hex_does_not_take_the_export_down(
+            self, jp_fetch, jp_root_dir):
+        (jp_root_dir / "badhex.md").write_text(
+            '# B\n\n<span style="color: #1234">first</span> and '
+            '<span style="background-color: #gggggg">second</span>.\n\nafter\n',
+            encoding="utf-8")
+        for fmt in ("docx", "pdf", "html"):
+            response = await jp_fetch(
+                "jupyterlab-export-markdown-extension", f"export/{fmt}",
+                method="POST", body=json.dumps({"path": "badhex.md"}),
+                raise_error=False,
+            )
+            assert response.code == 200, (
+                f"{fmt}: a malformed hex colour lost the whole document - "
+                f"{response.body[:120]!r}"
+            )
+        response = await _export(jp_fetch, "docx", "badhex.md")
+        assert "after" in _docx_text(response.body), "the document lost its text"
+
+    async def test_a_variable_holding_the_letters_rgb_does_not_take_it_down(
+            self, jp_fetch, jp_root_dir):
+        """htmldocx routes a value on the substring `rgb`, so a custom property
+        merely named after the notation is read as the notation."""
+        (jp_root_dir / "varrgb.md").write_text(
+            '# V\n\n<span style="color: var(--rgb-blue)">first</span>.\n\nafter\n',
+            encoding="utf-8")
+        for fmt in ("docx", "pdf", "html"):
+            response = await jp_fetch(
+                "jupyterlab-export-markdown-extension", f"export/{fmt}",
+                method="POST", body=json.dumps({"path": "varrgb.md"}),
+                raise_error=False,
+            )
+            assert response.code == 200, (
+                f"{fmt}: a custom property lost the whole document - "
+                f"{response.body[:120]!r}"
+            )
+
+    async def test_an_unresolvable_hex_is_not_painted_as_another_colour(
+            self, jp_fetch, jp_root_dir):
+        """A five-digit hex is not a colour: a browser drops the declaration
+        and the text stays the body colour. Handed on, htmldocx slices the
+        first two pairs and paints a colour that is on no screen anywhere."""
+        from docx import Document
+
+        (jp_root_dir / "fivehex.md").write_text(
+            'A <span style="color: #12345">tint</span> word.\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "fivehex.md")
+        doc = Document(io.BytesIO(response.body))
+        runs = [r for p in doc.paragraphs for r in p.runs if r.text.strip() == "tint"]
+        assert runs, "the run is missing from the DOCX"
+        colour = runs[0].font.color
+        assert colour is None or colour.rgb is None, (
+            f"the run was painted {colour.rgb}, read out of a hex that names "
+            "no colour"
+        )
+
+
+MIXED_CALLOUT_DOC = """# T
+
+<div style="border: 2px solid #333; background: #eeeeee; color: #ff0000;">
+<h3>Heads up</h3>
+loose text between
+<p>a paragraph</p>
+</div>
+
+After.
+"""
+
+
+@pytest.fixture
+def test_mixed_callout_file(jp_root_dir):
+    md_file = jp_root_dir / "test_mixed_callout.md"
+    md_file.write_text(MIXED_CALLOUT_DOC, encoding="utf-8")
+    return md_file
+
+
+def _pdf_spans(pdf_bytes):
+    """(text, size, font, colour hex) of every non-blank span in a PDF."""
+    import fitz
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    spans = []
+    for page in doc:
+        for block in page.get_text("dict")["blocks"]:
+            for line in block.get("lines", []):
+                for span in line["spans"]:
+                    if span["text"].strip():
+                        spans.append((span["text"].strip(),
+                                      round(span["size"], 1), span["font"],
+                                      f'{span["color"]:06X}'))
+    doc.close()
+    return spans
+
+
+class TestCalloutBoxContents:
+    """DEF-MARK-51/52/53: what stands INSIDE a hand-drawn box. A heading, a run of
+    loose text and a paragraph are three blocks in the browser and have to
+    arrive as three, at the sizes their tags earn, in the colour the same
+    declaration block gives them."""
+
+    async def test_loose_text_is_not_welded_into_the_block_above(
+            self, jp_fetch, test_mixed_callout_file):
+        """DEF-MARK-51: a bare text node carries no marker, so it stayed at body
+        level when the div was unwrapped and htmldocx joined it to the
+        paragraph above - two authored blocks arrived as one, in the style of
+        the first."""
+        from docx import Document
+
+        response = await _export(jp_fetch, "docx", "test_mixed_callout.md")
+        doc = Document(io.BytesIO(response.body))
+        boxes = [t for t in doc.tables
+                 if "Heads up" in t.rows[0].cells[0].text]
+        assert boxes, "the div took no box at all"
+        paras = [p for p in boxes[0].rows[0].cells[0].paragraphs if p.text.strip()]
+        assert [p.text for p in paras] == [
+            "Heads up", "loose text between", "a paragraph"], (
+            f"the box holds {[p.text for p in paras]}; the three blocks the "
+            "author wrote must arrive as three, in the order written"
+        )
+        assert paras[0].style.name == "Heading 3", (
+            f"the heading arrived as {paras[0].style.name}"
+        )
+        assert paras[1].style.name != "Heading 3", (
+            "the loose text was welded into the heading and took its style"
+        )
+
+    async def test_pdf_agrees_that_a_boxed_heading_is_a_heading(
+            self, jp_fetch, test_mixed_callout_file):
+        """DEF-MARK-52: the PDF painted every paragraph of a callout cell as body
+        text, so the heading Word keeps read at body size - one line of source
+        with two answers."""
+        from docx import Document
+
+        docx_response = await _export(jp_fetch, "docx", "test_mixed_callout.md")
+        doc = Document(io.BytesIO(docx_response.body))
+        boxed = [p for t in doc.tables for p in t.rows[0].cells[0].paragraphs
+                 if p.text.strip() == "Heads up"]
+        assert boxed and boxed[0].style.name.startswith("Heading"), (
+            "the DOCX box lost the heading this test compares against"
+        )
+
+        spans = _pdf_spans((await _export(jp_fetch, "pdf",
+                                          "test_mixed_callout.md")).body)
+        heading = [s for s in spans if s[0] == "Heads up"]
+        body = [s for s in spans if s[0] == "a paragraph"]
+        assert heading and body, f"the box text is missing from the PDF: {spans}"
+        assert heading[0][1] > body[0][1], (
+            f"the boxed heading is {heading[0][1]}pt against {body[0][1]}pt of "
+            "body text in the same box - the PDF dropped the heading level "
+            "Word keeps"
+        )
+        assert "Bold" in heading[0][2], (
+            f"the boxed heading is set in {heading[0][2]}, not a heading face"
+        )
+
+    async def test_the_box_colour_reaches_the_text_it_was_declared_with(
+            self, jp_fetch, test_mixed_callout_file):
+        """DEF-MARK-53: the fill and the colour come from one declaration block, so
+        an author who sets both must not get one. A heading is the exception in
+        all three formats - the stylesheet colour beats what it inherits."""
+        from docx import Document
+
+        doc = Document(io.BytesIO(
+            (await _export(jp_fetch, "docx", "test_mixed_callout.md")).body))
+        painted = {}
+        for tbl in doc.tables:
+            for para in tbl.rows[0].cells[0].paragraphs:
+                if not para.text.strip():
+                    continue
+                painted[para.text.strip()] = {
+                    str(run.font.color.rgb) for run in para.runs
+                    if run.font.color and run.font.color.rgb}
+        assert painted.get("loose text between") == {"FF0000"}, (
+            f"the loose text is painted {painted.get('loose text between')}; "
+            "the colour declared beside the fill reached neither format"
+        )
+        assert painted.get("a paragraph") == {"FF0000"}, (
+            f"the paragraph is painted {painted.get('a paragraph')}"
+        )
+        assert "FF0000" not in painted.get("Heads up", set()), (
+            "the heading took the author's body colour, though the stylesheet "
+            "colours a heading itself and a browser draws it unchanged"
+        )
+
+        spans = _pdf_spans(
+            (await _export(jp_fetch, "pdf", "test_mixed_callout.md")).body)
+        boxed = {s[0]: s[3] for s in spans}
+        assert boxed.get("a paragraph") == "FF0000", (
+            f"the PDF painted the box text {boxed.get('a paragraph')}, so the "
+            "two formats disagree on the same declaration"
+        )
+        assert boxed.get("Heads up") != "FF0000", (
+            "the PDF painted the boxed heading the body colour"
+        )
+
+    async def test_a_box_around_one_paragraph_carries_its_colour_too(
+            self, jp_fetch, jp_root_dir):
+        """The other spelling of the same construct - no block children, so the
+        div becomes the paragraph itself. htmldocx reads a colour off an inline
+        tag only, so one left on that paragraph arrived nowhere."""
+        from docx import Document
+
+        (jp_root_dir / "onepara.md").write_text(
+            'Before.\n\n<div style="border: 1px solid #123456; color: #ff0000">'
+            'just text</div>\n\nAfter.\n', encoding="utf-8")
+        response = await _export(jp_fetch, "docx", "onepara.md")
+        doc = Document(io.BytesIO(response.body))
+        boxed = [p for t in doc.tables for p in t.rows[0].cells[0].paragraphs
+                 if p.text.strip()]
+        assert [p.text for p in boxed] == ["just text"], (
+            f"the box holds {[p.text for p in boxed]}"
+        )
+        assert {str(run.font.color.rgb) for run in boxed[0].runs
+                if run.font.color and run.font.color.rgb} == {"FF0000"}, (
+            "the colour declared on the box reached no run"
+        )
+
+
+class TestCalloutBorderWidth:
+    """DEF-MARK-87: a `border` whose width is not a positive length draws
+    nothing in a browser, and the HTML export passes the style through - so
+    Word and the PDF must draw no box for it either."""
+
+    def test_a_width_that_is_not_a_positive_length_draws_no_box(self):
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+        for css in ('border: -1px solid red', 'border: 00px solid red',
+                    'border: 0 solid red', 'border: 0.0em solid red'):
+            assert ExportHandlerBase._css_callout_box(css) is None, (
+                f"{css!r} drew a callout the browser does not")
+        assert ExportHandlerBase._css_callout_box('border: 1px solid red') == (
+            'FF0000', 'FFFFFF')
+        assert ExportHandlerBase._css_callout_box('border: thin solid red') == (
+            'FF0000', 'FFFFFF')
+
+    def test_an_invisible_border_in_any_notation_draws_no_box(self):
+        """DEF-MARK-92: `transparent` was the only spelling of an invisible
+        border written off; `rgba(0,0,0,0)`, `#0000` and `#00000000` resolve
+        to no colour and counted as a drawn side with the fallback grey bar.
+        An alpha in hex is composited as the `rgba()` alpha is."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase as B
+        for css in ('border: 1px solid rgba(0,0,0,0)', 'border: 1px solid #0000',
+                    'border: 1px solid #00000000',
+                    'border: 1px solid red; border-color: rgba(0,0,0,0)'):
+            assert B._css_callout_box(css) is None, f"{css!r} drew a box"
+        assert B._css_callout_box('border: 2px solid #ff000080') == ('FF7F7F', 'FFFFFF'), (
+            "a half-transparent red bar must composite onto the page, not turn grey")
+        assert B._css_callout_box('border: 1px solid currentcolor') == ('BBBBBB', 'FFFFFF'), (
+            "a bare word nothing resolves keeps the grey bar")
+
+    def test_a_later_background_that_names_no_colour_clears_the_fill(self):
+        """DEF-MARK-93: the fill latched on the first colour any background
+        declaration named; the cascade's last value wins, and one naming no
+        colour clears it."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase as B
+        for css in ('background: red; background: none',
+                    'background: red; background-color: transparent',
+                    'background-color: red; background: url(x.png)'):
+            assert B._css_callout_box(css) is None, f"{css!r} kept the earlier fill"
+        assert B._css_callout_box(
+            'border: 1px solid #333333; background: red; background: none') == ('333333', 'FFFFFF')
+        assert B._css_callout_box('background: none; background: red') == ('FF0000', 'FF0000')
+
+    def test_a_semicolon_inside_a_url_does_not_split_the_declaration(self):
+        """DEF-MARK-94: torn at the `;` inside `url('tan;x.png')`, the
+        declaration ends in `tan`, a named colour, and a tan box is drawn for
+        a background image the export cannot show."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase as B
+        for css in ("background: url('tan;x.png')", 'background: url("tan;x.png")',
+                    "background: url(tan;x.png)"):
+            assert B._css_callout_box(css) is None, f"{css!r} drew a tan box"
+        assert B._css_text_align("background: url('a;b'); text-align: center") == 'center'
+
+    def test_an_unreadable_colour_keeps_its_box_and_an_invisible_one_does_not(self):
+        """DEF-MARK-97: the write-off was keyed on notation, so `hsl()` - a
+        colour the parser did not read - was treated as invisible and a
+        document boxed with it exported boxed in HTML and unboxed in Word.
+        `hsl()` is now read, and only a colour that resolves to alpha zero,
+        in any spelling, writes the side off."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase as B
+        assert B._css_callout_box('border: 2px solid hsl(120, 100%, 25%)') == ('008000', 'FFFFFF')
+        assert B._css_callout_box('border: 1px solid foo(1)') == ('BBBBBB', 'FFFFFF'), (
+            "a colour the parser cannot read must keep the grey bar, as a bare unknown word does")
+        for css in ('border: 1px solid hsla(0, 0%, 0%, 0)', 'border: 1px solid hsl(0 100% 50% / 0)',
+                    'border: 1px solid transparent', 'border: 1px solid rgba(0,0,0,0)',
+                    'border: 1px solid rgb(0 0 0 / 0%)'):
+            assert B._css_callout_box(css) is None, f"{css!r} drew a box"
+        # The shorthand parser keeps a function call whole: split on spaces,
+        # `100%` inside `hsl(0 100% 50%)` was read as the width
+        assert B._css_callout_box('border: 2px solid hsl(120 100% 25%)') == ('008000', 'FFFFFF')
+        assert B._normalize_css_color('foo(1)') is None
+        assert B._normalize_css_color('transparent') == ''
+
+    def test_the_run_shading_reads_the_cascade_as_the_box_does(self):
+        """DEF-MARK-98: the pill reader latched the first background colour
+        while the box reader (DEF-MARK-93) reads last-wins; one declaration
+        block read two ways, and a red band where the author's last word was
+        `none`."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase as B
+        h = B.__new__(B)
+        cleared = h.restructure_html_for_docx('<p><span style="background: red; background: none">x</span></p>')
+        assert 'PILL:' not in cleared, "a later `background: none` did not clear the run shading"
+        kept = h.restructure_html_for_docx('<p><span style="background: none; background: red">x</span></p>')
+        assert 'PILL:FF0000' in kept

@@ -1,5 +1,6 @@
 import { expect, test } from '@jupyterlab/galata';
 import AdmZip from 'adm-zip';
+import { readFileSync } from 'fs';
 
 /**
  * Drives a real Word export through the real UI: a markdown file in the
@@ -10,6 +11,51 @@ import AdmZip from 'adm-zip';
  */
 
 const DOC_NAME = 'export-fidelity.md';
+
+/** The second fixture, and the two shapes that reach every format: a table of
+ *  contents written two spaces in - what every generator emits - and a
+ *  callout the author drew as a bordered `<div>`. */
+const STRUCTURE_NAME = 'export-structure.md';
+
+const STRUCTURE = `# Field guide
+
+## Contents
+
+  - [Setup](#setup)
+  - [Run it](#run-it)
+
+<div style="border: 2px solid #0284c7; background: #e0f2fe">
+<b>Heads up</b> - read this first.
+</div>
+
+## Setup
+
+Nothing to do.
+
+## Run it
+
+Run it.
+`;
+
+/** Opens \`path\` in Lab, fires the named export, returns the saved download. */
+async function exportFromTheMenu(
+  page: any,
+  path: string,
+  name: string,
+  entry: string
+): Promise<any> {
+  await page.evaluate(
+    async (target: string) =>
+      (window as any).jupyterapp.commands.execute('docmanager:open', {
+        path: target
+      }),
+    path
+  );
+  await expect(page.activity.getTabLocator(name)).toBeVisible();
+  const download = page.waitForEvent('download', { timeout: 120_000 });
+  await page.menu.clickMenuItem(`File>Export Markdown As>${entry}`);
+  return download;
+}
 
 /** Mirrors the shapes a real document uses - the separator, its colour, and
  *  the inline HTML a markdown or notebook author writes by hand. */
@@ -108,5 +154,87 @@ test.describe('Word export fidelity', () => {
     expect(centred.length, 'the <div> text is not its own paragraph').toBe(1);
     expect(centred[0].xml).toContain('w:val="center"');
     expect(centred[0].text).not.toContain('TRAILING');
+  });
+});
+
+test.describe('Structure across all three formats', () => {
+  test.beforeEach(async ({ page, tmpPath }) => {
+    await page.contents.uploadContent(
+      STRUCTURE,
+      'text',
+      `${tmpPath}/${STRUCTURE_NAME}`
+    );
+  });
+
+  test('Word gets a real list and a real box', async ({ page, tmpPath }) => {
+    const saved = await exportFromTheMenu(
+      page,
+      `${tmpPath}/${STRUCTURE_NAME}`,
+      STRUCTURE_NAME,
+      'Microsoft Word (.docx)'
+    );
+    expect(saved.suggestedFilename()).toBe('export-structure.docx');
+    const xml = new AdmZip(await saved.path()).readAsText('word/document.xml');
+
+    // The table of contents is two spaces in, which is the indented-code
+    // threshold the converter runs at - it used to arrive as its own source
+    // Matched on the list style, not on the text alone: the two headings the
+    // entries point at carry the same words
+    const entries = paragraphs(xml).filter(
+      p => /^(Setup|Run it)$/.test(p.text) && p.xml.includes('ListBullet')
+    );
+    expect(entries.length, 'the two TOC entries are not two list items').toBe(
+      2
+    );
+
+    // The `<div>` carries a border and a background, so it is a callout the
+    // author drew by hand and exports as the box an alert already gets
+    const tables = [...xml.matchAll(/<w:tbl>([\s\S]*?)<\/w:tbl>/g)].map(
+      m => m[1]
+    );
+    const box = tables.filter(t => t.includes('Heads up'));
+    expect(box.length, 'the bordered div is not a single-cell table').toBe(1);
+    // Both of the div's own declarations survive: its border colour draws the
+    // bar, its background fills the cell
+    expect(box[0]).toContain('w:color="0284C7"');
+    expect(box[0]).toContain('w:fill="E0F2FE"');
+  });
+
+  test('HTML gets links, not link source', async ({ page, tmpPath }) => {
+    const saved = await exportFromTheMenu(
+      page,
+      `${tmpPath}/${STRUCTURE_NAME}`,
+      STRUCTURE_NAME,
+      'HTML'
+    );
+    expect(saved.suggestedFilename()).toBe('export-structure.html');
+    const html = readFileSync(await saved.path(), 'utf-8');
+
+    // The link, not the absence of its source: codehilite tokenises an
+    // indented code block into spans, so `](#` is split across element
+    // boundaries and a substring test for it cannot fail on the regression
+    // it names - in either format
+    expect(html).toContain('<a href="#setup">Setup</a>');
+    expect(html).toContain('<a href="#run-it">Run it</a>');
+    expect(html).toContain('#e0f2fe');
+  });
+
+  test('PDF is a PDF', async ({ page, tmpPath }) => {
+    // The PDF rebuilds the intermediate DOCX with reportlab, and its content
+    // is asserted page-geometry-deep by the Python suite. What only this tier
+    // can fail on is the menu entry, the command and the download itself.
+    const saved = await exportFromTheMenu(
+      page,
+      `${tmpPath}/${STRUCTURE_NAME}`,
+      STRUCTURE_NAME,
+      'PDF'
+    );
+    expect(saved.suggestedFilename()).toBe('export-structure.pdf');
+    const bytes = readFileSync(await saved.path());
+    expect(bytes.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+    expect(
+      bytes.length,
+      'the PDF is too small to hold the document'
+    ).toBeGreaterThan(2000);
   });
 });

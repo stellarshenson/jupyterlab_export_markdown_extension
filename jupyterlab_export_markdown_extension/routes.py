@@ -969,7 +969,7 @@ class ExportHandlerBase(APIHandler):
                 # Lowercasing made a ```MERMAID sample a picture of itself, and
                 # refusing ~~~ dropped a diagram the browser had counted.
                 # Residue: a ~~~ block left un-rendered is not covered by the
-                # ``` fence protection in the math and alert passes (DEF-19).
+                # ``` fence protection in the math and alert passes (DEF-DIAG-19).
                 opened_mermaid = info == 'mermaid'
                 quoted_block = q > 0
                 # Start at the backticks, not at the start of the line: the
@@ -2140,6 +2140,201 @@ class ExportHandlerBase(APIHandler):
             out.append(line)
         return '\n'.join(out)
 
+    # What python-markdown's `OListProcessor.RE` and `UListProcessor.RE`
+    # accept once their leading-space bound is lifted - the column is measured
+    # here. `1)` is no marker to the converter, nor is a marker with nothing
+    # after it, and a tab after the marker is the spaces `expandtabs` makes.
+    _CONVERTER_ITEM_RE = re.compile(r'^ *(\d+\.|[*+-])[ \t]+')
+
+    def normalize_list_indentation(self, content: str) -> str:
+        """Shift a top-level list written two or three spaces in back to column 0.
+
+        `markdown_to_html` builds the converter with ``tab_length=2`` so a list
+        nested by two spaces nests, and ``tab_length`` is also the
+        indented-code threshold: a TOP-LEVEL list whose marker sits two spaces
+        in is classified as a code block and exported as literal markdown
+        source (DEF-MARK-42). Raising it to 4 only trades the defect for its mirror
+        image - the two-space nested list flattens into siblings - so neither
+        value alone is right, and the indentation is settled here instead,
+        before the converter ever sees it. Teaching python-markdown the two
+        thresholds separately was measured and abandoned: its list processors
+        build their own regexes from ``tab_length`` and `get_items` indexes on
+        them, so widening the marker regex raises IndexError from inside the
+        parser (recorded under DEF-MARK-42).
+
+        The promise is measured, not predicted. A candidate is a chunk - the
+        run of lines between blank lines - whose first line is a marker two or
+        three columns in. The document is rendered with the chunk shifted and
+        without, and the shift is kept only when exactly ONE top-level block
+        differs, and that block turned from an indented code block into a
+        list. Everything the converter does with the shifted lines - a tab it
+        expands, a line it will not call blank, a `#Note` it reads as a
+        heading, a `<div>` or a rule that splits the list, a successor it
+        would swallow, a list already open above - shows up as a second
+        changed block, or as the wrong kind of block, and refuses the rescue.
+        Eleven review rounds each found one more such construct while this
+        pass tried to enumerate them; asking the converter closes the class.
+
+        Inside the one block that changes, two more things must hold. The
+        code block must have been made of exactly this chunk's lines: a loose
+        list, or an item with its own indented sample below it, renders as one
+        code block spanning several chunks, and shifting one chunk of it nests
+        the rest under the moved item. And the list must hold nothing that
+        needs a block of its own - a `===` under the last item becomes a
+        heading inside it, a sample under an item a code block inside it.
+
+        Two things the rendering cannot show are checked by hand: `LAZY_OL`
+        writes no `start`, so an ordered chunk that does not open at `1.`
+        would silently renumber and is refused; and a chunk holding a fence
+        or a raw HTML element is never a candidate, so a sample keeps its
+        bytes and a tag the control escapes is never emitted live.
+        """
+        import markdown
+        from bs4 import BeautifulSoup
+
+        # A fence, or a raw HTML element: the control escapes a tag inside
+        # an indented block and the rescue would emit it live - a `<link>`
+        # that hides the page, a `<meta>` that leaves it. A comment (`<!--`)
+        # renders as nothing either way and is not an element. A link
+        # reference definition is consumed by the converter as a definition
+        # and shown nowhere, so a URL the control displays would vanish.
+        verbatim_re = re.compile(
+            r'^\s*(`{3,}|~{3,})|<[A-Za-z/]|^\s*\[[^\]]*\]:')
+        # `HashHeaderProcessor.RE`: hashes at column 0, nothing else required.
+        # A heading is its own block, so it ends the chunk above it
+        atx_re = re.compile(r'^#{1,6}')
+
+        def blank(ln):
+            # `NormalizeWhitespace` expands tabs and then empties only
+            # SPACE-only lines; a line holding an NBSP is content to it
+            return not ln.strip(' \t\r')
+
+        md = markdown.Markdown(
+            extensions=['tables', 'fenced_code', 'codehilite', 'toc'],
+            tab_length=2)
+
+        def blocks(lines):
+            md.reset()
+            soup = BeautifulSoup(md.convert('\n'.join(lines)), 'html.parser')
+            return [str(node) for node in soup.contents if node.name]
+
+        def is_code(block):
+            return block.startswith('<pre') \
+                or block.startswith('<div class="codehilite">')
+
+        def is_list(block):
+            return block.startswith('<ul') or block.startswith('<ol')
+
+        def own_block(block):
+            # The converter's block-level set, not a copy of it: a rescued
+            # list holds items and nested lists and nothing else - a `<p>`
+            # here means a raw block sat inside an item
+            return any(md.is_block_level(tag.name) and tag.name not in ('ul', 'ol', 'li')
+                       for tag in BeautifulSoup(block, 'html.parser').find_all(True))
+
+        def code_text(block):
+            return BeautifulSoup(block, 'html.parser').get_text().rstrip('\n')
+
+        def detab(ln):
+            # `CodeBlockProcessor` strips one `tab_length` of indentation; a
+            # chunk line with less than that was never part of the code block
+            # - a comment closing a generated index stands at column 0 and
+            # renders as nothing on either side of the shift
+            return ln[2:]
+
+        lines = content.split('\n')
+        chunks, chunk = [], []
+        for i, line in enumerate(lines):
+            if blank(line) or atx_re.match(line):
+                if chunk:
+                    chunks.append(chunk)
+                chunk = []
+            else:
+                chunk.append(i)
+        if chunk:
+            chunks.append(chunk)
+
+        before = None
+        for chunk in chunks:
+            first = lines[chunk[0]]
+            indent = len(first) - len(first.lstrip(' '))
+            m = self._CONVERTER_ITEM_RE.match(first)
+            if not m or not 2 <= indent <= 3:
+                continue
+            # The outermost marker sets the column, not merely the first: a
+            # list written raggedly still has one top level
+            marker_cols = [len(lines[i]) - len(lines[i].lstrip(' '))
+                           for i in chunk if self._CONVERTER_ITEM_RE.match(lines[i])]
+            shift = min(marker_cols)
+            if shift < 2:
+                continue
+            # Numbering the rendering cannot show. `LAZY_OL` writes no
+            # `start`, so an ordered run that does not open at `1.` renders
+            # from 1 and the author's numbers are lost - at any depth: a
+            # nested run opening at `3.` is a new list too. And the converter
+            # folds a marker of the other kind into the run already open at
+            # its depth, so `- Intro` then `1. First` is three bullets. Depth
+            # is the converter's bucket, not the column: its list processors
+            # take up to `tab_length - 1` extra spaces as the same level, so a
+            # marker one column deeper than its sibling is that sibling's run.
+            open_runs, renumbered = {}, False
+            for i in chunk:
+                item = self._CONVERTER_ITEM_RE.match(lines[i])
+                if not item:
+                    continue
+                if self._CONVERTER_ITEM_RE.match(lines[i][item.end():]):
+                    # `- 1. Intro` is two items to the converter, one marker
+                    # line here: items could no longer be counted against
+                    # marker lines, and a level below it is lost unseen
+                    renumbered = True
+                    break
+                depth = (len(lines[i]) - len(lines[i].lstrip(' ')) - shift) // 2
+                kind = 'ordered' if item.group(1)[0].isdigit() else 'bullet'
+                open_runs = {d: k for d, k in open_runs.items() if d <= depth}
+                if depth in open_runs and open_runs[depth] != kind:
+                    renumbered = True
+                    break
+                if kind == 'ordered' and depth not in open_runs \
+                        and item.group(1)[:-1] != '1':
+                    renumbered = True
+                    break
+                open_runs[depth] = kind
+            if renumbered:
+                continue
+            if any(verbatim_re.search(lines[i]) for i in chunk):
+                continue
+            candidate = list(lines)
+            for i in chunk:
+                if len(lines[i]) - len(lines[i].lstrip(' ')) >= shift:
+                    candidate[i] = lines[i][shift:]
+            try:
+                if before is None:
+                    before = blocks(lines)
+                after = blocks(candidate)
+            except RecursionError:
+                # A list nested past the parser's depth: the control renders
+                # it (as a code block) where the shifted text cannot be
+                # rendered at all, so the shift is refused, not raised
+                continue
+            if len(after) != len(before):
+                continue
+            changed = [(b, a) for b, a in zip(before, after) if b != a]
+            if len(changed) != 1:
+                continue
+            was, now = changed[0]
+            # A marker the converter cannot nest - four columns under its
+            # parent, where the nesting unit is two - is not dropped but kept
+            # as the parent's text, `- a1` literal inside the item: one list,
+            # nothing block-level in it, and the author's level gone
+            if is_code(was) and is_list(now) \
+                    and now.count('<li') == len(marker_cols) \
+                    and not own_block(now) \
+                    and code_text(was) == '\n'.join(
+                        detab(lines[i]) for i in chunk
+                        if lines[i].startswith('  ')):
+                lines, before = candidate, after
+        return '\n'.join(lines)
+
     def preprocess_github_alerts(self, content: str, show_labels: bool = False) -> str:
         """Convert GitHub-style alerts to paragraphs with markers.
 
@@ -2643,6 +2838,11 @@ class ExportHandlerBase(APIHandler):
         Moves the original paragraph XML (preserving hyperlinks, bold, etc.)
         into the table cell rather than rebuilding it.
 
+        A callout the author drew by hand - a ``<div>`` carrying a border or a
+        background, marked by restructure_html_for_docx() - takes the same box
+        in its own colours, so the two kinds of callout in a document are one
+        construct downstream and the PDF pass reads them both the same way.
+
         Returns the ``w:tbl`` elements created, which carry their own styling
         and must be left out of the content-table pass.
         """
@@ -2655,19 +2855,39 @@ class ExportHandlerBase(APIHandler):
         replacements = []
         for paragraph in document.paragraphs:
             text = paragraph.text
+            box = self._BOX_MARKER_RE.search(text)
+            if box is not None:
+                # No alert type: the colours are the author's own, read off the
+                # div's CSS, and there is no label to strip
+                replacements.append(([paragraph], '', {
+                    'border': box.group(1).upper(),
+                    'shading': box.group(2).upper(),
+                }))
+                continue
+            if self._BOX_MORE_MARKER in text and replacements and not replacements[-1][1]:
+                # The rest of a box already open: one table around the whole
+                # run of paragraphs, not one table each with a spacer between
+                replacements[-1][0].append(paragraph)
+                continue
             for alert_type, colors in self.ALERT_COLORS.items():
                 marker = f'\u200b{alert_type}\u200b'
                 if marker not in text:
                     continue
-                replacements.append((paragraph, alert_type, colors))
+                replacements.append(([paragraph], alert_type, colors))
                 break
 
-        for paragraph, alert_type, colors in replacements:
-            parent = paragraph._p.getparent()
+        for paragraphs, alert_type, colors in replacements:
+            first = paragraphs[0]
+            parent = first._p.getparent()
 
             # Clean zero-width markers from runs; strip type label only when hidden
-            for run in paragraph.runs:
+            for run in (r for paragraph in paragraphs for r in paragraph.runs):
                 text = run.text
+                if not alert_type:
+                    if '⁣' in text:
+                        run.text = self._BOX_MARKER_RE.sub('', text).replace(
+                            self._BOX_MORE_MARKER, '')
+                    continue
                 if '\u200b' in text:
                     cleaned = text.replace('\u200b', '')
                     if not show_labels:
@@ -2743,19 +2963,21 @@ class ExportHandlerBase(APIHandler):
             tcPr.append(shd)
             tc.append(tcPr)
 
-            # Move the original paragraph into the cell (preserves all formatting,
-            # hyperlinks, bold, italic, line breaks, etc.)
-            tc.append(copy.deepcopy(paragraph._p))
+            # Move the original paragraphs into the cell (preserves all
+            # formatting, hyperlinks, bold, italic, line breaks, etc.)
+            for paragraph in paragraphs:
+                tc.append(copy.deepcopy(paragraph._p))
             tr.append(tc)
             tbl.append(tr)
 
-            # Insert table then a spacer paragraph after the original paragraph
-            paragraph._p.addnext(tbl)
+            # Insert table then a spacer paragraph where the box began
+            first._p.addnext(tbl)
             spacer = OxmlElement('w:p')
             tbl.addnext(spacer)
 
-            # Remove the original paragraph
-            parent.remove(paragraph._p)
+            # Remove the originals
+            for paragraph in paragraphs:
+                parent.remove(paragraph._p)
             alert_tables.append(tbl)
 
         return alert_tables
@@ -3051,21 +3273,120 @@ class ExportHandlerBase(APIHandler):
 
     _BLOCKQUOTE_MARKER_RE = re.compile(r'⁣BQ:(\d+)⁣')
     _PILL_MARKER_RE = re.compile(r'⁣PILL:([0-9A-Fa-f]{6})⁣')
+    #: Bar and fill of a callout box the author drew by hand - a ``<div>``
+    #: given a border or a background - carried from restructure_html_for_docx
+    #: to style_docx_alert_boxes, which boxes it the way it boxes an alert.
+    _BOX_MARKER_RE = re.compile(r'⁣BOX:([0-9A-Fa-f]{6}):([0-9A-Fa-f]{6})⁣')
+
+    #: A paragraph belonging to the box opened directly above it. A box is one
+    #: table and a ``<div>`` holding blocks is one paragraph per block, so
+    #: every block after the first says which box it is in: two asides written
+    #: one after the other in the same colours are otherwise indistinguishable
+    #: from one aside holding two blocks.
+    _BOX_MORE_MARKER = '⁣BOX+⁣'
 
     # CSS named colours htmldocx fails to parse (it only understands hex),
-    # so a `color: green` span renders black. Mapped to hex here. Covers the
-    # standard 16 plus the few extended names that show up in practice.
+    # so a `color: green` span renders black. Mapped to hex here. The whole
+    # CSS list rather than a shortlist of likely names: a name that is missing
+    # renders black with nothing to say it was ever understood.
     _CSS_NAMED_COLORS = {
-        'black': '000000', 'silver': 'C0C0C0', 'gray': '808080',
-        'grey': '808080', 'white': 'FFFFFF', 'maroon': '800000',
-        'red': 'FF0000', 'purple': '800080', 'fuchsia': 'FF00FF',
-        'magenta': 'FF00FF', 'green': '008000', 'lime': '00FF00',
-        'olive': '808000', 'yellow': 'FFFF00', 'navy': '000080',
-        'blue': '0000FF', 'teal': '008080', 'aqua': '00FFFF',
-        'cyan': '00FFFF', 'orange': 'FFA500', 'pink': 'FFC0CB',
-        'brown': 'A52A2A', 'gold': 'FFD700', 'darkgreen': '006400',
-        'darkred': '8B0000', 'darkblue': '00008B',
+    'aliceblue': 'F0F8FF', 'antiquewhite': 'FAEBD7', 'aqua': '00FFFF',
+    'aquamarine': '7FFFD4', 'azure': 'F0FFFF', 'beige': 'F5F5DC',
+    'bisque': 'FFE4C4', 'black': '000000', 'blanchedalmond': 'FFEBCD',
+    'blue': '0000FF', 'blueviolet': '8A2BE2', 'brown': 'A52A2A',
+    'burlywood': 'DEB887', 'cadetblue': '5F9EA0', 'chartreuse': '7FFF00',
+    'chocolate': 'D2691E', 'coral': 'FF7F50', 'cornflowerblue': '6495ED',
+    'cornsilk': 'FFF8DC', 'crimson': 'DC143C', 'cyan': '00FFFF',
+    'darkblue': '00008B', 'darkcyan': '008B8B', 'darkgoldenrod': 'B8860B',
+    'darkgray': 'A9A9A9', 'darkgreen': '006400', 'darkgrey': 'A9A9A9',
+    'darkkhaki': 'BDB76B', 'darkmagenta': '8B008B',
+    'darkolivegreen': '556B2F', 'darkorange': 'FF8C00',
+    'darkorchid': '9932CC', 'darkred': '8B0000', 'darksalmon': 'E9967A',
+    'darkseagreen': '8FBC8F', 'darkslateblue': '483D8B',
+    'darkslategray': '2F4F4F', 'darkslategrey': '2F4F4F',
+    'darkturquoise': '00CED1', 'darkviolet': '9400D3', 'deeppink': 'FF1493',
+    'deepskyblue': '00BFFF', 'dimgray': '696969', 'dimgrey': '696969',
+    'dodgerblue': '1E90FF', 'firebrick': 'B22222', 'floralwhite': 'FFFAF0',
+    'forestgreen': '228B22', 'fuchsia': 'FF00FF', 'gainsboro': 'DCDCDC',
+    'ghostwhite': 'F8F8FF', 'gold': 'FFD700', 'goldenrod': 'DAA520',
+    'gray': '808080', 'green': '008000', 'greenyellow': 'ADFF2F',
+    'grey': '808080', 'honeydew': 'F0FFF0', 'hotpink': 'FF69B4',
+    'indianred': 'CD5C5C', 'indigo': '4B0082', 'ivory': 'FFFFF0',
+    'khaki': 'F0E68C', 'lavender': 'E6E6FA', 'lavenderblush': 'FFF0F5',
+    'lawngreen': '7CFC00', 'lemonchiffon': 'FFFACD', 'lightblue': 'ADD8E6',
+    'lightcoral': 'F08080', 'lightcyan': 'E0FFFF',
+    'lightgoldenrodyellow': 'FAFAD2', 'lightgray': 'D3D3D3',
+    'lightgreen': '90EE90', 'lightgrey': 'D3D3D3', 'lightpink': 'FFB6C1',
+    'lightsalmon': 'FFA07A', 'lightseagreen': '20B2AA',
+    'lightskyblue': '87CEFA', 'lightslategray': '778899',
+    'lightslategrey': '778899', 'lightsteelblue': 'B0C4DE',
+    'lightyellow': 'FFFFE0', 'lime': '00FF00', 'limegreen': '32CD32',
+    'linen': 'FAF0E6', 'magenta': 'FF00FF', 'maroon': '800000',
+    'mediumaquamarine': '66CDAA', 'mediumblue': '0000CD',
+    'mediumorchid': 'BA55D3', 'mediumpurple': '9370DB',
+    'mediumseagreen': '3CB371', 'mediumslateblue': '7B68EE',
+    'mediumspringgreen': '00FA9A', 'mediumturquoise': '48D1CC',
+    'mediumvioletred': 'C71585', 'midnightblue': '191970',
+    'mintcream': 'F5FFFA', 'mistyrose': 'FFE4E1', 'moccasin': 'FFE4B5',
+    'navajowhite': 'FFDEAD', 'navy': '000080', 'oldlace': 'FDF5E6',
+    'olive': '808000', 'olivedrab': '6B8E23', 'orange': 'FFA500',
+    'orangered': 'FF4500', 'orchid': 'DA70D6', 'palegoldenrod': 'EEE8AA',
+    'palegreen': '98FB98', 'paleturquoise': 'AFEEEE',
+    'palevioletred': 'DB7093', 'papayawhip': 'FFEFD5', 'peachpuff': 'FFDAB9',
+    'peru': 'CD853F', 'pink': 'FFC0CB', 'plum': 'DDA0DD',
+    'powderblue': 'B0E0E6', 'purple': '800080', 'rebeccapurple': '663399',
+    'red': 'FF0000', 'rosybrown': 'BC8F8F', 'royalblue': '4169E1',
+    'saddlebrown': '8B4513', 'salmon': 'FA8072', 'sandybrown': 'F4A460',
+    'seagreen': '2E8B57', 'seashell': 'FFF5EE', 'sienna': 'A0522D',
+    'silver': 'C0C0C0', 'skyblue': '87CEEB', 'slateblue': '6A5ACD',
+    'slategray': '708090', 'slategrey': '708090', 'snow': 'FFFAFA',
+    'springgreen': '00FF7F', 'steelblue': '4682B4', 'tan': 'D2B48C',
+    'teal': '008080', 'thistle': 'D8BFD8', 'tomato': 'FF6347',
+    'turquoise': '40E0D0', 'violet': 'EE82EE', 'wheat': 'F5DEB3',
+    'white': 'FFFFFF', 'whitesmoke': 'F5F5F5', 'yellow': 'FFFF00',
+    'yellowgreen': '9ACD32',
     }
+
+    #: ``rgb()`` / ``rgba()``, in the comma notation every devtools colour
+    #: copy produces and the space notation CSS Color 4 added.
+    _CSS_COLOR_FN_RE = re.compile(r'^(rgba?|hsla?)\(([^)]*)\)$')
+
+    #: A colour token anywhere in a shorthand value. A function call is matched
+    #: whole and first: its own commas and spaces would otherwise tear it into
+    #: pieces, and the pieces of `url(assets/red-banner.png)` and
+    #: `var(--blue-500)` include a bare colour NAME that the browser paints
+    #: nowhere - one names a file and the other a custom property. `rgb()` and
+    #: `rgba()` are function calls too, and resolve as themselves.
+    _CSS_COLOR_TOKEN_RE = re.compile(
+        r'[a-z-]*\([^()]*\)|#[0-9A-Fa-f]+|[a-z]+', re.I)
+
+    #: The border properties that put a line on the page. `border-collapse`,
+    #: `border-spacing`, `border-image` and `border-radius` open with the same
+    #: word and draw none of them, so the set is written out rather than
+    #: matched on the prefix.
+    _CSS_BORDER_PROPS = frozenset(
+        f'border{side}{part}'
+        for side in ('', '-top', '-right', '-bottom', '-left')
+        for part in ('', '-style', '-width', '-color'))
+
+    #: A length that measures zero, in any unit or none. A border given one
+    #: draws exactly what `none` draws.
+    #: The four sides a border declaration can name, and the side a shorthand
+    #: that names none of them sets - all of them.
+    _CSS_BORDER_SIDES = ('top', 'right', 'bottom', 'left')
+
+    #: The `border-style` keywords. A shorthand's three parts are order-free,
+    #: so the style is whichever of its tokens names one of these; `none` and
+    #: `hidden` are the two that draw no line, and a side with no style at all
+    #: draws none either - `none` is what CSS starts from.
+    _CSS_BORDER_STYLES = frozenset((
+        'none', 'hidden', 'dotted', 'dashed', 'solid', 'double',
+        'groove', 'ridge', 'inset', 'outset'))
+
+    #: The three widths CSS names instead of measuring, and the shape of one it
+    #: measures - a number in any unit, or in none.
+    _CSS_BORDER_WIDTHS = frozenset(('thin', 'medium', 'thick'))
+    _CSS_LENGTH_RE = re.compile(r'^-?\d*\.?\d+[a-z%]*$')
 
     #: Fill a ``<mark>`` gets when the author declared none. The HTML export
     #: writes no rule for ``mark``, so it takes the browser default - which is
@@ -3106,6 +3427,14 @@ class ExportHandlerBase(APIHandler):
                          'strong', 'sub', 'sup', 'small', 'abbr', 'q',
                          'cite', 'time', 'var')
 
+    #: Blocks that become exactly one body paragraph, so a marker put in one
+    #: lands in the paragraph the box is built around. A ``<div>`` holding
+    #: anything else takes no box: a table and a code block bring a structure
+    #: of their own that stays outside the box the text is moved into, the way
+    #: a picture does, and a list arrives as one paragraph per item, which the
+    #: PDF rebuild redraws as callout body text with the bullet gone.
+    _HTML_BOXABLE_BLOCKS = ('p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6')
+
     #: Elements that already own a run of text, so a <div> inside one is in
     #: inline position however it was written. Renaming it to <p> there nests
     #: a block in a block: htmldocx ends the list item, the heading or the
@@ -3119,15 +3448,56 @@ class ExportHandlerBase(APIHandler):
     _HTML_TABLE_TAGS = ('table', 'thead', 'tbody', 'tfoot', 'tr')
 
     @staticmethod
-    def _css_text_align(style: str) -> str:
+    def _css_declarations(style: str) -> list:
+        """The declarations of a style attribute.
+
+        Split on the ``;`` between declarations and not on one inside a
+        quoted string or a ``url(...)``: torn at that one, ``url('tan;x.png')``
+        leaves ``url('tan`` whose last word is a named colour.
+        """
+        out, cur, depth, quote = [], [], 0, ''
+        for ch in style:
+            if quote:
+                if ch == quote:
+                    quote = ''
+            elif ch in '"\'':
+                quote = ch
+            elif ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth = max(0, depth - 1)
+            elif ch == ';' and not depth:
+                out.append(''.join(cur))
+                cur = []
+                continue
+            cur.append(ch)
+        out.append(''.join(cur))
+        return out
+
+    @classmethod
+    def _css_text_align(cls, style: str) -> str:
         """Return the ``text-align`` value declared in ``style``, or ''."""
-        for decl in style.split(';'):
+        for decl in cls._css_declarations(style):
             prop, _, value = decl.partition(':')
             if prop.strip().lower() == 'text-align':
                 value = value.strip().lower()
                 if value in ('left', 'right', 'center', 'justify'):
                     return value
         return ''
+
+    @classmethod
+    def _css_declaration(cls, style: str, prop: str) -> str:
+        """The value ``style`` gives ``prop``, or '' - last declaration wins.
+
+        Matched on the whole property name, so ``color`` is not read out of
+        the ``background-color`` beside it.
+        """
+        found = ''
+        for decl in cls._css_declarations(style):
+            name, _, value = decl.partition(':')
+            if name.strip().lower() == prop:
+                found = value.replace('!important', ' ').strip()
+        return found
 
     @staticmethod
     def _add_css(el, declaration: str) -> None:
@@ -3137,22 +3507,328 @@ class ExportHandlerBase(APIHandler):
                               declaration) if part)
 
     @classmethod
-    def _normalize_css_color(cls, value: str) -> str:
-        """Return a 6-hex (no #) for a CSS colour value, or '' if not resolvable."""
+    def _normalize_css_color(cls, value: str):
+        """Six-hex (no #) for a CSS colour value.
+
+        '' for a colour that is there and invisible - `transparent`, or any
+        notation whose alpha is zero - and None for a value that is not a
+        colour this parser reads. The two are told apart because an invisible
+        border is written off while an unreadable one keeps its box.
+        """
         v = value.strip().lower()
+        if v == 'transparent':
+            return ''
         if v.startswith('#'):
             h = v[1:]
-            if len(h) == 3:
+            if len(h) in (3, 4):
                 h = ''.join(c * 2 for c in h)
-            if len(h) == 6 and all(c in '0123456789abcdef' for c in h):
-                return h.upper()
-            return ''
-        return cls._CSS_NAMED_COLORS.get(v, '')
+            if len(h) not in (6, 8) or any(c not in '0123456789abcdef' for c in h):
+                return None
+            # `#RRGGBBAA` carries its alpha as a fourth byte, one spelling of
+            # the value `rgba()` spells in numbers - composited the same way
+            nums = [int(h[i:i + 2], 16) for i in range(0, len(h), 2)]
+            if len(nums) == 4:
+                nums[3] /= 255
+        else:
+            match = cls._CSS_COLOR_FN_RE.match(v)
+            if not match:
+                return cls._CSS_NAMED_COLORS.get(v)
+            fn, args = match.groups()
+            parts = args.replace(',', ' ').replace('/', ' ').split()
+            if len(parts) < 3:
+                return None
+            try:
+                if fn.startswith('hsl'):
+                    # Hue in degrees, saturation and lightness as percentages;
+                    # `colorsys` wants them as fractions, lightness first
+                    import colorsys
+                    hue = float(parts[0].removesuffix('deg')) / 360 % 1
+                    sat = float(parts[1].rstrip('%')) / 100
+                    lig = float(parts[2].rstrip('%')) / 100
+                    nums = [c * 255 for c in colorsys.hls_to_rgb(hue, lig, sat)]
+                    nums += [float(parts[3][:-1]) / 100 if parts[3].endswith('%')
+                             else float(parts[3])] if len(parts) > 3 else []
+                else:
+                    # A channel is a number or a percentage of full strength,
+                    # and the alpha that follows them the same of 1
+                    nums = [float(p[:-1]) / 100 * (255 if i < 3 else 1)
+                            if p.endswith('%') else float(p)
+                            for i, p in enumerate(parts[:4])]
+            except ValueError:
+                return None
+        if True:
+            try:
+                alpha = min(1.0, max(0.0, nums[3])) if len(nums) > 3 else 1.0
+                if not alpha:
+                    return ''  # what the keyword `transparent` spells in words
+                channels = ''
+                for number in nums[:3]:
+                    # Word has no translucent run or cell and reportlab paints
+                    # a callout opaque, so the colour is composited onto the
+                    # white page rather than arriving at full strength: alpha
+                    # is what makes a colour light, and dropping it turns a 5%
+                    # black wash into a solid black bar over black text.
+                    number = number * alpha + 255 * (1 - alpha)
+                    # Clamped as a browser clamps it, and because a component
+                    # past 255 would format to three hex digits and corrupt the
+                    # colour. NaN and the infinities are values float() accepts
+                    # and round() does not, so the guard has to cover both
+                    channels += f'{min(255, max(0, round(number))):02X}'
+            except (ValueError, OverflowError):
+                return None
+            return channels
+
+    @classmethod
+    def _css_color_invisible(cls, value: str) -> bool:
+        """True when a colour token in ``value`` is there and invisible."""
+        return any(cls._normalize_css_color(token) == ''
+                   for token in cls._CSS_COLOR_TOKEN_RE.findall(value))
+
+    @classmethod
+    def _css_color_in(cls, value: str) -> str:
+        """Six-hex of the first colour a CSS value names, or '' if it names none.
+
+        A shorthand carries its colour among other words (``2px dashed #ccc``,
+        ``#fff url(bg.png) no-repeat``), so every token is tried in turn rather
+        than the colour being assumed to come first.
+        """
+        for token in cls._CSS_COLOR_TOKEN_RE.findall(value):
+            resolved = cls._normalize_css_color(token)
+            if resolved:
+                return resolved
+        return ''
+
+    @classmethod
+    def _css_border_parts(cls, value: str) -> tuple:
+        """``(style, width, colour)`` a ``border`` shorthand declares, '' for absent.
+
+        The three are order-free in CSS, so each token is placed by what it is
+        rather than by where it stands: a style keyword, something measuring a
+        length, and whatever is left over, which is the colour - rejoined,
+        because ``rgb(1, 2, 3)`` is several whitespace tokens of one value.
+        """
+        line_style, width, color = '', '', []
+        # A function call is one token whatever whitespace it holds:
+        # split on spaces, `hsl(0 100% 50% / 0)` hands `100%` to the width
+        for token in re.findall(r'[a-z-]*\([^()]*\)|\S+', value, re.I):
+            if token in cls._CSS_BORDER_STYLES:
+                line_style = token
+            elif token in cls._CSS_BORDER_WIDTHS or cls._CSS_LENGTH_RE.match(token):
+                width = token
+            else:
+                color.append(token)
+        return line_style, width, ' '.join(color)
+
+    @classmethod
+    def _css_callout_box(cls, style: str):
+        """``(bar_hex, fill_hex)`` when a style attribute draws a box, else None.
+
+        A border or a background is how a document draws a callout by hand,
+        markdown having no syntax for one. Both colours are always answered,
+        never one of the two: the box is recognised again downstream BY those
+        colours - the PDF reads them back off the finished DOCX in
+        alert_info() - so a box that declares only a background takes its own
+        fill for the bar, and one that declares only a border takes the
+        blockquote grey and white.
+
+        The border is read the way the cascade reads it, as DEF-DIAG-39 already
+        reads emphasis: each declaration is folded onto the side and the part
+        it names, last value winning, so a longhand can switch off a border the
+        shorthand above it drew. A side draws only once it has a style, which
+        is what keeps a colour on its own from being taken for a border.
+        """
+        fill = ''
+        # Per side, the style, width and colour it was last given; '' where no
+        # declaration named one and the CSS initial value stands
+        sides = {side: ['', '', ''] for side in cls._CSS_BORDER_SIDES}
+        for decl in cls._css_declarations(style):
+            prop, _, value = decl.partition(':')
+            prop = prop.strip().lower()
+            # !important rides along on any value and is no part of it
+            value = value.replace('!important', ' ').strip().lower()
+            if prop in ('background', 'background-color'):
+                # Last value wins, and one naming no colour (`none`,
+                # `transparent`, a url) clears what stood above it; the other
+                # `background-*` longhands never carry the colour
+                fill = cls._css_color_in(value)
+            elif prop in cls._CSS_BORDER_PROPS:
+                part = prop[len('border'):]
+                named = [s for s in cls._CSS_BORDER_SIDES
+                         if part.startswith(f'-{s}')]
+                if named:
+                    part = part[len(named[0]) + 1:]
+                for side in named or cls._CSS_BORDER_SIDES:
+                    if part:
+                        sides[side][
+                            ('-style', '-width', '-color').index(part)] = value
+                    else:
+                        # A shorthand sets all three parts: the ones it leaves
+                        # out go back to their initial values rather than
+                        # keeping what a declaration above gave them
+                        sides[side] = list(cls._css_border_parts(value))
+        bar, bordered = '', False
+        for side in cls._CSS_BORDER_SIDES:
+            line_style, width, color = sides[side]
+            # The three spellings that write a side off, and an author reaches
+            # for each: no style or one that draws nothing, a width that is
+            # not a positive length (`0`, `00px`, and `-1px`, which a browser
+            # rejects with the whole declaration), and an invisible colour
+            length = re.match(r'-?\d*\.?\d+', width)
+            if (line_style in ('', 'none', 'hidden')
+                    or (length and float(length.group()) <= 0)
+                    # `transparent`, `#0000`, `rgba(...,0)`: an invisible
+                    # colour in any spelling. A colour the parser cannot read
+                    # is not invisible, and keeps the grey bar
+                    or cls._css_color_invisible(color)):
+                continue
+            bordered = True
+            bar = bar or cls._css_color_in(color)
+        if not bordered and not fill:
+            return None
+        return (bar or fill or 'BBBBBB', fill or 'FFFFFF')
+
+    @classmethod
+    def _carry_box_color(cls, soup, el, blocks) -> None:
+        """Move the box's own ``color`` onto the text standing inside it.
+
+        htmldocx reads a colour off an inline tag only, so one declared on the
+        div - or on the paragraph the div became - arrives nowhere, while the
+        background beside it paints a whole cell: an author who set both would
+        get one of the pair, where a browser paints both. The colour goes
+        around each paragraph's contents rather than on the paragraph, which is
+        the same placement the emphasis pass uses for a block.
+
+        A heading is left out. The stylesheet gives one a colour of its own and
+        that beats what it inherits, so a browser draws the heading in a
+        red-texted box blue - and the Word heading style and the PDF heading
+        ladder draw it blue too.
+        """
+        color = cls._css_declaration(el.get('style', ''), 'color')
+        if not color:
+            return
+        for block in blocks:
+            # `block is el` is the box drawn around one paragraph: the colour
+            # being carried is that element's own, not a child overriding it
+            if block.name != 'p' or (block is not el and cls._css_declaration(
+                    block.get('style', ''), 'color')):
+                continue
+            span = soup.new_tag('span')
+            cls._add_css(span, f'color:{color}')
+            for node in list(block.contents):
+                span.append(node.extract())
+            block.append(span)
+
+    @classmethod
+    def _boxed_blocks(cls, el) -> list:
+        """``el``'s block children, a run of loose inline content between them
+        wrapped in a ``<p>`` of its own, in document order.
+
+        Only an element can carry the box marker - it travels in the text of a
+        block - so a bare text node between two blocks stayed at body level
+        when the div was unwrapped, and htmldocx welded it onto the paragraph
+        above: two authored blocks arrived as one, in the style of the first.
+        A browser gives that text a block of its own, and consecutive inline
+        nodes share one the way an anonymous block box gathers them. The
+        newlines between tags are a run with no text and are left where they
+        are rather than boxed as a blank line.
+        """
+        from bs4 import Comment, NavigableString, Tag
+
+        def has_text(node):
+            if isinstance(node, Comment):
+                return False
+            if isinstance(node, NavigableString):
+                return bool(node.strip())
+            return bool(node.get_text().strip())
+
+        run = []
+        for child in list(el.children) + [None]:
+            if (child is not None
+                    and getattr(child, 'name', None) not in cls._HTML_BLOCK_TAGS):
+                run.append(child)
+                continue
+            # The newline that closed the block above and the one that opens
+            # the block below belong to neither paragraph
+            while run and not has_text(run[0]):
+                run.pop(0)
+            while run and not has_text(run[-1]):
+                run.pop()
+            if run:
+                para = Tag(name='p')
+                run[0].insert_before(para)
+                for index, node in enumerate(run):
+                    node.extract()
+                    if isinstance(node, NavigableString):
+                        # The line breaks the author wrote around the text
+                        # collapse to a space, which a browser then drops at
+                        # the edge of a block and Word would show
+                        text = str(node)
+                        text = text.lstrip() if not index else text
+                        text = text.rstrip() if index == len(run) - 1 else text
+                        node = NavigableString(text)
+                    para.append(node)
+            run = []
+        return el.find_all(cls._HTML_BLOCK_TAGS, recursive=False)
+
+    @classmethod
+    def _mark_callout_box(cls, el, blocks=None):
+        """Tag a bordered or shaded element as a callout for the DOCX passes.
+
+        The marker travels in the text because text is the only thing htmldocx
+        carries through: a declaration it has no handler for is read for
+        emphasis and dropped, so border, background, padding and margin all
+        arrive nowhere and the box exports as an ordinary paragraph.
+        style_docx_alert_boxes() reads the marker back and moves the finished
+        paragraph into the same box a GitHub alert gets.
+
+        ``blocks`` are the block children the box is drawn around when the
+        element itself will not survive to carry a marker - a ``<div>``
+        wrapping blocks is unwrapped, and the marker has to be inside the
+        blocks by then or it lands in whatever paragraph stood above the div.
+        The first opens the box and the rest join it.
+
+        The background declaration leaves with it. Left in, the pill pass would
+        ALSO shade every run in the box - a highlighter band across text that
+        is already sitting on the fill.
+
+        Answers the blocks the box was drawn around, which is what the caller
+        hands the rest of the div's style to before unwrapping it, or None
+        when no box was drawn.
+        """
+        box = cls._css_callout_box(el.get('style', ''))
+        if box is None:
+            return None
+        if el.find(['img', 'svg', 'picture', 'video', 'object', 'iframe']):
+            # A picture leaves the box on both paths - htmldocx gives it a
+            # paragraph of its own, which stays outside the table the text is
+            # moved into and so lands BELOW the box it was written above, and
+            # the PDF rebuilds a box from its runs alone. An unboxed paragraph
+            # in the right order beats a box the picture fell out of.
+            return None
+        targets = [el] if blocks is None else blocks
+        if any(block.name not in cls._HTML_BOXABLE_BLOCKS for block in targets):
+            return None
+        if blocks is not None:
+            # Read again with the loose text gathered into paragraphs of its
+            # own. After the guard above, which asks what the author WROTE in
+            # the div - a paragraph this pass makes is boxable by construction
+            # and would answer for a table that is not
+            targets = cls._boxed_blocks(el)
+        for block in targets[1:]:
+            block.insert(0, cls._BOX_MORE_MARKER)
+        targets[0].insert(0, f'⁣BOX:{box[0]}:{box[1]}⁣')
+        kept = [d for d in cls._css_declarations(el.get('style', '')) if d.strip()
+                and not d.partition(':')[0].strip().lower().startswith('background')]
+        if kept:
+            el['style'] = ';'.join(kept)
+        else:
+            del el['style']
+        return targets
 
     def restructure_html_for_docx(self, html: str) -> str:
         """Fix htmldocx structural and styling blind spots before conversion.
 
-        Handles five htmldocx limitations:
+        Handles six htmldocx limitations:
 
         1. Loose list items (``<li><p>text</p>...</li>``) - ``handle_li``
            opens a bullet paragraph, then the inner ``<p>`` opens a fresh
@@ -3178,6 +3854,12 @@ class ExportHandlerBase(APIHandler):
            blocks is the exception: it hands its children only its
            ``text-align`` and is then unwrapped, so the rest of its style
            attribute is lost.
+        6. A ``<div>`` the author gave a border or a background - markdown
+           having no syntax for a callout, that is how one is drawn. Nothing
+           downstream reads border, background, padding or margin, so the box
+           is re-encoded as a ``⁣BOX:<bar>:<fill>⁣`` marker that
+           style_docx_alert_boxes() turns into the box a GitHub alert gets,
+           in the div's own colours.
         """
         from bs4 import BeautifulSoup, NavigableString
         soup = BeautifulSoup(html, 'html.parser')
@@ -3245,6 +3927,13 @@ class ExportHandlerBase(APIHandler):
                 # body it was, both of those being one paragraph per marker.
                 if not div.find_parents(self._HTML_TEXT_HOLDERS):
                     div.name = 'p'
+                    # A border or a background makes it a box the author drew,
+                    # not a paragraph. Only here: a box is a table in Word, and
+                    # Word has no table inside a list item, cell or heading -
+                    # which is the branch below.
+                    boxed = self._mark_callout_box(div)
+                    if boxed:
+                        self._carry_box_color(soup, div, boxed)
                 else:
                     # A span, not unwrapped: the style loop below reads the
                     # style attribute off the element, and unwrapping takes it
@@ -3252,11 +3941,27 @@ class ExportHandlerBase(APIHandler):
                     # the one pass whose whole purpose is that it does not
                     div.name = 'span'
                 continue
+            # A border or a background makes this one a box the author drew
+            # too, and it is the same box - drawn around the paragraphs the
+            # children become rather than around one. Same placement rule as
+            # above: never inside a list item, a cell or a heading, Word
+            # having no table there. It answers the blocks it boxed, one per
+            # loose run of text as well as the children written as blocks, so
+            # what the div hands down below reaches the whole box.
+            boxed = None
+            if not div.find_parents(self._HTML_TEXT_HOLDERS):
+                boxed = self._mark_callout_box(div, children)
+            children = boxed or children
             align = self._css_text_align(div.get('style', ''))
             if align:
                 for child in children:
                     if not self._css_text_align(child.get('style', '')):
                         self._add_css(child, f'text-align:{align}')
+            if boxed:
+                # The div is unwrapped and its style attribute goes with it, so
+                # what it holds for the text inside the box has to be handed
+                # down first - the alignment above, and the colour here
+                self._carry_box_color(soup, div, boxed)
             div.unwrap()
 
         # 1. Loose list items: merge a leading <p> into the <li> itself.
@@ -3269,10 +3974,21 @@ class ExportHandlerBase(APIHandler):
             if first_el is not None and first_el.name == 'p':
                 first_el.unwrap()
 
+        # 2. Where each ordered list begins. htmldocx writes every numbered
+        # item as a 'List Number' paragraph on the template's one numbering
+        # instance, so the Word file cannot tell a fresh list from an item
+        # continuing after a table, a sample or a paragraph of its own -
+        # both read as list paragraph, something, list paragraph. The mark
+        # is read back and removed by restart_docx_list_numbering.
+        for ol in soup.find_all('ol'):
+            first_li = ol.find('li', recursive=False)
+            if first_li is not None:
+                first_li.insert(0, NavigableString(self._LIST_START))
+
         # 3 & 4. Inline colour / pill styling on any element with a style attr
         for el in soup.find_all(style=True):
             style = el.get('style', '')
-            decls = [d.strip() for d in style.split(';') if d.strip()]
+            decls = [d.strip() for d in self._css_declarations(style) if d.strip()]
             kept, fg_hex, bg_hex, style_props = [], '', '', {}
             for d in decls:
                 if ':' not in d:
@@ -3291,23 +4007,32 @@ class ExportHandlerBase(APIHandler):
                     # duplicated `bold` must not wrap twice
                     style_props[prop] = val.strip().lower()
                 elif prop == 'color':
+                    # A value this code could not resolve is dropped, whatever
+                    # its notation. htmldocx reads a channel with int() and
+                    # slices a hex blind, so handing one on either takes the
+                    # whole export down - HTTP 500 and no document, for one
+                    # malformed declaration anywhere in the file - or paints a
+                    # colour that is on no screen: `#12345` arrives as its
+                    # first two pairs and a nibble. A browser drops a
+                    # declaration it cannot parse and the text keeps the body
+                    # colour, which is what dropping it here leaves too
                     h = self._normalize_css_color(val)
                     if h:
                         fg_hex = h
                         kept.append(f'color:#{h}')
-                    else:
-                        kept.append(d)
                 elif prop == 'background-color' or prop == 'background':
-                    h = self._normalize_css_color(val.split()[0] if val.split() else '')
-                    if h:
-                        bg_hex = h  # drop from style; re-encode as marker below
-                    else:
-                        kept.append(d)
+                    # The shorthand puts the colour among an image and its
+                    # repeat, and `rgb(244, 244, 245)` is several whitespace
+                    # tokens of its own, so the value is scanned, not sliced.
+                    # Unresolved, it goes the way of `color` above. Last value
+                    # wins, and one naming no colour clears the fill, as the
+                    # box reader reads the same declarations
+                    bg_hex = self._css_color_in(val)  # re-encoded as a marker below
                 else:
                     kept.append(d)
             wrappers = ''.join(self._CSS_STYLE_TAGS[prop](val)
                                for prop, val in style_props.items())
-            if bg_hex or fg_hex or style_props:
+            if bg_hex or fg_hex or style_props or len(kept) != len(decls):
                 if kept:
                     el['style'] = ';'.join(kept)
                 else:
@@ -3364,6 +4089,60 @@ class ExportHandlerBase(APIHandler):
                     el.append(wrapper)
 
         return str(soup)
+
+    # Invisible times marks the first item of each ordered list from
+    # restructure_html_for_docx to restart_docx_list_numbering (U+2063, the
+    # invisible separator, is the bookmark and box marker)
+    _LIST_START = '\u2062'
+
+    def restart_docx_list_numbering(self, document):
+        """Give every ordered list its own numbering instance, starting at 1.
+
+        htmldocx numbers all 'List Number' paragraphs from the one instance
+        the template's style names, so Word counted a second procedure on
+        from the first and the PDF rebuild had to guess where a list ended -
+        wrongly, whenever a step held a table, a sample or a paragraph of its
+        own. Each list marked by restructure_html_for_docx gets a fresh
+        instance of the style's abstract numbering with a start override of
+        1; the paragraphs that follow at the same depth join it until the
+        next mark at that depth. The mark is removed here. The PDF rebuild
+        restarts its count when the instance changes and guesses nothing.
+        """
+        from docx.oxml.ns import qn
+        from docx.text.paragraph import Paragraph as DocxParagraph
+        from docx.shared import Inches
+
+        numbering = document.part.numbering_part.element
+        style_num = document.styles['List Number'].element.pPr.numPr
+        abstract_id = numbering.num_having_numId(
+            style_num.numId.val).abstractNumId.val
+
+        def depth_of(para):
+            # htmldocx indents 0.5in per nesting level, so the depth is in
+            # the paragraph's own indent, not in the (single) style name
+            indent = para.paragraph_format.left_indent or 0
+            return max(0, round(indent / Inches(0.5)) - 1)
+
+        current = {}
+        for p in document.element.body.iter(qn('w:p')):
+            para = DocxParagraph(p, document)
+            starts = False
+            for run in para.runs:
+                if self._LIST_START in run.text:
+                    run.text = run.text.replace(self._LIST_START, '')
+                    starts = True
+            if not para.style or para.style.name != 'List Number':
+                continue
+            depth = depth_of(para)
+            if starts:
+                num = numbering.add_num(abstract_id)
+                num.add_lvlOverride(ilvl=0).add_startOverride(1)
+                current[depth] = num.numId
+            if depth not in current:
+                continue
+            num_pr = p.get_or_add_pPr().get_or_add_numPr()
+            num_pr.get_or_add_ilvl().val = 0
+            num_pr.get_or_add_numId().val = current[depth]
 
     def style_docx_color_runs(self, document):
         """Apply true run shading (``w:shd``) to runs carrying a pill marker
@@ -4559,6 +5338,7 @@ class ExportHandlerBase(APIHandler):
         # Track numbering for ordered lists
         number_counters = {0: 0, 1: 0, 2: 0}
         last_list_level = -1
+        list_ids = {}  # depth -> numbering instance of the list open there
 
         def is_horizontal_rule(para):
             """Check if paragraph represents a horizontal divider line."""
@@ -4636,6 +5416,36 @@ class ExportHandlerBase(APIHandler):
             return ParagraphStyle(f'{style.name}-align{ta}', parent=style,
                                   alignment=ta)
 
+        def heading_style_for(para):
+            """The heading style a DOCX paragraph maps onto, or None when it is
+            not a heading.
+
+            One ladder, read by the body and by the inside of a callout alike:
+            a heading routed into a box used to be painted as callout body
+            text, so the same line of source read as a heading in Word and as
+            body text in the PDF.
+            """
+            style_name = para.style.name if para.style else ''
+            if not style_name.startswith('Heading'):
+                return None
+            level = re.match(r'Heading (\d+)', style_name)
+            # An unnumbered or out-of-range 'Heading ...' keeps the old
+            # catch-all target rather than losing its heading face
+            style = heading_styles.get(
+                int(level.group(1)) if level else 0, heading3_style)
+            # A minor heading takes its slant from the STYLE, not from a
+            # run, so format_run's gate never sees it - and the italic
+            # faces are the ones with no star, check mark or ballot box.
+            # Same trade as a run: upright and visible beats slanted and
+            # blank.
+            upright = (font_name_bold if 'Bold' in style.fontName
+                       else font_name)
+            if (not self.pdf_face_covers(style.fontName, para.text)
+                    and self.pdf_face_covers(upright, para.text)):
+                style = ParagraphStyle(f'{style.name}-upright',
+                                       parent=style, fontName=upright)
+            return style
+
         def process_paragraph(para):
             """Process a single paragraph and return reportlab element(s)."""
             nonlocal last_list_level
@@ -4646,8 +5456,10 @@ class ExportHandlerBase(APIHandler):
                 return [HRFlowable(width="100%", thickness=0.5, color=colors.grey, spaceBefore=3, spaceAfter=6)]
 
             text = para.text.strip()
-            if not text:
-                # Empty paragraph - render as actual blank line (not invisible spacer)
+            if not text and get_list_info(para)[0] != 'number':
+                # Empty paragraph - render as actual blank line (not invisible
+                # spacer). An empty numbered item still takes its number,
+                # as Word gives it one
                 return Paragraph("&nbsp;", normal_style)
 
             # Check for code block placeholder [[CODE_BLOCK_N]]
@@ -4698,26 +5510,9 @@ class ExportHandlerBase(APIHandler):
                 text = ''.join(formatted_parts)
 
             # Detect heading styles
-            style_name = para.style.name if para.style else ''
-            if style_name.startswith('Heading'):
-                last_list_level = -1
-                level = re.match(r'Heading (\d+)', style_name)
-                # An unnumbered or out-of-range 'Heading ...' keeps the old
-                # catch-all target rather than losing its heading face
-                style = heading_styles.get(
-                    int(level.group(1)) if level else 0, heading3_style)
-                # A minor heading takes its slant from the STYLE, not from a
-                # run, so format_run's gate never sees it - and the italic
-                # faces are the ones with no star, check mark or ballot box.
-                # Same trade as a run: upright and visible beats slanted and
-                # blank.
-                upright = (font_name_bold if 'Bold' in style.fontName
-                           else font_name)
-                if (not self.pdf_face_covers(style.fontName, para.text)
-                        and self.pdf_face_covers(upright, para.text)):
-                    style = ParagraphStyle(f'{style.name}-upright',
-                                           parent=style, fontName=upright)
-                return Paragraph(text, aligned(style, para))
+            heading = heading_style_for(para)
+            if heading is not None:
+                return Paragraph(text, aligned(heading, para))
 
             # Blockquote: style_docx_blockquotes gave it a left border, shading
             # and indent that process_paragraph would otherwise drop. Render it
@@ -4725,7 +5520,6 @@ class ExportHandlerBase(APIHandler):
             # DOCX. The runs already carry the muted italic colour.
             bq = blockquote_info(para)
             if bq is not None:
-                last_list_level = -1
                 indent_pts, bar_hex, shd_hex = bq
                 return make_callout(
                     [Paragraph(text, callout_body_style)],
@@ -4737,6 +5531,16 @@ class ExportHandlerBase(APIHandler):
             list_type, level = get_list_info(para)
 
             if list_type == 'number':
+                # A list ends where restart_docx_list_numbering began the
+                # next one - the instance on the paragraph changes. Nothing
+                # else is a boundary: a table, a sample or a paragraph
+                # inside a step used to restart the count
+                num_pr = para._element.pPr.numPr if para._element.pPr is not None else None
+                num_id = num_pr.numId.val if num_pr is not None and num_pr.numId is not None else None
+                if list_ids.get(level) != num_id:
+                    list_ids[level] = num_id
+                    for l in range(level, 3):
+                        number_counters[l] = 0
                 # Reset lower levels when moving up, increment current level
                 if level <= last_list_level:
                     for l in range(level + 1, 3):
@@ -4754,10 +5558,6 @@ class ExportHandlerBase(APIHandler):
                 return Paragraph(f'• {text}', style)
 
             else:
-                # Reset counters when not in list
-                last_list_level = -1
-                for l in number_counters:
-                    number_counters[l] = 0
                 return Paragraph(text, aligned(normal_style, para))
 
         # Printable frame: the page area less the frame's own 6pt padding each
@@ -4844,7 +5644,11 @@ class ExportHandlerBase(APIHandler):
             if left is None or left.get(qn('w:val')) != 'single':
                 return None
             bar = left.get(qn('w:color'))
-            if not bar or bar in ('auto', '000000'):
+            # Black is a colour a hand-drawn box may be bordered with, so it is
+            # not disqualifying; what keeps an ordinary bordered table out is
+            # the 1x1 shape above and the blank other sides below, which no
+            # content table has
+            if not bar or bar == 'auto':
                 return None
             top = borders.find(qn('w:top'))
             if top is not None and top.get(qn('w:val')) not in ('none', None):
@@ -4867,7 +5671,13 @@ class ExportHandlerBase(APIHandler):
             for p in tbl.rows[0].cells[0].paragraphs:
                 markup = ''.join(format_run(run) for run in self.docx_paragraph_runs(p)).strip()
                 if markup:
-                    flow.append(Paragraph(markup, callout_body_style))
+                    style = heading_style_for(p) or callout_body_style
+                    if not flow and style.spaceBefore:
+                        # The cell's own top padding is the space above the
+                        # first line; the heading's would sit on top of it
+                        style = ParagraphStyle(f'{style.name}-boxtop',
+                                               parent=style, spaceBefore=0)
+                    flow.append(Paragraph(markup, style))
             if not flow:
                 flow = [Paragraph('&nbsp;', callout_body_style)]
             return make_callout(flow, bar_hex, shd_hex, left_pad=12)
@@ -5156,9 +5966,6 @@ class ExportHandlerBase(APIHandler):
                             break
                         group.append(nxt)
                         j += 1
-                    last_list_level = -1
-                    for _l in number_counters:
-                        number_counters[_l] = 0
                     add_to_story(build_blockquote_callout(group, bq))
                     i = j
                     continue
@@ -5236,6 +6043,13 @@ class ExportPdfHandler(ExportHandlerBase):
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             content = self.replace_math_with_images(content, width=math_pixel_width)
             content = self.embed_images_as_base64(content, file_path.parent)
+            # After every pass that rewrites the source and before the
+            # format's own code-block handling: the pass measures what the
+            # converter will render, so it must see the text the converter
+            # gets. Measured on the raw source, a display-math item that the
+            # math pass rewrites to a bare `- ` line was certified as a list
+            # and rendered as the setext underline of the item above it.
+            content = self.normalize_list_indentation(content)
 
             # Extract code blocks for PDF rendering (before DOCX conversion)
             content, code_blocks = self.extract_code_blocks(content)
@@ -5275,6 +6089,8 @@ class ExportPdfHandler(ExportHandlerBase):
                 parser.add_html_to_document(body_html, document)
 
                 self.apply_anchor_bookmarks(document)
+                # One numbering instance per ordered list, mark removed
+                self.restart_docx_list_numbering(document)
                 # Style and de-marker blockquotes (also strips the marker so it
                 # never leaks into the PDF text rebuild below)
                 self.style_docx_blockquotes(document)
@@ -5380,6 +6196,13 @@ class ExportDocxHandler(ExportHandlerBase):
             # Use OMML markers for DOCX (native Word equations)
             content, inline_math, display_math = self.replace_math_with_markers(content)
             content = self.embed_images_as_base64(content, file_path.parent)
+            # After every pass that rewrites the source and before the
+            # format's own code-block handling: the pass measures what the
+            # converter will render, so it must see the text the converter
+            # gets. Measured on the raw source, a display-math item that the
+            # math pass rewrites to a bare `- ` line was certified as a list
+            # and rendered as the setext underline of the item above it.
+            content = self.normalize_list_indentation(content)
             # Highlight code blocks with inline styles for DOCX
             content = self.highlight_code_blocks(content, use_inline_styles=True)
             html = self.markdown_to_html(content, file_path.stem,
@@ -5427,6 +6250,8 @@ class ExportDocxHandler(ExportHandlerBase):
                 # Convert anchor markers to bookmarks and rewrite hash-prefix
                 # hyperlinks from external to internal links.
                 self.apply_anchor_bookmarks(document)
+                # One numbering instance per ordered list, mark removed
+                self.restart_docx_list_numbering(document)
 
                 # Style blockquotes (left bar, indent, shading) and strip marker
                 self.style_docx_blockquotes(document)
@@ -5621,6 +6446,13 @@ class ExportHtmlHandler(ExportHandlerBase):
             content = self.preprocess_task_lists(content)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             content = self.embed_images_as_base64(content, file_path.parent)
+            # After every pass that rewrites the source and before the
+            # format's own code-block handling: the pass measures what the
+            # converter will render, so it must see the text the converter
+            # gets. Measured on the raw source, a display-math item that the
+            # math pass rewrites to a bare `- ` line was certified as a list
+            # and rendered as the setext underline of the item above it.
+            content = self.normalize_list_indentation(content)
             html = self.markdown_to_html(
                 content, file_path.stem, math_support=True,
                 theme=html_theme,

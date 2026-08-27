@@ -134,3 +134,6 @@ dmypy.json
 
 # graphify knowledge-graph artefacts
 tmp/
+
+# run logs (galata, fuzz)
+logs/
