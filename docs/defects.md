@@ -446,6 +446,12 @@
   - related: DEF-MARK-100 - the split's second list now restarts in Word as well
   - repro: export '1. Step' / blank / ' > [!NOTE]' / ' > noted' / blank / '2. Next' to DOCX or PDF; the second step reads 1.
   - log: 2026-08-27T22:34:48Z @kj added
+- [x] `DEF-MARK-108` **a third-level list resets its parent's count in the PDF** - MAJOR; The PDF walker read every indent past the first as level 1, so a depth-2 ordered list shared the depth-1 counter and numbering-instance slot; returning to the parent looked like a change of list and restarted it at 1 where Word printed 3. Found by the reading-only architect round over commit 9480951
+  - evidence: get_list_info now uses the DOCX pass's depth formula in twips; test test_pdf_a_third_level_list_does_not_reset_its_parent, mutation-proved against the binary level
+  - related: DEF-MARK-103 - the carried-signal reset this partition mismatch undermined
+  - repro: export '1. o0 / 1. o1 / 2. o1b / 1. o2 / 3. o1c' (two-space nesting) to PDF and read the number before o1c
+  - log: 2026-08-27T22:50:49Z @kj added
+  - log: 2026-08-27T22:50:49Z @kj closed
 
 ## Diagram rendering `DIAG`
 

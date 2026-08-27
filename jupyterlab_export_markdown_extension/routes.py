@@ -5326,10 +5326,10 @@ class ExportHandlerBase(APIHandler):
                         if ind is not None:
                             left_val = ind.get(qn('w:left'))
                             if left_val:
-                                left_indent = int(left_val)
-                                # 720 twips = level 0, 1440+ = level 1+
-                                if left_indent > 720:
-                                    level = 1
+                                # htmldocx indents depth d by (d + 1) half
+                                # inches; the same formula partitions the
+                                # levels in restart_docx_list_numbering
+                                level = min(2, max(0, round(int(left_val) / 720) - 1))
                 except (AttributeError, ValueError):
                     pass
 

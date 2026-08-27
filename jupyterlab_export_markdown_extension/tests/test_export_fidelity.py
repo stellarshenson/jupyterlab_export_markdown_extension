@@ -1358,6 +1358,26 @@ class TestTableImageScaling:
                         fitz.open(stream=response.body, filetype="pdf"))
         assert "3. c" in text, f"the empty item lost its number: {text!r}"
 
+    async def test_pdf_a_third_level_list_does_not_reset_its_parent(
+            self, jp_fetch, jp_root_dir):
+        """DEF-MARK-108: the PDF walker read every indent past the first as
+        level 1, so a third-level list and its parent shared one counter and
+        one numbering-instance slot; returning from the child to the parent
+        looked like a change of list and restarted the parent at 1 where
+        Word printed 3."""
+        import fitz
+        (jp_root_dir / "ol3.md").write_text(
+            "1. o0\n  1. o1\n  2. o1b\n    1. o2\n  3. o1c\n", encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "ol3.md"}),
+            raise_error=False)
+        assert response.code == 200
+        text = " ".join(page.get_text() for page in
+                        fitz.open(stream=response.body, filetype="pdf"))
+        assert "1. o2" in text and "3. o1c" in text, (
+            f"the third level reset its parent: {text!r}")
+
     async def test_docx_each_ordered_list_has_its_own_numbering_instance(
             self, jp_fetch, jp_root_dir):
         """DEF-MARK-100: htmldocx numbered every List Number paragraph from
