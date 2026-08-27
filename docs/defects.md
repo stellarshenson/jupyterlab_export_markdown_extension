@@ -452,6 +452,26 @@
   - repro: export '1. o0 / 1. o1 / 2. o1b / 1. o2 / 3. o1c' (two-space nesting) to PDF and read the number before o1c
   - log: 2026-08-27T22:50:49Z @kj added
   - log: 2026-08-27T22:50:49Z @kj closed
+- [x] `DEF-MARK-109` **a callout's left accent lost to its neutral frame** - MAJOR; A hand-drawn callout written as a neutral frame with a coloured left edge (border: 1px solid #ddd; border-left: 4px solid #0969da) drew a grey bar in Word and PDF: \_css_callout_box kept the first drawn side in top-right-bottom-left order, so the frame colour won and an info box and a danger box came out the same. Found by the reading-only ux round over commit 9480951
+  - evidence: the bar reads the left side first; test test_the_bar_takes_the_left_edge_colour_over_the_frame, mutation-proved against the old order
+  - repro: export a div styled 'border: 1px solid #ddd; border-left: 4px solid #0969da' and read the bar colour in the DOCX table borders
+  - log: 2026-08-27T22:58:18Z @kj added
+  - log: 2026-08-27T22:58:18Z @kj closed
+- [x] `DEF-MARK-110` **inline math in a two-space list stayed a code block in the PDF** - MAJOR; The PDF handler rewrites inline math to an <img> before normalize_list_indentation runs, and the rescue refused any chunk holding a tag anywhere on a line, so ' - Energy $E=mc^2$' was a list in Word and HTML and a code block holding the base64 blob in the PDF. Found by the reading-only ux round over commit 9480951
+  - evidence: verbatim_re refuses a tag only at a line start; test test_an_inline_tag_in_an_item_does_not_refuse_the_rescue, mutation-proved; the raw-block test DEF-MARK-86 still passes
+  - related: DEF-MARK-86 - the raw-block refusal this narrows to a line-opening tag
+  - repro: export a document with ' - Energy $E=mc^2$' under a paragraph to PDF and read the block
+  - log: 2026-08-27T22:58:19Z @kj added
+  - log: 2026-08-27T22:58:19Z @kj closed
+- [x] `DEF-MARK-111` **trailing whitespace on the last item refused the rescue** - MINOR; python-markdown stores an indented code block rstripped, so a stray space after the last two-space item made the control's code text differ from the chunk and the whole list stayed a monospace source block. Found by the reading-only bug-hunter round over commit 9480951
+  - evidence: the chunk side of the comparison is rstripped too; test test_trailing_whitespace_on_the_last_item_does_not_refuse_the_rescue, mutation-proved
+  - repro: normalize 'Intro.\n\n - a\n - b \n\nEnd.\n' and see it returned unchanged
+  - log: 2026-08-27T23:01:22Z @kj added
+  - log: 2026-08-27T23:01:22Z @kj closed
+- [ ] `DEF-MARK-112` **the rescue pass renders the whole document once per candidate chunk** - MEDIUM; normalize_list_indentation measures each candidate by converting the entire document, synchronously in the handler. Measured 2026-08-28: the 87 KB SOW takes 367 ms and thirteen sibling documents 0 ms (no candidates); a synthetic 158 KB document with 100 loose sub-bullets and 20 fences takes 5.4 s at 96 ms per render. Found by the reading-only bug-hunter round; a candidate budget or a cheaper oracle are the remedies, neither taken while real documents stay under half a second
+  - related: DEF-MARK-90 - the oracle design whose cost this records
+  - repro: time normalize_list_indentation on a 158 KB document holding 100 '- top / (blank) / - sub' pairs
+  - log: 2026-08-27T23:01:22Z @kj added
 
 ## Diagram rendering `DIAG`
 

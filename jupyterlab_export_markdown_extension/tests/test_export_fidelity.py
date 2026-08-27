@@ -7313,6 +7313,23 @@ class TestIndentedTopLevelList:
         src = "Intro.\n\n  - a\n  [ref]: http://example.com/x\n\nEnd.\n"
         assert self._norm(src) == src, "a reference definition was swallowed by the rescue"
 
+    def test_trailing_whitespace_on_the_last_item_does_not_refuse_the_rescue(self):
+        """DEF-MARK-111: the converter stores a code block rstripped, so a
+        stray space after the last item made the control's code text differ
+        from the chunk and the whole list stayed a monospace source block."""
+        for src in ("Intro.\n\n  - a\n  - b \n\nEnd.\n", "Intro.\n\n  - a \n  - b\n\nEnd.\n"):
+            assert self._norm(src) != src, f"trailing whitespace refused the rescue: {src!r}"
+
+    def test_an_inline_tag_in_an_item_does_not_refuse_the_rescue(self):
+        """DEF-MARK-110: the PDF path rewrites `$E=mc^2$` to an `<img>` before
+        the pass runs, and any `<tag` in the chunk refused it, so one list
+        was a list in Word and HTML and a code block in the PDF. Only a tag
+        opening a line is a raw block; one inside the item's text is inline."""
+        src = "Intro.\n\n  - Mass\n  - Energy <img src=\"data:image/png;base64,AAAA\">\n\nEnd.\n"
+        out = self._norm(src)
+        assert out != src and "- Energy <img" in out, (
+            "an inline tag refused the rescue")
+
     def test_a_candidate_the_converter_cannot_render_is_refused(self):
         """DEF-MARK-90: a list nested past the parser's depth renders as a
         code block in the control and raises inside the measurement of the
@@ -8617,6 +8634,18 @@ class TestCalloutBorderWidth:
             'FF0000', 'FFFFFF')
         assert ExportHandlerBase._css_callout_box('border: thin solid red') == (
             'FF0000', 'FFFFFF')
+
+    def test_the_bar_takes_the_left_edge_colour_over_the_frame(self):
+        """DEF-MARK-109: the classic callout is a neutral frame with a
+        coloured left edge; the bar took the first drawn side in top-right-
+        bottom-left order, so the frame's grey won and an info box and a
+        danger box written this way came out the same."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase as B
+        for css in ('border: 1px solid #ddd; border-left: 4px solid #0969da',
+                    'border: 1px solid #ddd; border-left-width: 4px; border-left-color: #0969da'):
+            assert B._css_callout_box(css) == ('0969DA', 'FFFFFF'), (
+                f"{css!r} lost its accent to the frame")
+        assert B._css_callout_box('border-top: 3px solid red') == ('FF0000', 'FFFFFF')
 
     def test_an_invisible_border_in_any_notation_draws_no_box(self):
         """DEF-MARK-92: `transparent` was the only spelling of an invisible

@@ -2199,7 +2199,7 @@ class ExportHandlerBase(APIHandler):
         # reference definition is consumed by the converter as a definition
         # and shown nowhere, so a URL the control displays would vanish.
         verbatim_re = re.compile(
-            r'^\s*(`{3,}|~{3,})|<[A-Za-z/]|^\s*\[[^\]]*\]:')
+            r'^\s*(`{3,}|~{3,})|^\s*<[A-Za-z/]|^\s*\[[^\]]*\]:')
         # `HashHeaderProcessor.RE`: hashes at column 0, nothing else required.
         # A heading is its own block, so it ends the chunk above it
         atx_re = re.compile(r'^#{1,6}')
@@ -2331,7 +2331,7 @@ class ExportHandlerBase(APIHandler):
                     and not own_block(now) \
                     and code_text(was) == '\n'.join(
                         detab(lines[i]) for i in chunk
-                        if lines[i].startswith('  ')):
+                        if lines[i].startswith('  ')).rstrip():
                 lines, before = candidate, after
         return '\n'.join(lines)
 
@@ -3667,7 +3667,10 @@ class ExportHandlerBase(APIHandler):
                         # keeping what a declaration above gave them
                         sides[side] = list(cls._css_border_parts(value))
         bar, bordered = '', False
-        for side in cls._CSS_BORDER_SIDES:
+        # The box draws one left bar, so the left side names its colour: a
+        # neutral frame with a coloured left edge keeps the accent, not the
+        # frame. Reversed order puts left first and keeps the fallthrough
+        for side in reversed(cls._CSS_BORDER_SIDES):
             line_style, width, color = sides[side]
             # The three spellings that write a side off, and an author reaches
             # for each: no style or one that draws nothing, a width that is
