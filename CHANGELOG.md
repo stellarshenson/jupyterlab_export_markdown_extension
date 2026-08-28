@@ -2,6 +2,22 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.25
+
+### Added
+
+- A nested list written with two-space indentation - the GitHub and JupyterLab convention - renders as a list in Word, PDF and HTML instead of an indented code block. The export decides by rendering the document with and without the shift and keeps it only when exactly one block turns from code into a list made of that chunk; an intended code sample, a fence, a raw HTML block, a link reference definition or a table of contents is left as written
+- A hand-drawn callout - a `<div>` with a border or background style, the notebook idiom for a note box - draws as a bordered box with a coloured bar in Word and PDF, matching the HTML export. A neutral frame with a coloured left edge keeps the accent colour for the bar; translucent fills are composited onto the page colour
+- Every ordered list restarts at 1 in Word and in the PDF. Each list carries its own numbering instance, so a second procedure on the page no longer continues the count of the first, and a step interrupted by a table, a code sample, a quote or a paragraph keeps counting
+
+### Fixed
+
+- A third-level ordered list no longer resets its parent's count in the PDF
+- A list holding inline math is rescued in the PDF as it is in Word and HTML; a tag inside an item's text no longer counts as a raw block
+- A stray space after the last item no longer leaves the whole list as a code block
+- An empty numbered item keeps its number in the PDF
+- A link reference definition under an indented item survives the export
+
 ## 1.6.24
 
 ### Added
