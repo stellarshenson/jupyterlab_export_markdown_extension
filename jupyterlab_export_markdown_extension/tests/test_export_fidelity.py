@@ -534,6 +534,55 @@ class TestMathRendering:
         assert response.code == 200
         assert response.body.startswith(b"%PDF-")
 
+    async def test_docx_inline_math_in_a_table_cell(self, jp_fetch, jp_root_dir):
+        """`document.paragraphs` is the body's direct children, so a marker in
+        a table cell was never restored and `MATH_INLINE_N` printed raw in
+        Word while the same formula in a body paragraph rendered."""
+        doc = (
+            "| Criterion | Rule |\n"
+            "| --- | --- |\n"
+            "| Utilisation | Mean $U_{\\mathrm{eff}}$ above the baseline "
+            "$U_{\\mathrm{eff}}$; $T_{\\mathrm{site}}$ - hours on site |\n"
+            "\n"
+            "Body $x^2$ paragraph.\n"
+        )
+        (jp_root_dir / "mathcell.md").write_text(doc, encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "mathcell.md"}),
+            raise_error=False)
+        assert response.code == 200, f"the export died: {response.body[:300]!r}"
+        from docx import Document
+
+        document = Document(io.BytesIO(response.body))
+        cell_xml = document.tables[0].rows[1].cells[1]._tc.xml
+        assert "MATH_INLINE" not in cell_xml, "a marker survived in the cell"
+        assert cell_xml.count("</m:oMath>") == 3, "an equation is missing from the cell"
+        assert "hours on site" in document.tables[0].rows[1].cells[1].text, (
+            "the text after the last equation was lost")
+
+    async def test_docx_display_math_sharing_a_cell_with_text(
+            self, jp_fetch, jp_root_dir):
+        """A raw HTML table cell collapses the blank lines around a display
+        marker, so the marker shares its paragraph with text. The display
+        branch cleared every run of that paragraph, deleting the text and
+        the inline equation beside it."""
+        doc = "<table><tr><td>Rate $$r$$ per $t$ hour</td></tr></table>\n"
+        (jp_root_dir / "mathcelldisplay.md").write_text(doc, encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "mathcelldisplay.md"}),
+            raise_error=False)
+        assert response.code == 200, f"the export died: {response.body[:300]!r}"
+        from docx import Document
+
+        document = Document(io.BytesIO(response.body))
+        cell = document.tables[0].rows[0].cells[0]
+        assert "MATH_" not in cell._tc.xml, "a marker survived in the cell"
+        assert cell._tc.xml.count("</m:oMath>") == 2, "an equation is missing"
+        assert "Rate" in cell.text and "per" in cell.text and "hour" in cell.text, (
+            f"the cell text was lost: {cell.text!r}")
+
     async def test_code_blocks_preserved(self, jp_fetch, test_math_file):
         """Test math inside code blocks is NOT rendered."""
         response = await jp_fetch(

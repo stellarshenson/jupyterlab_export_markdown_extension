@@ -472,6 +472,16 @@
   - related: DEF-MARK-90 - the oracle design whose cost this records
   - repro: time normalize_list_indentation on a 158 KB document holding 100 '- top / (blank) / - sub' pairs
   - log: 2026-08-27T23:01:22Z @kj added
+- [x] `DEF-MARK-113` **Inline math in a table cell prints as a raw MATH_INLINE marker in DOCX** - MAJOR; merge_inline_math_omml walks document.paragraphs, the body's direct children, so a marker in a table cell is never replaced by OMML and Word shows the literal marker; body paragraphs render
+  - evidence: fixed: merge_inline_math_omml walks every w:p under the body, table cells included, and a display marker sharing its paragraph with text takes the inline split; tests test_docx_inline_math_in_a_table_cell and test_docx_display_math_sharing_a_cell_with_text, both mutation-proved; SOW 04-sow-poc-nbs-delivery.md exports with 0 markers and 50 equations; 371 pytest
+  - related: ACC-LIST-100 - the marker criterion this cell path escaped
+  - repro: Export a markdown table whose cell holds $U_{\mathrm{eff}}$ to DOCX; the cell reads MATH_INLINE_N (SOW 04-sow-poc-nbs-delivery.md lines 446, 574, 617 - 7 markers)
+  - log: 2026-08-28T15:14:30Z @kj added
+  - log: 2026-08-28T15:22:33Z @kj closed
+- [ ] `DEF-MARK-114` **A table column holding only an equation measures as empty in the fixed-layout fit** - MINOR; fit*docx_table_to_page measures cell.text, and an OMML equation has no w:t, so a cell holding only an equation earns the margin floor; measured 1064 twips for a $U*{\mathrm{eff}}$ column beside an overflowing URL column. Found by the reading-only bug-hunter round on DEF-MARK-113; remedy is an OMML floor next to the image floor, counting m:t characters
+  - related: DEF-MARK-113 - the cell equations this pass now has to measure
+  - repro: Export a two-column table whose first cell is only $U_{\mathrm{eff}}$ and whose second holds an unbreakable 200-character URL; read the first w:gridCol
+  - log: 2026-08-28T15:19:36Z @kj added
 
 ## Diagram rendering `DIAG`
 

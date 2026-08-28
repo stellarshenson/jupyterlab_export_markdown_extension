@@ -2762,14 +2762,30 @@ class ExportHandlerBase(APIHandler):
         from lxml import etree
         import copy
 
+        from docx.text.paragraph import Paragraph
+
         OMML_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
 
-        for paragraph in document.paragraphs:
+        # Every paragraph in the body, the ones inside a table cell included.
+        # `document.paragraphs` is `./w:p` - direct children of the body - so
+        # a marker in a table cell was never reached and printed raw.
+        paragraphs = [Paragraph(p, document)
+                      for p in document.element.body.iter(qn('w:p'))]
+        for paragraph in paragraphs:
             full_text = paragraph.text
+            inline_markers = [(f'\u200dMATH_INLINE_{idx}\u200d', latex)
+                              for idx, latex in enumerate(inline_math)]
 
             # Handle display math (marker in its own paragraph)
             for idx, latex in enumerate(display_math):
                 marker = f'\u200dMATH_DISPLAY_{idx}\u200d'
+                if marker in full_text and full_text.strip() != marker:
+                    # A raw HTML table cell collapses the blank lines around
+                    # the marker, so it shares its paragraph with text. The
+                    # inline split keeps that text; clearing the runs below
+                    # would delete it.
+                    inline_markers.append((marker, latex))
+                    continue
                 if marker in full_text:
                     try:
                         omml_elem = self.latex_to_omml(latex)
@@ -2791,8 +2807,7 @@ class ExportHandlerBase(APIHandler):
                                 run.text = run.text.replace(marker, latex)
 
             # Handle inline math (marker within text runs)
-            for idx, latex in enumerate(inline_math):
-                marker = f'\u200dMATH_INLINE_{idx}\u200d'
+            for marker, latex in inline_markers:
                 if marker not in full_text:
                     continue
 
