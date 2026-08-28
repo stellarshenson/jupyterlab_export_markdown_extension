@@ -2,6 +2,13 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.26
+
+### Fixed
+
+- An equation inside a table cell renders as a native Word equation in DOCX instead of a raw `MATH_INLINE_N` marker; the equation pass reached only body paragraphs, so a formula in a cell was left as its placeholder while the same formula in a paragraph rendered
+- A display formula written inside a raw HTML table cell beside text keeps that text and the inline formulas next to it; it took the paragraph-clearing path meant for a formula standing alone
+
 ## 1.6.25
 
 ### Added
