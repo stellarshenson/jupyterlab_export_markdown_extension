@@ -2,6 +2,13 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## 1.6.27
+
+### Fixed
+
+- A `<div>` whose four edges all draw in one colour and one line style - a hand-drawn banner such as `border: 2px dashed #9ca3af` - exports as a four-edge frame in that style in DOCX and PDF; it collapsed into the alert construct, a single fat left bar with the other edges invisible
+- A neutral frame with a differing left edge keeps the accent bar, and GitHub alerts are unchanged
+
 ## 1.6.26
 
 ### Fixed
