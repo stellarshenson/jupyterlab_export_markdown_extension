@@ -8668,6 +8668,74 @@ class TestCalloutBoxContents:
         )
 
 
+class TestCalloutFrame:
+    """DEF-MARK-115: a div whose four edges all draw in one colour is a frame
+    the author drew, not a neutral frame with an accent. It collapsed into the
+    alert construct - a fat left bar, other edges none - so a 2px dashed draft
+    banner was next to invisible in Word."""
+
+    async def _docx(self, jp_fetch, jp_root_dir, doc):
+        (jp_root_dir / "frame.md").write_text(doc, encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "frame.md"}),
+            raise_error=False)
+        assert response.code == 200, f"the export died: {response.body[:300]!r}"
+        from docx import Document
+        return Document(io.BytesIO(response.body))
+
+    async def test_a_uniform_dashed_border_draws_all_four_edges(
+            self, jp_fetch, jp_root_dir):
+        from docx.oxml.ns import qn
+        document = await self._docx(jp_fetch, jp_root_dir, (
+            '<div style="border: 2px dashed #9ca3af; padding: 10px 14px;">\n'
+            "<b>DRAFT, not for signature.</b> Every figure is confirmed.\n"
+            "</div>\n"))
+        borders = document.tables[0]._tbl.find(qn("w:tblPr")).find(qn("w:tblBorders"))
+        for side in ("top", "bottom", "left", "right"):
+            el = borders.find(qn(f"w:{side}"))
+            assert el.get(qn("w:val")) == "dashed", f"{side} edge is not dashed"
+            assert el.get(qn("w:color")) == "9CA3AF", f"{side} edge lost its colour"
+            assert el.get(qn("w:sz")) == "12", f"{side} edge is not 1.5pt"
+        assert "DRAFT, not for signature." in document.tables[0].rows[0].cells[0].text
+
+    async def test_an_accent_bar_still_draws_the_alert_construct(
+            self, jp_fetch, jp_root_dir):
+        """A neutral frame with a coloured left edge is the classic callout;
+        it keeps the fat bar, not the frame."""
+        from docx.oxml.ns import qn
+        document = await self._docx(jp_fetch, jp_root_dir, (
+            '<div style="border: 1px solid #ddd; border-left: 4px solid #0969da;">\n'
+            "Note text.\n</div>\n"))
+        borders = document.tables[0]._tbl.find(qn("w:tblPr")).find(qn("w:tblBorders"))
+        left = borders.find(qn("w:left"))
+        assert left.get(qn("w:val")) == "single" and left.get(qn("w:sz")) == "24"
+        assert left.get(qn("w:color")) == "0969DA"
+        assert borders.find(qn("w:top")).get(qn("w:val")) == "none"
+
+    def test_a_mixed_style_border_stays_on_the_accent_path(self):
+        """Uniformity asks for one colour AND one line style; a border whose
+        left edge draws a different style than the frame keeps the pre-frame
+        accent construct instead of repainting every edge in one style."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase as B
+        assert B._css_callout_box(
+            'border: 2px dashed red; border-left-style: solid') == (
+            'FF0000', 'FFFFFF', '')
+        assert B._css_callout_box('border: 2px dashed red') == (
+            'FF0000', 'FFFFFF', 'dashed')
+
+    async def test_pdf_export_survives_the_frame(self, jp_fetch, jp_root_dir):
+        doc = ('<div style="border: 2px dashed #9ca3af;">\n'
+               "<b>DRAFT.</b> Not for signature.\n</div>\n")
+        (jp_root_dir / "frame.md").write_text(doc, encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "frame.md"}),
+            raise_error=False)
+        assert response.code == 200, f"the export died: {response.body[:300]!r}"
+        assert response.body.startswith(b"%PDF-")
+
+
 class TestCalloutBorderWidth:
     """DEF-MARK-87: a `border` whose width is not a positive length draws
     nothing in a browser, and the HTML export passes the style through - so
@@ -8680,9 +8748,9 @@ class TestCalloutBorderWidth:
             assert ExportHandlerBase._css_callout_box(css) is None, (
                 f"{css!r} drew a callout the browser does not")
         assert ExportHandlerBase._css_callout_box('border: 1px solid red') == (
-            'FF0000', 'FFFFFF')
+            'FF0000', 'FFFFFF', 'single')
         assert ExportHandlerBase._css_callout_box('border: thin solid red') == (
-            'FF0000', 'FFFFFF')
+            'FF0000', 'FFFFFF', 'single')
 
     def test_the_bar_takes_the_left_edge_colour_over_the_frame(self):
         """DEF-MARK-109: the classic callout is a neutral frame with a
@@ -8692,9 +8760,9 @@ class TestCalloutBorderWidth:
         from jupyterlab_export_markdown_extension.routes import ExportHandlerBase as B
         for css in ('border: 1px solid #ddd; border-left: 4px solid #0969da',
                     'border: 1px solid #ddd; border-left-width: 4px; border-left-color: #0969da'):
-            assert B._css_callout_box(css) == ('0969DA', 'FFFFFF'), (
+            assert B._css_callout_box(css) == ('0969DA', 'FFFFFF', ''), (
                 f"{css!r} lost its accent to the frame")
-        assert B._css_callout_box('border-top: 3px solid red') == ('FF0000', 'FFFFFF')
+        assert B._css_callout_box('border-top: 3px solid red') == ('FF0000', 'FFFFFF', '')
 
     def test_an_invisible_border_in_any_notation_draws_no_box(self):
         """DEF-MARK-92: `transparent` was the only spelling of an invisible
@@ -8706,9 +8774,9 @@ class TestCalloutBorderWidth:
                     'border: 1px solid #00000000',
                     'border: 1px solid red; border-color: rgba(0,0,0,0)'):
             assert B._css_callout_box(css) is None, f"{css!r} drew a box"
-        assert B._css_callout_box('border: 2px solid #ff000080') == ('FF7F7F', 'FFFFFF'), (
+        assert B._css_callout_box('border: 2px solid #ff000080') == ('FF7F7F', 'FFFFFF', 'single'), (
             "a half-transparent red bar must composite onto the page, not turn grey")
-        assert B._css_callout_box('border: 1px solid currentcolor') == ('BBBBBB', 'FFFFFF'), (
+        assert B._css_callout_box('border: 1px solid currentcolor') == ('BBBBBB', 'FFFFFF', 'single'), (
             "a bare word nothing resolves keeps the grey bar")
 
     def test_a_later_background_that_names_no_colour_clears_the_fill(self):
@@ -8721,8 +8789,8 @@ class TestCalloutBorderWidth:
                     'background-color: red; background: url(x.png)'):
             assert B._css_callout_box(css) is None, f"{css!r} kept the earlier fill"
         assert B._css_callout_box(
-            'border: 1px solid #333333; background: red; background: none') == ('333333', 'FFFFFF')
-        assert B._css_callout_box('background: none; background: red') == ('FF0000', 'FF0000')
+            'border: 1px solid #333333; background: red; background: none') == ('333333', 'FFFFFF', 'single')
+        assert B._css_callout_box('background: none; background: red') == ('FF0000', 'FF0000', '')
 
     def test_a_semicolon_inside_a_url_does_not_split_the_declaration(self):
         """DEF-MARK-94: torn at the `;` inside `url('tan;x.png')`, the
@@ -8741,8 +8809,8 @@ class TestCalloutBorderWidth:
         `hsl()` is now read, and only a colour that resolves to alpha zero,
         in any spelling, writes the side off."""
         from jupyterlab_export_markdown_extension.routes import ExportHandlerBase as B
-        assert B._css_callout_box('border: 2px solid hsl(120, 100%, 25%)') == ('008000', 'FFFFFF')
-        assert B._css_callout_box('border: 1px solid foo(1)') == ('BBBBBB', 'FFFFFF'), (
+        assert B._css_callout_box('border: 2px solid hsl(120, 100%, 25%)') == ('008000', 'FFFFFF', 'single')
+        assert B._css_callout_box('border: 1px solid foo(1)') == ('BBBBBB', 'FFFFFF', 'single'), (
             "a colour the parser cannot read must keep the grey bar, as a bare unknown word does")
         for css in ('border: 1px solid hsla(0, 0%, 0%, 0)', 'border: 1px solid hsl(0 100% 50% / 0)',
                     'border: 1px solid transparent', 'border: 1px solid rgba(0,0,0,0)',
@@ -8750,7 +8818,7 @@ class TestCalloutBorderWidth:
             assert B._css_callout_box(css) is None, f"{css!r} drew a box"
         # The shorthand parser keeps a function call whole: split on spaces,
         # `100%` inside `hsl(0 100% 50%)` was read as the width
-        assert B._css_callout_box('border: 2px solid hsl(120 100% 25%)') == ('008000', 'FFFFFF')
+        assert B._css_callout_box('border: 2px solid hsl(120 100% 25%)') == ('008000', 'FFFFFF', 'single')
         assert B._normalize_css_color('foo(1)') is None
         assert B._normalize_css_color('transparent') == ''
 

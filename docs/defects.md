@@ -482,6 +482,16 @@
   - related: DEF-MARK-113 - the cell equations this pass now has to measure
   - repro: Export a two-column table whose first cell is only $U_{\mathrm{eff}}$ and whose second holds an unbreakable 200-character URL; read the first w:gridCol
   - log: 2026-08-28T15:19:36Z @kj added
+- [x] `DEF-MARK-115` **A uniformly bordered div collapses to the alert bar and its frame vanishes in DOCX** - MAJOR; A div whose four edges all draw in one colour - the broilers SOW draft banner, border: 2px dashed #9ca3af - was routed into the alert construct: fat single left bar, other edges none, so the dashed frame was next to invisible in Word and the PDF drew the same bar
+  - evidence: fixed: a div whose four edges draw in one colour and style exports as a four-edge frame (w:val single/dashed/dotted, 1.5pt) in DOCX and a matching reportlab BOX in PDF; accent and alert constructs unchanged; tests TestCalloutFrame (3 async + 1 unit), mutation-proved; broilers SOW banner exports with four dashed 9CA3AF edges; 375 pytest, galata 5/5; reading-only round architect/bug-hunter/ux SHIP, round-2 confirmation clean
+  - related: DEF-MARK-100 - the hand-drawn callout construct this extends with a frame variant
+  - repro: Export <div style="border: 2px dashed #9ca3af">text</div> to DOCX; the box table has w:left single sz 24 and top/bottom/right none (05-sow-broilers-field-poc-delivery_v21.docx)
+  - log: 2026-08-31T13:12:28Z @kj added
+  - log: 2026-08-31T13:21:05Z @kj closed
+- [ ] `DEF-MARK-116` **Two-value border-style longhand collapses to a single frame style** - MINOR; the sides fold stores a longhand's whole value per side, so border-style: dashed solid puts 'dashed solid' on all four sides, the uniformity set sees one pair, and the frame maps to single where the browser draws dashed top/bottom and solid left/right; box, colour and edges still draw. Pre-existing store, found by the round-2 confirmation; fixing it means parsing multi-value side longhands
+  - related: DEF-MARK-115 - the frame variant whose style read this limits
+  - repro: Export <div style="border-style: dashed solid; border-color: red; border-width: 2px">x</div> to DOCX; the frame is single, not mixed
+  - log: 2026-08-31T13:21:05Z @kj added
 
 ## Diagram rendering `DIAG`
 

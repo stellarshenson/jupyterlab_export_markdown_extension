@@ -2877,6 +2877,7 @@ class ExportHandlerBase(APIHandler):
                 replacements.append(([paragraph], '', {
                     'border': box.group(1).upper(),
                     'shading': box.group(2).upper(),
+                    'frame': box.group(3) or '',
                 }))
                 continue
             if self._BOX_MORE_MARKER in text and replacements and not replacements[-1][1]:
@@ -2925,21 +2926,25 @@ class ExportHandlerBase(APIHandler):
             tblW.set(qn('w:type'), 'pct')
             tblPr.append(tblW)
 
-            # Table borders: only left border colored, others invisible
+            # Table borders: an alert draws only the fat left bar; a frame
+            # the author drew keeps all four edges and its line style
+            frame = colors.get('frame', '')
+            drawn_sides = ('top', 'bottom', 'right', 'left') if frame else ('left',)
             tblBorders = OxmlElement('w:tblBorders')
-            for side in ['top', 'bottom', 'right', 'insideH', 'insideV']:
+            # CT_TblBorders is a schema sequence; a validating reader drops
+            # an element out of its slot, so the sides go in schema order
+            for side in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
                 border = OxmlElement(f'w:{side}')
-                border.set(qn('w:val'), 'none')
-                border.set(qn('w:sz'), '0')
+                if side in drawn_sides:
+                    border.set(qn('w:val'), frame or 'single')
+                    border.set(qn('w:sz'), '12' if frame else '24')  # 1.5pt / 3pt
+                    border.set(qn('w:color'), colors['border'])
+                else:
+                    border.set(qn('w:val'), 'none')
+                    border.set(qn('w:sz'), '0')
+                    border.set(qn('w:color'), 'auto')
                 border.set(qn('w:space'), '0')
-                border.set(qn('w:color'), 'auto')
                 tblBorders.append(border)
-            left_border = OxmlElement('w:left')
-            left_border.set(qn('w:val'), 'single')
-            left_border.set(qn('w:sz'), '24')  # 3pt
-            left_border.set(qn('w:space'), '0')
-            left_border.set(qn('w:color'), colors['border'])
-            tblBorders.append(left_border)
             tblPr.append(tblBorders)
 
             # Cell margins for internal padding
@@ -3288,10 +3293,13 @@ class ExportHandlerBase(APIHandler):
 
     _BLOCKQUOTE_MARKER_RE = re.compile(r'⁣BQ:(\d+)⁣')
     _PILL_MARKER_RE = re.compile(r'⁣PILL:([0-9A-Fa-f]{6})⁣')
-    #: Bar and fill of a callout box the author drew by hand - a ``<div>``
-    #: given a border or a background - carried from restructure_html_for_docx
-    #: to style_docx_alert_boxes, which boxes it the way it boxes an alert.
-    _BOX_MARKER_RE = re.compile(r'⁣BOX:([0-9A-Fa-f]{6}):([0-9A-Fa-f]{6})⁣')
+    #: Bar, fill and optional frame style of a callout box the author drew by
+    #: hand - a ``<div>`` given a border or a background - carried from
+    #: restructure_html_for_docx to style_docx_alert_boxes. Without the frame
+    #: segment the box is drawn the way an alert is; with it, as a four-edged
+    #: frame in that line style.
+    _BOX_MARKER_RE = re.compile(
+        r'⁣BOX:([0-9A-Fa-f]{6}):([0-9A-Fa-f]{6})(?::(single|dashed|dotted))?⁣')
 
     #: A paragraph belonging to the box opened directly above it. A box is one
     #: table and a ``<div>`` holding blocks is one paragraph per block, so
@@ -3636,7 +3644,10 @@ class ExportHandlerBase(APIHandler):
 
     @classmethod
     def _css_callout_box(cls, style: str):
-        """``(bar_hex, fill_hex)`` when a style attribute draws a box, else None.
+        """``(bar_hex, fill_hex, frame)`` when a style draws a box, else None.
+
+        ``frame`` is the Word border style (``single``/``dashed``/``dotted``)
+        when the author drew all four edges in one colour, else ''.
 
         A border or a background is how a document draws a callout by hand,
         markdown having no syntax for one. Both colours are always answered,
@@ -3681,7 +3692,7 @@ class ExportHandlerBase(APIHandler):
                         # out go back to their initial values rather than
                         # keeping what a declaration above gave them
                         sides[side] = list(cls._css_border_parts(value))
-        bar, bordered = '', False
+        bar, drawn = '', {}
         # The box draws one left bar, so the left side names its colour: a
         # neutral frame with a coloured left edge keeps the accent, not the
         # frame. Reversed order puts left first and keeps the fallthrough
@@ -3699,11 +3710,19 @@ class ExportHandlerBase(APIHandler):
                     # is not invisible, and keeps the grey bar
                     or cls._css_color_invisible(color)):
                 continue
-            bordered = True
+            drawn[side] = (line_style, cls._css_color_in(color))
             bar = bar or cls._css_color_in(color)
-        if not bordered and not fill:
+        if not drawn and not fill:
             return None
-        return (bar or fill or 'BBBBBB', fill or 'FFFFFF')
+        frame = ''
+        if len(drawn) == 4 and len(set(drawn.values())) == 1:
+            # All four edges in one colour AND one line style is a frame the
+            # author drew, not a neutral frame with an accent: the box keeps
+            # every edge and the style, instead of collapsing to the alert
+            # bar. A mixed-style border stays on the accent path
+            frame = {'dashed': 'dashed', 'dotted': 'dotted'}.get(
+                drawn['left'][0], 'single')
+        return (bar or fill or 'BBBBBB', fill or 'FFFFFF', frame)
 
     @classmethod
     def _carry_box_color(cls, soup, el, blocks) -> None:
@@ -3834,7 +3853,8 @@ class ExportHandlerBase(APIHandler):
             targets = cls._boxed_blocks(el)
         for block in targets[1:]:
             block.insert(0, cls._BOX_MORE_MARKER)
-        targets[0].insert(0, f'⁣BOX:{box[0]}:{box[1]}⁣')
+        frame = f':{box[2]}' if box[2] else ''
+        targets[0].insert(0, f'⁣BOX:{box[0]}:{box[1]}{frame}⁣')
         kept = [d for d in cls._css_declarations(el.get('style', '')) if d.strip()
                 and not d.partition(':')[0].strip().lower().startswith('background')]
         if kept:
@@ -3875,9 +3895,10 @@ class ExportHandlerBase(APIHandler):
         6. A ``<div>`` the author gave a border or a background - markdown
            having no syntax for a callout, that is how one is drawn. Nothing
            downstream reads border, background, padding or margin, so the box
-           is re-encoded as a ``⁣BOX:<bar>:<fill>⁣`` marker that
-           style_docx_alert_boxes() turns into the box a GitHub alert gets,
-           in the div's own colours.
+           is re-encoded as a ``⁣BOX:<bar>:<fill>[:<frame>]⁣`` marker
+           that style_docx_alert_boxes() turns into the box a GitHub alert
+           gets, in the div's own colours - or, when the author drew all four
+           edges in one colour, into a frame in that line style.
         """
         from bs4 import BeautifulSoup, NavigableString
         soup = BeautifulSoup(html, 'html.parser')
@@ -5584,7 +5605,8 @@ class ExportHandlerBase(APIHandler):
         frame_width = pdf_doc.width - 2 * self.PDF_FRAME_PADDING
         frame_height = pdf_doc.height - 2 * self.PDF_FRAME_PADDING
 
-        def make_callout(flowables, bar_hex, shd_hex, left_pad=12, trailing=0.12):
+        def make_callout(flowables, bar_hex, shd_hex, left_pad=12, trailing=0.12,
+                         frame=''):
             """A full-width box with a coloured left bar and background shading.
 
             Shared by blockquotes and GitHub alert boxes. ``splitInRow`` lets a
@@ -5596,8 +5618,13 @@ class ExportHandlerBase(APIHandler):
             """
             t = Table([[flowables]], colWidths=[frame_width],
                       hAlign='LEFT', splitInRow=1)
+            line = (('BOX', (0, 0), (-1, -1), 1.5, colors.HexColor('#' + bar_hex),
+                     None, {'dashed': (3, 3), 'dotted': (1, 2)}.get(frame))
+                    if frame else
+                    ('LINEBEFORE', (0, 0), (0, -1), 3,
+                     colors.HexColor('#' + bar_hex)))
             t.setStyle(TableStyle([
-                ('LINEBEFORE', (0, 0), (0, -1), 3, colors.HexColor('#' + bar_hex)),
+                line,
                 ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#' + shd_hex)),
                 ('LEFTPADDING', (0, 0), (-1, -1), left_pad),
                 ('RIGHTPADDING', (0, 0), (-1, -1), 8),
@@ -5644,12 +5671,13 @@ class ExportHandlerBase(APIHandler):
             return (indent_pts, bar, shd_fill)
 
         def alert_info(tbl):
-            """(bar_hex, shd_hex) if the table is a GitHub alert box (a single
-            1x1 cell with a coloured left border, the other sides none, from
-            style_docx_alert_boxes), else None. The 1x1 shape is required so a
-            normal multi-row/column table that happens to share the border
-            signature is never routed to the single-cell callout (which would
-            drop every other cell)."""
+            """(bar_hex, shd_hex, frame) if the table is a callout box from
+            style_docx_alert_boxes - a single 1x1 cell with a coloured left
+            border, the other sides none (frame '') or every edge matching the
+            left (frame = its line style) - else None. The 1x1 shape is
+            required so a normal multi-row/column table that happens to share
+            the border signature is never routed to the single-cell callout
+            (which would drop every other cell)."""
             if len(tbl.rows) != 1 or len(tbl.rows[0].cells) != 1:
                 return None
             tblPr = tbl._tbl.find(qn('w:tblPr'))
@@ -5659,18 +5687,25 @@ class ExportHandlerBase(APIHandler):
             if borders is None:
                 return None
             left = borders.find(qn('w:left'))
-            if left is None or left.get(qn('w:val')) != 'single':
+            if left is None or left.get(qn('w:val')) not in (
+                    'single', 'dashed', 'dotted'):
                 return None
             bar = left.get(qn('w:color'))
-            # Black is a colour a hand-drawn box may be bordered with, so it is
-            # not disqualifying; what keeps an ordinary bordered table out is
-            # the 1x1 shape above and the blank other sides below, which no
-            # content table has
+            # Black is a colour a hand-drawn box may be bordered with, so it
+            # is not disqualifying; what keeps an ordinary bordered table out
+            # is the 1x1 shape above and, below, the other sides being either
+            # blank or the uniform frame this exporter draws
             if not bar or bar == 'auto':
                 return None
             top = borders.find(qn('w:top'))
+            frame = ''
             if top is not None and top.get(qn('w:val')) not in ('none', None):
-                return None
+                # Every edge in the left's colour and style is the hand-drawn
+                # frame; any other bordered 1x1 table is a content table
+                if (top.get(qn('w:val')) != left.get(qn('w:val'))
+                        or top.get(qn('w:color')) != bar):
+                    return None
+                frame = left.get(qn('w:val'))
             shd_fill = 'FFFFFF'
             try:
                 tcPr = tbl.rows[0].cells[0]._tc.find(qn('w:tcPr'))
@@ -5680,9 +5715,9 @@ class ExportHandlerBase(APIHandler):
                         shd_fill = shd.get(qn('w:fill'))
             except (IndexError, AttributeError):
                 pass
-            return (bar, shd_fill)
+            return (bar, shd_fill, frame)
 
-        def process_alert(tbl, bar_hex, shd_hex):
+        def process_alert(tbl, bar_hex, shd_hex, frame=''):
             """Render an alert box as a coloured-left-bar shaded callout with
             normal (not table-header) text, preserving run formatting."""
             flow = []
@@ -5698,7 +5733,7 @@ class ExportHandlerBase(APIHandler):
                     flow.append(Paragraph(markup, style))
             if not flow:
                 flow = [Paragraph('&nbsp;', callout_body_style)]
-            return make_callout(flow, bar_hex, shd_hex, left_pad=12)
+            return make_callout(flow, bar_hex, shd_hex, left_pad=12, frame=frame)
 
         def process_table(tbl):
             """Process a single table and return reportlab elements."""
@@ -5706,7 +5741,7 @@ class ExportHandlerBase(APIHandler):
             # bar; render it as a callout rather than a header-styled table.
             alert = alert_info(tbl)
             if alert is not None:
-                return process_alert(tbl, alert[0], alert[1])
+                return process_alert(tbl, *alert)
 
             # Raw text, so the widths below are measured on what is rendered
             # rather than on the XML entities that stand in for it
