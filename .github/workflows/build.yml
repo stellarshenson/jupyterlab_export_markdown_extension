@@ -55,6 +55,11 @@ jobs:
         jupyter labextension list 2>&1 | grep -ie "jupyterlab_export_markdown_extension.*OK"
         python -m jupyterlab.browser_check
 
+    - name: Check that all endpoints are authenticated
+      run: |
+        set -eux
+        python .github/scripts/check_auth.py
+
     - name: Package the extension
       run: |
         set -eux
@@ -142,8 +147,7 @@ jobs:
     - name: Install browser
       run: |
         set -eux
-        jlpm playwright install-deps
-        jlpm playwright install chromium
+        jlpm playwright install chromium --only-shell
       working-directory: ui-tests
 
     - name: Execute integration tests

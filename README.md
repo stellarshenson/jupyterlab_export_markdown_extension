@@ -88,6 +88,10 @@ Configure the extension via **Settings -> Settings Editor -> Markdown Export Ext
 pip uninstall jupyterlab_export_markdown_extension
 ```
 
+## Contributing
+
+If you would like to contribute to this extension, please refer to the [Contributing Guide](CONTRIBUTING.md).
+
 ## License
 
 BSD 3-Clause License
