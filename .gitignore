@@ -17,6 +17,9 @@ jupyterlab_export_markdown_extension/_version.py
 ui-tests/test-results/
 ui-tests/playwright-report/
 
+# Jest report
+junit.xml
+
 # Created by https://www.gitignore.io/api/python
 # Edit at https://www.gitignore.io/?templates=python
 
