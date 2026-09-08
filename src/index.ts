@@ -709,6 +709,20 @@ const plugin: JupyterFrontEndPlugin<void> = {
       return async () => {
         const path = getCurrentMarkdownPath();
         if (path) {
+          // The server reads the file from disk, so unsaved edits would be
+          // missing from the export - write them first, and before the spinner
+          // exists: the save's own File Changed dialog queues behind any open
+          // dialog. A rejected save is either a cancel the user chose or an
+          // error JupyterLab has already shown, so the export stops silently.
+          const context = (shell.currentWidget as any).context;
+          if (context.model.dirty) {
+            try {
+              await context.save();
+            } catch {
+              return;
+            }
+          }
+
           const dialog = showExportingDialog(format);
 
           try {
