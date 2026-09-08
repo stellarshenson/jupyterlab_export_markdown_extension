@@ -2,6 +2,16 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## [1.6.28] - 2026-09-08
+
+### Changed
+
+- Unsaved editor changes are written to disk before an export runs, so the exported DOCX, PDF or HTML carries what is on screen instead of the last saved version. The save happens before the exporting spinner appears, because its own File Changed dialog would otherwise queue behind that spinner
+- Updated to the JupyterLab extension template v4.6.5: the labextension build, watch and development commands move from `jupyter labextension` to `jupyter-builder`, eslint gains a flat `eslint.config.mjs`, `setup.py` is removed, and a new build step fails the workflow when any server endpoint lacks an authentication decorator
+- Build lifecycle Makefile updated to 1.38, which asserts that a wheel and an sdist exist before the npm push, so a broken build cannot leave npm and PyPI on different versions
+- `jupyter_server` is declared as a runtime dependency again; `routes.py` imports it, and only the extension template's own default had been supplying it
+- `package-lock.json` regenerated. The committed file still described an older `package.json` - eslint 8 and @typescript-eslint 6 - which made `npm install` abort with an ERESOLVE conflict against `@jupyter/eslint-plugin`, and it now matches the declared ranges
+
 ## 1.6.27
 
 ### Fixed
