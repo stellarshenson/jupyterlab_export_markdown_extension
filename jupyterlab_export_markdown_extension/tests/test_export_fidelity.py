@@ -8747,7 +8747,7 @@ class TestTableCellMerging:
             self, jp_fetch, jp_root_dir):
         """Two rowspan groups stacked in one column: the second restart must
         not swallow the first group's SPAN box."""
-        import pdfplumber
+        from pypdf import PdfReader
         doc = ("<table>\n<tr><th>G</th><th>V</th></tr>\n"
                "<tr><td rowspan=\"2\">groupone</td><td>v1</td></tr>\n"
                "<tr><td>v2</td></tr>\n"
@@ -8759,11 +8759,10 @@ class TestTableCellMerging:
             method="POST", body=json.dumps({"path": "stack.md"}),
             raise_error=False)
         assert r.code == 200, f"the export died: {r.body[:300]!r}"
-        with pdfplumber.open(io.BytesIO(r.body)) as pdf:
-            page = pdf.pages[0]
-            text = page.extract_text()
-            for frag in ("groupone", "grouptwo"):
-                assert text.count(frag) == 1, f"{frag} repeats"
+        text = "\n".join(
+            page.extract_text() for page in PdfReader(io.BytesIO(r.body)).pages)
+        for frag in ("groupone", "grouptwo"):
+            assert text.count(frag) == 1, f"{frag} repeats"
 
     async def test_a_staircase_of_rowspans_merges_each_cell_by_identity(
             self, jp_fetch, jp_root_dir):
@@ -8869,7 +8868,7 @@ class TestTableCellMerging:
         """rowspan=3 with a full row in the middle: the undo must also stop
         the chain, or the row BELOW the gap continues the merge from the
         wrong cell and its neighbour's text vanishes from the PDF."""
-        import pdfplumber
+        from pypdf import PdfReader
         import re
         from docx import Document
         from docx.oxml.ns import qn
@@ -8893,17 +8892,17 @@ class TestTableCellMerging:
             method="POST", body=json.dumps({"path": "gap.md"}),
             raise_error=False)
         assert p.code == 200
-        with pdfplumber.open(io.BytesIO(p.body)) as pdf:
-            flat = re.sub(r"\s+", " ", pdf.pages[0].extract_text())
+        flat = re.sub(r"\s+", " ", " ".join(
+            page.extract_text() for page in PdfReader(io.BytesIO(p.body)).pages))
         for frag in ("A", "D", "G"):
             assert flat.count(frag) == 1, f"{frag} was swallowed or repeats"
 
     async def test_the_pdf_draws_each_merged_cell_once(self, jp_fetch, jp_root_dir):
-        import pdfplumber
+        from pypdf import PdfReader
         r = await self._export(jp_fetch, jp_root_dir, "pdf")
         import re
-        with pdfplumber.open(io.BytesIO(r.body)) as pdf:
-            text = pdf.pages[0].extract_text()
+        text = "\n".join(
+            page.extract_text() for page in PdfReader(io.BytesIO(r.body)).pages)
         assert "\u2063" not in text and "TSPAN" not in text, "the marker leaked"
         flat = re.sub(r"\s+", " ", text)
         assert flat.count("spans all three") == 1, "the colspan text repeats or is lost"
