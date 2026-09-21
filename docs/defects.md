@@ -492,6 +492,16 @@
   - related: DEF-MARK-115 - the frame variant whose style read this limits
   - repro: Export <div style="border-style: dashed solid; border-color: red; border-width: 2px">x</div> to DOCX; the frame is single, not mixed
   - log: 2026-08-31T13:21:05Z @kj added
+- [x] `DEF-MARK-117` **colspan and rowspan on a raw HTML table cell are dropped in DOCX and PDF** - MAJOR; htmldocx pads every table to a uniform grid and ignores both attributes, so a full-width colspan description row rendered as one narrow cell beside empty ones and the rows under a rowspan shifted left; the danaeg sizing table's 11 description rows all showed squeezed into the 7 percent ID column
+  - evidence: fixed: colspan/rowspan travel as TSPAN markers, merge_docx_table_spans rebuilds gridSpan/vMerge with padding absorbed and continuation cells inserted, docx_table_spans hands the PDF SPAN boxes with projections blanked, and rows are pre-padded so htmldocx cannot under-size the grid; danaeg table: 11 description rows span 7 content-proportional columns in DOCX and PDF; class TestTableCellMerging, 9 tests, mutation-proved; 384 pytest, galata 5/5; two reading-only rounds architect/bug-hunter/ux, round-2 architect SHIP, ux residue recorded as DEF-MARK-118
+  - repro: Export <table><tr><th>A</th><th>B</th></tr><tr><td colspan="2">wide</td></tr></table> to DOCX; the second row has two cells and no w:gridSpan (03-sizing-poc-models-and-outcomes.md line 87)
+  - log: 2026-09-21T17:34:57Z @kj added
+  - log: 2026-09-21T18:03:46Z @kj closed
+  - log: 2026-09-21T18:06:17Z @kj round-2 bug-hunter: the full-row undo now also stops the merge chain (a continuation below the gap merged the wrong cell and its neighbour vanished from the PDF), test test_a_gap_in_the_rowspan_stops_the_merge_chain, mutation-proved; architect comment fixes applied; ux width residue is DEF-MARK-118
+- [ ] `DEF-MARK-118` **PDF columns have no floor at their longest unbreakable token, so headers break mid-word** - MEDIUM; pdf_table_column_layout normalises measured widths with no minimum at a column's widest token, and reportlab then splits characters: the danaeg sizing PDF renders Requirem/ents in the 7-column header and Develop/ment, Experime/nts, Integrati/on, Validatio/n in the spanless 8-column hours table, which no span change touches - the class predates the merge feature. A longest-token floor trades against the fitted-within-page design the wide-table tests pin, so it needs its own measured change
+  - related: DEF-MARK-117 - the merge fix whose review surfaced this pre-existing class
+  - repro: Export 03-sizing-poc-models-and-outcomes.md to PDF; page 3 header reads Requirem/ents, page 8 breaks four headers of the hours table
+  - log: 2026-09-21T18:03:45Z @kj added
 
 ## Diagram rendering `DIAG`
 

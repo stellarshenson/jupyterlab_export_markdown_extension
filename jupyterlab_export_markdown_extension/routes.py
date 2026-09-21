@@ -2844,6 +2844,148 @@ class ExportHandlerBase(APIHandler):
 
                     break  # Only one marker per run expected
 
+    def merge_docx_table_spans(self, document):
+        """Rebuild colspan/rowspan merges from the TSPAN markers.
+
+        htmldocx writes every table as a uniform grid - a spanning cell lands
+        one column wide and the missing cells are padded onto the row's end -
+        so a full-width description row shows as one narrow cell beside empty
+        ones, and the rows under a rowspan shift left. Each marked cell gets
+        its ``w:gridSpan``/``w:vMerge``, the padding its span absorbs is
+        removed from the row's end, and a continuation cell is inserted under
+        a rowspan so every row keeps full grid coverage - which is what
+        python-docx's cell projection (the PDF pass included) requires.
+        """
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+
+        def own_texts(tc):
+            # w:t whose nearest cell is this one - a nested table's text
+            # belongs to that table's own pass
+            out = []
+            for t in tc.iter(qn('w:t')):
+                anc = t.getparent()
+                while anc is not None and anc.tag != qn('w:tc'):
+                    anc = anc.getparent()
+                if anc is tc:
+                    out.append(t)
+            return out
+
+        def is_blank(tc):
+            return (not any((t.text or '').strip() for t in own_texts(tc))
+                    and tc.find(qn('w:tbl')) is None
+                    and not any(True for _ in tc.iter(qn('w:drawing'))))
+
+        def width_of(tc):
+            tcPr = tc.find(qn('w:tcPr'))
+            g = tcPr.find(qn('w:gridSpan')) if tcPr is not None else None
+            return int(g.get(qn('w:val'))) if g is not None else 1
+
+        def set_pr(tc, tag, val=None):
+            # CT_TcPr is a schema sequence; gridSpan and vMerge belong right
+            # after tcW, before borders and shading
+            tcPr = tc.find(qn('w:tcPr'))
+            if tcPr is None:
+                tcPr = OxmlElement('w:tcPr')
+                tc.insert(0, tcPr)
+            el = OxmlElement(tag)
+            if val is not None:
+                el.set(qn('w:val'), val)
+            # gridSpan precedes vMerge in the sequence, so a cell carrying
+            # both anchors the later insert after the gridSpan already there
+            anchor = tcPr.find(qn('w:gridSpan'))
+            if anchor is None:
+                anchor = tcPr.find(qn('w:tcW'))
+            if anchor is not None:
+                anchor.addnext(el)
+            else:
+                tcPr.insert(0, el)
+
+        for tbl in list(document.element.body.iter(qn('w:tbl'))):
+            trs = [tr for tr in tbl if tr.tag == qn('w:tr')]
+            grid = [[tc for tc in tr if tc.tag == qn('w:tc')] for tr in trs]
+            spans = {}
+            for ri, tcs in enumerate(grid):
+                for ci, tc in enumerate(tcs):
+                    for t in own_texts(tc):
+                        m = self._TSPAN_MARKER_RE.search(t.text or '')
+                        if m:
+                            spans[(ri, ci)] = (
+                                int(m.group(1)), int(m.group(2)), tc)
+                            t.text = self._TSPAN_MARKER_RE.sub('', t.text)
+                            break
+            if not spans:
+                continue
+            ncols = max(len(tcs) for tcs in grid)
+
+            # Columns first: the span widens its cell and absorbs padding
+            # cells from the row's end, so the row keeps full grid coverage
+            for ri, tcs in enumerate(grid):
+                start = 0
+                extra = 0
+                for ci, tc in enumerate(tcs):
+                    entry = spans.get((ri, ci))
+                    cols = min(entry[0], ncols - start) if entry else 1
+                    if entry:
+                        # The clamp is written back even at 1, or the rows
+                        # phase would build continuation cells wider than
+                        # their opener
+                        spans[(ri, ci)] = (cols, entry[1], entry[2])
+                    if cols > 1:
+                        set_pr(tc, 'w:gridSpan', str(cols))
+                        extra += cols - 1
+                    start += cols
+                while extra and tcs and is_blank(tcs[-1]):
+                    trs[ri].remove(tcs.pop())
+                    extra -= 1
+
+            # Then rows: the opener restarts the merge, every covered row
+            # below gets a continuation cell at the same grid column, and
+            # that cell's width absorbs padding the same way
+            for (ri, ci) in sorted(spans):
+                cols, rows, opener = spans[(ri, ci)]
+                rows = min(rows, len(trs) - ri)
+                # The opener is addressed by identity, not by its scan-time
+                # index: an earlier rowspan's continuation cell may have been
+                # inserted before it and shifted the row
+                if rows < 2 or opener not in grid[ri]:
+                    continue
+                set_pr(opener, 'w:vMerge', 'restart')
+                at = grid[ri].index(opener)
+                target = sum(width_of(t) for t in grid[ri][:at])
+                for rr in range(ri + 1, ri + rows):
+                    tcs = grid[rr]
+                    idx, col = len(tcs), 0
+                    for k, tc in enumerate(tcs):
+                        if col >= target:
+                            idx = k
+                            break
+                        col += width_of(tc)
+                    new_tc = OxmlElement('w:tc')
+                    new_tc.append(OxmlElement('w:p'))
+                    if cols > 1:
+                        set_pr(new_tc, 'w:gridSpan', str(cols))
+                    set_pr(new_tc, 'w:vMerge')
+                    if idx < len(tcs):
+                        tcs[idx].addprevious(new_tc)
+                    else:
+                        trs[rr].append(new_tc)
+                    tcs.insert(idx, new_tc)
+                    absorbed = 0
+                    while absorbed < cols and tcs[-1] is not new_tc \
+                            and is_blank(tcs[-1]):
+                        trs[rr].remove(tcs.pop())
+                        absorbed += 1
+                    if sum(width_of(t) for t in tcs) > ncols:
+                        # The author wrote a full row under the rowspan, so
+                        # there is no padding to absorb: drop the merge for
+                        # this row rather than push the grid over its width -
+                        # and stop the chain, because a continuation below
+                        # the gap would merge with the wrong cell
+                        trs[rr].remove(new_tc)
+                        tcs.remove(new_tc)
+                        break
+
     def style_docx_alert_boxes(self, document, show_labels: bool = False) -> list:
         """Replace alert paragraphs with styled single-cell tables.
 
@@ -3013,6 +3155,48 @@ class ExportHandlerBase(APIHandler):
         if not fill or fill == 'auto' or len(fill) != 6:
             return ''
         return fill
+
+    @staticmethod
+    def docx_table_spans(tbl):
+        """(span_boxes, duplicates) of a DOCX table's merged cells.
+
+        ``span_boxes`` are reportlab ``('SPAN', (c0, r0), (c1, r1))`` commands;
+        ``duplicates`` the (col, row) grid positions python-docx projects the
+        merged cell into again - ``row.cells`` repeats a ``gridSpan`` cell per
+        covered column and a ``vMerge`` opener on every continuation row - so
+        the PDF must blank those before measuring or rendering.
+        """
+        from docx.oxml.ns import qn
+        boxes, dups = [], set()
+        vopen = {}  # opening grid column -> [r0, c0, c1, last_row]
+        for ri, tr in enumerate(tbl._tbl.findall(qn('w:tr'))):
+            col = 0
+            for tc in tr.findall(qn('w:tc')):
+                tcPr = tc.find(qn('w:tcPr'))
+                g = tcPr.find(qn('w:gridSpan')) if tcPr is not None else None
+                width = int(g.get(qn('w:val'))) if g is not None else 1
+                v = tcPr.find(qn('w:vMerge')) if tcPr is not None else None
+                vm = (v.get(qn('w:val')) or 'continue') if v is not None else ''
+                c0, c1 = col, col + width - 1
+                dups.update((c, ri) for c in range(c0 + 1, c1 + 1))
+                if vm == 'restart':
+                    # A second merge stacking in the same column closes the
+                    # one above it: flush its box before overwriting
+                    prev = vopen.get(c0)
+                    if prev and (prev[3] > prev[0] or prev[2] > prev[1]):
+                        boxes.append(('SPAN', (prev[1], prev[0]),
+                                      (prev[2], prev[3])))
+                    vopen[c0] = [ri, c0, c1, ri]
+                elif vm == 'continue' and c0 in vopen:
+                    vopen[c0][3] = ri
+                    dups.update((c, ri) for c in range(c0, c1 + 1))
+                elif width > 1:
+                    boxes.append(('SPAN', (c0, ri), (c1, ri)))
+                col += width
+        for r0, c0, c1, r1 in vopen.values():
+            if r1 > r0 or c1 > c0:
+                boxes.append(('SPAN', (c0, r0), (c1, r1)))
+        return boxes, dups
 
     @staticmethod
     def docx_paragraph_runs(paragraph):
@@ -3300,6 +3484,11 @@ class ExportHandlerBase(APIHandler):
     #: frame in that line style.
     _BOX_MARKER_RE = re.compile(
         r'⁣BOX:([0-9A-Fa-f]{6}):([0-9A-Fa-f]{6})(?::(single|dashed|dotted))?⁣')
+
+    #: Column and row span of a table cell, carried from the HTML - htmldocx
+    #: drops colspan/rowspan and pads every row to a uniform grid - to
+    #: merge_docx_table_spans(), which rebuilds the merge in Word terms.
+    _TSPAN_MARKER_RE = re.compile(r'⁣TSPAN:(\d+)x(\d+)⁣')
 
     #: A paragraph belonging to the box opened directly above it. A box is one
     #: table and a ``<div>`` holding blocks is one paragraph per block, so
@@ -4127,6 +4316,39 @@ class ExportHandlerBase(APIHandler):
                         wrapper.append(child.extract())
                     el.append(wrapper)
 
+        # A cell spanning columns or rows: htmldocx drops both attributes, so
+        # the span must travel as text - the only thing htmldocx carries
+        # through - for the DOCX pass to rebuild the merge. htmldocx also
+        # sizes its grid by counting raw cells, so every row is padded with
+        # empty cells to the table's grid width: a first row narrowed by a
+        # colspan would otherwise undersize the grid and the build dies on
+        # the first wider row (IndexError in table.cell)
+        def span_of(cell, attr):
+            try:
+                return max(1, int(cell.get(attr, 1)))
+            except (TypeError, ValueError):
+                return 1
+
+        for tbl_el in soup.find_all('table'):
+            trs = [tr for tr in tbl_el.find_all('tr')
+                   if tr.find_parent('table') is tbl_el]
+            row_cells = [[c for c in tr.find_all(('td', 'th'))
+                          if c.find_parent('table') is tbl_el] for tr in trs]
+            for cells in row_cells:
+                for cell in cells:
+                    cols, rows = span_of(cell, 'colspan'), span_of(cell, 'rowspan')
+                    if cols > 1 or rows > 1:
+                        cell.insert(0, f'⁣TSPAN:{cols}x{rows}⁣')
+            grid = max((sum(span_of(c, 'colspan') for c in cells)
+                        for cells in row_cells), default=0)
+            # Padding tops up the RAW cell count: htmldocx sizes its grid by
+            # counting the first row's cells and indexes every row by cell
+            # position, so each row needs `grid` cells regardless of spans -
+            # the merge pass absorbs the blanks a span covers
+            for tr, cells in zip(trs, row_cells):
+                for _ in range(grid - len(cells)):
+                    tr.append(soup.new_tag('td'))
+
         return str(soup)
 
     # Invisible times marks the first item of each ordered list from
@@ -4576,6 +4798,18 @@ class ExportHandlerBase(APIHandler):
         grid = [list(row.cells) for row in table.rows]
         table_data = [[cell.text for cell in row] for row in grid]
 
+        # A merged cell is projected into every column it covers, which would
+        # hand its text to all of them and equalise the fit. Blank the
+        # projections, and take a horizontal span's text out of its origin
+        # column too - it belongs to no single column
+        span_boxes, span_dups = self.docx_table_spans(table)
+        for c, r in span_dups:
+            if r < len(table_data) and c < len(table_data[r]):
+                table_data[r][c] = ''
+        for _, (c0, r0), (c1, _r1) in span_boxes:
+            if c1 > c0 and r0 < len(table_data) and c0 < len(table_data[r0]):
+                table_data[r0][c0] = ''
+
         def image_twips(cell):
             """Width the widest inline image in a cell asks for, 0 if none.
 
@@ -4604,9 +4838,22 @@ class ExportHandlerBase(APIHandler):
 
         for col, width in zip(table.columns, widths):
             col.width = Twips(int(width))
-        for row in grid:
-            for index, cell in enumerate(row[:ncols]):
-                cell.width = Twips(int(widths[index]))
+        # Cell widths by grid position: a gridSpan cell takes the sum of the
+        # columns it covers, where the per-projection write would leave it one
+        # column's width
+        from docx.table import _Cell
+        for tr in table._tbl.findall(qn('w:tr')):
+            at = 0
+            for tc in tr.findall(qn('w:tc')):
+                tcPr = tc.find(qn('w:tcPr'))
+                g = tcPr.find(qn('w:gridSpan')) if tcPr is not None else None
+                span = int(g.get(qn('w:val'))) if g is not None else 1
+                if at < ncols:
+                    # Sum of the written gridCol integers, so the cell and
+                    # the grid agree to the twip
+                    _Cell(tc, table).width = Twips(
+                        sum(int(w) for w in widths[at:at + span]))
+                at += span
 
         # autofit=False writes w:tblLayout type="fixed" in its schema-mandated
         # position; appending the element by hand puts it out of sequence.
@@ -5762,6 +6009,30 @@ class ExportHandlerBase(APIHandler):
                 rows = rows[1:]
                 dropped_empty_header = True
 
+            # Merged cells: python-docx projects a merged cell into every
+            # grid position it covers, so the span's text would render - and
+            # measure - once per column and row. Blank the projections and
+            # carry the merge to reportlab as SPAN boxes instead
+            span_boxes, span_dups = self.docx_table_spans(tbl)
+            if dropped_empty_header:
+                span_boxes = [('SPAN', (c0, max(0, r0 - 1)), (c1, r1 - 1))
+                              for _, (c0, r0), (c1, r1) in span_boxes
+                              if r1 >= 1]
+                span_dups = {(c, r - 1) for c, r in span_dups if r >= 1}
+            for c, r in span_dups:
+                if r < len(table_data) and c < len(table_data[r]):
+                    table_data[r][c] = ''
+            # Measurement copy: a horizontal span's text belongs to no single
+            # column, so it must not charge its origin column's width. The
+            # origin must stay in table_data itself, which has_header below
+            # reads - blanked in place, a table headed by a colspan cell
+            # would lose its header
+            measure_data = [list(r) for r in table_data]
+            for _, (c0, r0), (c1, _r1) in span_boxes:
+                if c1 > c0 and r0 < len(measure_data) \
+                        and c0 < len(measure_data[r0]):
+                    measure_data[r0][c0] = ''
+
             # A Markdown layout grid carries an empty header row (`|  |  |  |`);
             # it must not be styled or repeated as a header, or a blank blue bar
             # detaches from its rows across a page break. Row 0 is a real header
@@ -5807,7 +6078,7 @@ class ExportHandlerBase(APIHandler):
                         image_widths[c] = max(image_widths[c], widest)
 
             side_padding, col_widths = self.pdf_table_column_layout(
-                table_data, frame_width, string_width, image_widths)
+                measure_data, frame_width, string_width, image_widths)
 
             # A cell adds 4pt top + 4pt bottom padding around its content, and
             # the header row overrides its bottom padding to 8pt (12pt total).
@@ -5849,6 +6120,7 @@ class ExportHandlerBase(APIHandler):
                 style = (table_header_style if (r == 0 and has_header)
                          else table_cell_style)
                 wrapped.append([
+                    '' if (c, r) in span_dups else
                     cell_content(cell,
                                  col_widths[c] if c < len(col_widths) else frame_width,
                                  style)
@@ -5871,6 +6143,7 @@ class ExportHandlerBase(APIHandler):
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
             ]
+            style.extend(span_boxes)
             if has_header:
                 style.append(
                     ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#dbe5f1')))
@@ -6153,6 +6426,11 @@ class ExportPdfHandler(ExportHandlerBase):
                 # Style GitHub alert boxes with colored borders and shading
                 self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
 
+                # Rebuild colspan/rowspan merges: the PDF rebuild reads the
+                # gridSpan/vMerge off this intermediate, and the marker must
+                # not reach the text it renders
+                self.merge_docx_table_spans(document)
+
                 # No table styling or fitting here: this DOCX is only an
                 # intermediate for convert_docx_to_pdf, which reads cell text
                 # and applies its own style and column widths
@@ -6314,6 +6592,11 @@ class ExportDocxHandler(ExportHandlerBase):
                 # Style GitHub alert boxes with colored borders and shading
                 alert_tables = self.style_docx_alert_boxes(
                     document, show_labels=show_alert_labels)
+
+                # Rebuild colspan/rowspan merges before the table passes
+                # measure the grid, and before the symbol pass can split a
+                # run the marker sits in
+                self.merge_docx_table_spans(document)
 
                 # Name a font on every glyph the body face cannot draw. After
                 # the marker passes above, which read a sentinel out of a run's

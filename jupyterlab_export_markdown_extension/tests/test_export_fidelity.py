@@ -8668,6 +8668,248 @@ class TestCalloutBoxContents:
         )
 
 
+class TestTableCellMerging:
+    """DEF-MARK-117: colspan/rowspan on a raw HTML table cell were dropped -
+    htmldocx pads every row to a uniform grid - so a full-width description
+    row rendered as one narrow cell beside empty ones, and rows under a
+    rowspan shifted left."""
+
+    DOC = (
+        "<table>\n<tr><th>A</th><th>B</th><th>C</th></tr>\n"
+        "<tr><td colspan=\"3\">spans all three</td></tr>\n"
+        "<tr><td rowspan=\"2\">tall</td><td>b2</td><td>c2</td></tr>\n"
+        "<tr><td>b3</td><td>c3</td></tr>\n</table>\n"
+    )
+
+    async def _export(self, jp_fetch, jp_root_dir, fmt):
+        (jp_root_dir / "merge.md").write_text(self.DOC, encoding="utf-8")
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension", f"export/{fmt}",
+            method="POST", body=json.dumps({"path": "merge.md"}),
+            raise_error=False)
+        assert response.code == 200, f"the export died: {response.body[:300]!r}"
+        return response
+
+    async def test_a_colspan_cell_spans_the_docx_row(self, jp_fetch, jp_root_dir):
+        from docx import Document
+        from docx.oxml.ns import qn
+        r = await self._export(jp_fetch, jp_root_dir, "docx")
+        d = Document(io.BytesIO(r.body))
+        row = d.tables[0].rows[1]._tr
+        tcs = row.findall(qn("w:tc"))
+        assert len(tcs) == 1, "the padding cells were not absorbed"
+        span = tcs[0].find(qn("w:tcPr")).find(qn("w:gridSpan"))
+        assert span is not None and span.get(qn("w:val")) == "3"
+        assert "TSPAN" not in d.element.body.xml, "the marker leaked"
+
+    async def test_a_rowspan_cell_merges_down_and_keeps_columns(
+            self, jp_fetch, jp_root_dir):
+        from docx import Document
+        from docx.oxml.ns import qn
+        r = await self._export(jp_fetch, jp_root_dir, "docx")
+        d = Document(io.BytesIO(r.body))
+        t = d.tables[0]
+        opener = t.rows[2]._tr.findall(qn("w:tc"))[0]
+        vm = opener.find(qn("w:tcPr")).find(qn("w:vMerge"))
+        assert vm is not None and vm.get(qn("w:val")) == "restart"
+        cont_row = t.rows[3]._tr.findall(qn("w:tc"))
+        assert len(cont_row) == 3, "the continuation row lost grid coverage"
+        vm2 = cont_row[0].find(qn("w:tcPr")).find(qn("w:vMerge"))
+        assert vm2 is not None, "no continuation cell under the rowspan"
+        assert [c.text for c in t.rows[3].cells] == ["tall", "b3", "c3"], (
+            "the cells under the rowspan sit in the wrong columns")
+
+    async def test_a_cell_spanning_both_ways_orders_its_properties(
+            self, jp_fetch, jp_root_dir):
+        """A corner cell carrying colspan AND rowspan: CT_TcPr is a schema
+        sequence, so gridSpan must precede vMerge or Word rejects the file."""
+        from docx import Document
+        from docx.oxml.ns import qn
+        doc = ("<table>\n<tr><td colspan=\"2\" rowspan=\"2\">corner</td>"
+               "<td>c</td></tr>\n<tr><td>c2</td></tr>\n"
+               "<tr><td>x</td><td>y</td><td>z</td></tr>\n</table>\n")
+        (jp_root_dir / "corner.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "corner.md"}),
+            raise_error=False)
+        assert r.code == 200, f"the export died: {r.body[:300]!r}"
+        d = Document(io.BytesIO(r.body))
+        for row in (0, 1):
+            tc = d.tables[0].rows[row]._tr.findall(qn("w:tc"))[0]
+            tags = [el.tag.rsplit("}", 1)[1] for el in tc.find(qn("w:tcPr"))]
+            assert "gridSpan" in tags and "vMerge" in tags, f"row {row}: {tags}"
+            assert tags.index("gridSpan") < tags.index("vMerge"), (
+                f"row {row} breaks the tcPr sequence: {tags}")
+        assert [c.text for c in d.tables[0].rows[2].cells] == ["x", "y", "z"]
+
+    async def test_stacked_rowspans_each_merge_in_the_pdf(
+            self, jp_fetch, jp_root_dir):
+        """Two rowspan groups stacked in one column: the second restart must
+        not swallow the first group's SPAN box."""
+        import pdfplumber
+        doc = ("<table>\n<tr><th>G</th><th>V</th></tr>\n"
+               "<tr><td rowspan=\"2\">groupone</td><td>v1</td></tr>\n"
+               "<tr><td>v2</td></tr>\n"
+               "<tr><td rowspan=\"2\">grouptwo</td><td>v3</td></tr>\n"
+               "<tr><td>v4</td></tr>\n</table>\n")
+        (jp_root_dir / "stack.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "stack.md"}),
+            raise_error=False)
+        assert r.code == 200, f"the export died: {r.body[:300]!r}"
+        with pdfplumber.open(io.BytesIO(r.body)) as pdf:
+            page = pdf.pages[0]
+            text = page.extract_text()
+            for frag in ("groupone", "grouptwo"):
+                assert text.count(frag) == 1, f"{frag} repeats"
+
+    async def test_a_staircase_of_rowspans_merges_each_cell_by_identity(
+            self, jp_fetch, jp_root_dir):
+        """A rowspan opener in a row already shifted by an earlier rowspan's
+        continuation cell: addressed by its scan-time index it would merge the
+        wrong cell and displace the rows below."""
+        from docx import Document
+        doc = ("<table>\n<tr><td rowspan=\"2\">A</td><td>b1</td></tr>\n"
+               "<tr><td rowspan=\"2\">x</td></tr>\n"
+               "<tr><td>y</td></tr>\n</table>\n")
+        (jp_root_dir / "stair.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "stair.md"}),
+            raise_error=False)
+        assert r.code == 200, f"the export died: {r.body[:300]!r}"
+        t = Document(io.BytesIO(r.body)).tables[0]
+        assert [c.text for c in t.rows[1].cells] == ["A", "x"], (
+            "the second opener merged the wrong cell")
+        assert [c.text for c in t.rows[2].cells] == ["y", "x"], (
+            "the row under the staircase lost its columns")
+
+    async def test_a_span_past_the_written_cells_keeps_rows_uniform(
+            self, jp_fetch, jp_root_dir):
+        """A colspan wider than the cells beside it widens the grid - the
+        browser model - and every row, the rowspan continuation included,
+        covers the same width."""
+        from docx import Document
+        from docx.oxml.ns import qn
+        doc = ("<table>\n<tr><td>a</td>"
+               "<td colspan=\"2\" rowspan=\"2\">big</td></tr>\n"
+               "<tr><td>x</td></tr>\n</table>\n")
+        (jp_root_dir / "clamp.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "clamp.md"}),
+            raise_error=False)
+        assert r.code == 200, f"the export died: {r.body[:300]!r}"
+        t = Document(io.BytesIO(r.body)).tables[0]
+        widths = []
+        for row in t.rows:
+            widths.append(sum(
+                int(tc.find(qn("w:tcPr")).find(qn("w:gridSpan")).get(qn("w:val")))
+                if tc.find(qn("w:tcPr")) is not None
+                and tc.find(qn("w:tcPr")).find(qn("w:gridSpan")) is not None
+                else 1
+                for tc in row._tr.findall(qn("w:tc"))))
+        assert widths[0] == widths[1] == 3, f"rows cover {widths} columns"
+        assert [c.text for c in t.rows[1].cells][:2] == ["x", "big"]
+
+    def test_an_unpadded_overwide_span_is_clamped_by_the_merge_pass(self):
+        """Defence in the pass itself: a marker whose colspan exceeds the
+        grid - a table the pre-pass never padded - is clamped, and the
+        clamped width also governs the continuation cell, so no row can
+        exceed the grid."""
+        from docx import Document
+        from docx.oxml.ns import qn
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+        d = Document()
+        t = d.add_table(2, 2)
+        t.cell(0, 0).paragraphs[0].add_run("a")
+        t.cell(0, 1).paragraphs[0].add_run("\u2063TSPAN:2x2\u2063big")
+        t.cell(1, 0).paragraphs[0].add_run("x")
+        h = ExportHandlerBase.__new__(ExportHandlerBase)
+        h.merge_docx_table_spans(d)
+        for row in t.rows:
+            width = sum(
+                int(tc.find(qn("w:tcPr")).find(qn("w:gridSpan")).get(qn("w:val")))
+                if tc.find(qn("w:tcPr")) is not None
+                and tc.find(qn("w:tcPr")).find(qn("w:gridSpan")) is not None
+                else 1
+                for tc in row._tr.findall(qn("w:tc")))
+            assert width == 2, f"a row covers {width} columns in a 2-column grid"
+        assert [c.text for c in t.rows[1].cells] == ["x", "big"]
+
+    async def test_a_full_row_under_a_rowspan_keeps_its_cells(
+            self, jp_fetch, jp_root_dir):
+        """The author wrote every cell of the covered row anyway: with no
+        padding to absorb, the merge for that row is dropped rather than the
+        grid pushed over its width."""
+        from docx import Document
+        from docx.oxml.ns import qn
+        doc = ("<table>\n<tr><td rowspan=\"2\">A</td><td>b</td><td>c</td></tr>\n"
+               "<tr><td>x</td><td>y</td><td>z</td></tr>\n</table>\n")
+        (jp_root_dir / "fullrow.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "fullrow.md"}),
+            raise_error=False)
+        assert r.code == 200, f"the export died: {r.body[:300]!r}"
+        t = Document(io.BytesIO(r.body)).tables[0]
+        row1 = t.rows[1]._tr.findall(qn("w:tc"))
+        assert len(row1) == 3, "the covered row was pushed over the grid width"
+        assert [c.text for c in t.rows[1].cells] == ["x", "y", "z"]
+        p = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "fullrow.md"}),
+            raise_error=False)
+        assert p.code == 200, "the PDF export died on the dropped merge"
+
+    async def test_a_gap_in_the_rowspan_stops_the_merge_chain(
+            self, jp_fetch, jp_root_dir):
+        """rowspan=3 with a full row in the middle: the undo must also stop
+        the chain, or the row BELOW the gap continues the merge from the
+        wrong cell and its neighbour's text vanishes from the PDF."""
+        import pdfplumber
+        import re
+        from docx import Document
+        from docx.oxml.ns import qn
+        doc = ("<table>\n<tr><td rowspan=\"3\">A</td><td>B</td><td>C</td></tr>\n"
+               "<tr><td>D</td><td>E</td><td>F</td></tr>\n"
+               "<tr><td>G</td><td>H</td></tr>\n</table>\n")
+        (jp_root_dir / "gap.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/docx",
+            method="POST", body=json.dumps({"path": "gap.md"}),
+            raise_error=False)
+        assert r.code == 200, f"the export died: {r.body[:300]!r}"
+        t = Document(io.BytesIO(r.body)).tables[0]
+        for row in (1, 2):
+            first = t.rows[row]._tr.findall(qn("w:tc"))[0]
+            tcPr = first.find(qn("w:tcPr"))
+            vm = tcPr.find(qn("w:vMerge")) if tcPr is not None else None
+            assert vm is None, f"row {row} continues a merge across the gap"
+        p = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "gap.md"}),
+            raise_error=False)
+        assert p.code == 200
+        with pdfplumber.open(io.BytesIO(p.body)) as pdf:
+            flat = re.sub(r"\s+", " ", pdf.pages[0].extract_text())
+        for frag in ("A", "D", "G"):
+            assert flat.count(frag) == 1, f"{frag} was swallowed or repeats"
+
+    async def test_the_pdf_draws_each_merged_cell_once(self, jp_fetch, jp_root_dir):
+        import pdfplumber
+        r = await self._export(jp_fetch, jp_root_dir, "pdf")
+        import re
+        with pdfplumber.open(io.BytesIO(r.body)) as pdf:
+            text = pdf.pages[0].extract_text()
+        assert "\u2063" not in text and "TSPAN" not in text, "the marker leaked"
+        flat = re.sub(r"\s+", " ", text)
+        assert flat.count("spans all three") == 1, "the colspan text repeats or is lost"
+        assert flat.count("tall") == 1, "the rowspan text repeats or is lost"
+
+
 class TestCalloutFrame:
     """DEF-MARK-115: a div whose four edges all draw in one colour is a frame
     the author drew, not a neutral frame with an accent. It collapsed into the
