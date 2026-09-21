@@ -2,6 +2,13 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## [1.6.29] - 2026-09-21
+
+### Fixed
+
+- `colspan` and `rowspan` on a raw HTML table cell merge in DOCX and PDF: a full-width description row spans every column instead of rendering as one narrow cell beside empty ones, rows under a rowspan keep their columns, and merged text renders once with the column widths still content-proportional
+- A table whose first row is narrowed by a `colspan` no longer kills the export with an internal error
+
 ## [1.6.28] - 2026-09-08
 
 ### Changed
