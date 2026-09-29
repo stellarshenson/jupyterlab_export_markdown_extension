@@ -9,6 +9,8 @@ import base64
 import io
 import json
 import signal
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -357,3 +359,12 @@ class TestHelp:
             main(argv)
         assert exit_info.value.code == 0
         assert "examples:" in capsys.readouterr().out
+
+
+def test_the_installed_skill_is_the_repository_copy():
+    """pyproject.toml maps the agent skill into the wheel as shared-data; this
+    fails when the mapping is lost or the environment holds an older wheel."""
+    skill = Path("skills/jupyterlab-export-markdown-extension/SKILL.md")
+    repository = Path(__file__).parents[2] / ".agents" / skill
+    installed = Path(sys.prefix) / "share/jupyter/agents" / skill
+    assert installed.read_text(encoding="utf-8") == repository.read_text(encoding="utf-8")

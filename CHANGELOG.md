@@ -2,6 +2,12 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## [1.6.31] - 2026-09-29
+
+### Changed
+
+- `pip install` now installs the agent skill at `<sys.prefix>/share/jupyter/agents/skills/jupyterlab-export-markdown-extension`; the README gives the line that links it from there, next to the line for a clone
+
 ## [1.6.30] - 2026-09-29
 
 ### Added

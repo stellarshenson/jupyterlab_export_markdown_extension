@@ -83,7 +83,13 @@ jupyterlab-export-markdown-extension install   # download Chromium and its syste
 - `--theme`, `--font-size` and `--alert-labels` set what the settings below set in the UI
 - `jupyterlab-export-markdown-extension --help` lists the commands, the exit codes and examples; `<command> --help` documents that command's flags and output
 
-An agent skill for AI coding assistants is in [.agents/skills/jupyterlab-export-markdown-extension](.agents/skills/jupyterlab-export-markdown-extension/SKILL.md). It is not part of the installed package; link it into Claude Code from a clone:
+An agent skill for AI coding assistants is in [.agents/skills/jupyterlab-export-markdown-extension](.agents/skills/jupyterlab-export-markdown-extension/SKILL.md). `pip install` also copies it to `<sys.prefix>/share/jupyter/agents/skills/jupyterlab-export-markdown-extension`, a folder no agent reads. Link it from there, with the Python that runs JupyterLab:
+
+```bash
+mkdir -p ~/.agents/skills && ln -s "$(python -c 'import sys; print(sys.prefix)')/share/jupyter/agents/skills/jupyterlab-export-markdown-extension" ~/.agents/skills/jupyterlab-export-markdown-extension
+```
+
+From a clone, link it into Claude Code:
 
 ```bash
 ln -s "$PWD/.agents/skills/jupyterlab-export-markdown-extension" ~/.claude/skills/jupyterlab-export-markdown-extension

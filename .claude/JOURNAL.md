@@ -227,3 +227,6 @@ This journal tracks substantive work on documents, diagrams, and documentation c
 
 104. **Task [Short] - Release 1.6.30** (v1.6.30): released the convert CLI from entry 103<br>
      **Result**: `make publish` bumps 1.6.29 to 1.6.30 on npm and PyPI. Content: `convert` exports PDF, DOCX and HTML without JupyterLab, the agent skill ships in the repository, refused images stay out of DOCX and PDF, and every image not embedded is reported.
+
+105. **Task - Agent skill in the wheel** (v1.6.31): the agent skill now installs with the package, not only in a clone<br>
+     **Result**: The jupyterlab-extension skill gained the rule "In the wheel"; the 1.6.30 wheel left the skill in the repository only, so a pip-installed lab gave an agent nothing to link. `pyproject.toml` `[tool.hatch.build.targets.wheel.shared-data]` maps `.agents/skills/jupyterlab-export-markdown-extension` to `share/jupyter/agents/skills/jupyterlab-export-markdown-extension` - outside the Python package, where the check-links CI job would import it. No agent reads that folder, so README gains the `sys.prefix` link line beside the clone line. New pytest `test_the_installed_skill_is_the_repository_copy` compares installed and repository copies; it failed on the 1.6.30 install with `FileNotFoundError`. Scratch build: sdist and the wheel built from it both carry `SKILL.md`. ACC-CLI-127 added.

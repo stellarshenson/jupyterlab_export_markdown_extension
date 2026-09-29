@@ -625,3 +625,9 @@ jupyterlab-export-markdown-extension convert exports a file through the extensio
   - test-tags: UNIT
   - log: 2026-09-29T13:48:12Z @kj added
   - log: 2026-09-29T13:53:03Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-127` **Skill installed with the wheel** - MEDIUM; pip install puts the agent skill at <sys.prefix>/share/jupyter/agents/skills/jupyterlab-export-markdown-extension/SKILL.md, identical to the repository copy; README carries the link line for that folder and the one for a clone
+  - evidence: 1.6.31 wheel carries .data/data/share/jupyter/agents/skills/jupyterlab-export-markdown-extension/SKILL.md; test_the_installed_skill_is_the_repository_copy failed on 1.6.30 install (FileNotFoundError), passes on 1.6.31; 414 pytest passed
+  - test: pytest test_the_installed_skill_is_the_repository_copy after installing the wheel
+  - test-tags: UNIT
+  - log: 2026-09-29T20:04:00Z @kj added
+  - log: 2026-09-29T20:10:44Z @kj closed
