@@ -2,6 +2,20 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## [1.6.30] - 2026-09-29
+
+### Added
+
+- `jupyterlab-export-markdown-extension convert FILE --to pdf docx html` exports a Markdown file through the extension's own export endpoints, served by a private Jupyter server inside the command, so no JupyterLab needs to run. `--root` sets the folder images are read from, `--theme`, `--font-size` and `--alert-labels` set what the settings set in the UI, and each written path is printed on stdout
+- An agent skill for AI coding assistants in `.agents/skills/jupyterlab-export-markdown-extension`, pointing at the command's `--help`
+- The `X-Export-Warnings` header reports an image that was not embedded - missing, outside the server root, or a failed download - under the code `image-not-embedded`
+
+### Fixed
+
+- DOCX and PDF no longer contain an image the export refused: a path outside the server root, a same-named file from the server's working directory, or a download from a private address. Such an image is now a text placeholder
+- Image syntax inside a code sample or an HTML comment is exported as written instead of being replaced by the image data
+- An export that fails on an error with no message now names the error type instead of an empty reason
+
 ## [1.6.29] - 2026-09-21
 
 ### Fixed
