@@ -1,4 +1,7 @@
 import { expect, test } from '@jupyterlab/galata';
+import { labFixtures } from './helpers';
+
+test.use(labFixtures as any);
 
 /**
  * Don't load JupyterLab webpage before running the tests.

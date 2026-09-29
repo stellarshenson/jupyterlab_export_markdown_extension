@@ -1,6 +1,9 @@
 import { expect, test } from '@jupyterlab/galata';
 import AdmZip from 'adm-zip';
 import { readFileSync } from 'fs';
+import { labFixtures } from './helpers';
+
+test.use(labFixtures as any);
 
 /**
  * Drives a real Word export through the real UI: a markdown file in the
