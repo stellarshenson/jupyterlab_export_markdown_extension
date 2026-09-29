@@ -8954,6 +8954,24 @@ class TestCalloutFrame:
         assert left.get(qn("w:color")) == "0969DA"
         assert borders.find(qn("w:top")).get(qn("w:val")) == "none"
 
+    async def test_box_borders_follow_the_schema_order(self, jp_fetch, jp_root_dir):
+        """DEF-DIAG-33: CT_TblBorders is a sequence - top, left, bottom, right,
+        insideH, insideV - and wml.xsd rejects any other order. Word tolerated
+        `w:left` after `w:insideV`; a validating reader does not."""
+        from docx.oxml.ns import qn
+        document = await self._docx(jp_fetch, jp_root_dir, (
+            "> [!NOTE]\n> An alert box.\n\n"
+            '<div style="border: 2px dashed #9ca3af;">A frame.</div>\n\n'
+            '<div style="border: 1px solid #ddd; border-left: 4px solid #0969da;">'
+            "An accent.</div>\n"))
+        schema = ["top", "left", "bottom", "right", "insideH", "insideV"]
+        assert len(document.tables) == 3
+        for table in document.tables:
+            borders = table._tbl.find(qn("w:tblPr")).find(qn("w:tblBorders"))
+            order = [child.tag.split("}")[1] for child in borders]
+            assert order == [s for s in schema if s in order], (
+                f"w:tblBorders children out of schema order: {order}")
+
     def test_a_mixed_style_border_stays_on_the_accent_path(self):
         """Uniformity asks for one colour AND one line style; a border whose
         left edge draws a different style than the frame keeps the pre-frame
