@@ -505,9 +505,9 @@
   - related: DEF-MARK-117 - the merge fix whose review surfaced this pre-existing class
   - repro: Export 03-sizing-poc-models-and-outcomes.md to PDF; page 3 header reads Requirem/ents, page 8 breaks four headers of the hours table
   - log: 2026-09-21T18:03:45Z @kj added
-- [x] `DEF-MARK-120` **image syntax inside a code sample is rewritten to base64** - MEDIUM; a fenced or inline code sample showing ![logo](logo.png) exports with a data URI in place of the path when logo.png exists
+- [x] `DEF-MARK-120` **image syntax inside a code sample is rewritten to base64** - MEDIUM; a fenced or inline code sample showing `![logo](logo.png)` exports with a data URI in place of the path when logo.png exists
   - evidence: test_image_syntax_inside_code_is_left_as_written passes and fails without the _outside split; pytest 413 green
-  - repro: export a code block holding ![logo](logo.png) beside an existing logo.png; the block shows data:image/png;base64
+  - repro: export a code block holding `![logo](logo.png)` beside an existing logo.png; the block shows data:image/png;base64
   - test-tags: FUNCTIONAL
   - root-cause: 2026-09-29T13:47:52Z @kj embed_images_as_base64 runs its image regexes over the whole document, code samples and comments included
   - log: 2026-09-29T13:47:52Z @kj added
@@ -616,7 +616,7 @@
   - log: 2026-09-29T13:00:20Z @kj still reproduces 2026-09-29: a ~~~ block holding 'a $x$ b' exports as 'a b' plus one m:oMath in DOCX
 - [x] `DEF-DIAG-119` **DOCX and PDF load images the export refused** - MAJOR; an image the embed pass refused still reaches the DOCX and the PDF: a missing sub/chart.png came out as the root's chart.png, a path outside the root was embedded, and a private-host URL was fetched
   - evidence: test_a_refused_image_stays_out_of_docx and test_a_refused_download_is_not_fetched_for_docx pass (private host served 0 requests) and fail with the call removed; pytest 413 green
-  - repro: root/sub/doc.md holds ![c](chart.png), only root/chart.png exists; export DOCX with the server started in root
+  - repro: root/sub/doc.md holds `![c](chart.png)`, only root/chart.png exists; export DOCX with the server started in root
   - test-tags: FUNCTIONAL
   - root-cause: 2026-09-29T13:47:52Z @kj htmldocx loads every non-data <img> src itself: add_picture(path) from the working directory, fetch_image(url) with a plain urlopen, so the root boundary and the SSRF guard of embed_images_as_base64 do not apply
   - log: 2026-09-29T13:47:52Z @kj added
