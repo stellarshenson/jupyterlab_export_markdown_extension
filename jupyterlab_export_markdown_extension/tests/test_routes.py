@@ -115,3 +115,37 @@ def test_attachment_filename_cannot_inject_header():
     value.encode("latin-1")
     assert 'filename="ev_il_x.docx"' in value
     assert value.count('"') == 2
+
+
+async def test_an_image_left_out_is_reported(jp_fetch, jp_root_dir):
+    """A local image that is missing or outside the server root is left as
+    written, and the one channel that can say so is `X-Export-Warnings`."""
+    (jp_root_dir / "sub").mkdir()
+    (jp_root_dir / "sub" / "doc.md").write_text(
+        "# Doc\n\n" + "".join(f"![m](missing-{i}.png)\n" for i in range(4))
+        + "![o](../../outside.png)\n",
+        encoding="utf-8",
+    )
+    response = await jp_fetch(
+        "jupyterlab-export-markdown-extension", "export/html",
+        method="POST", body=json.dumps({"path": "sub/doc.md"}), raise_error=False,
+    )
+    assert response.code == 200
+    [warning] = json.loads(response.headers["X-Export-Warnings"])
+    assert warning["code"] == "image-not-embedded"
+    assert warning["count"] == 5
+    assert warning["images"] == ["missing-0.png", "missing-1.png", "missing-2.png"]
+    assert "not embedded" in warning["message"]
+
+
+async def test_an_embedded_image_raises_no_warning(jp_fetch, jp_root_dir):
+    import base64
+    (jp_root_dir / "pix.png").write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
+    (jp_root_dir / "ok.md").write_text("# Ok\n\n![p](pix.png)\n", encoding="utf-8")
+    response = await jp_fetch(
+        "jupyterlab-export-markdown-extension", "export/docx",
+        method="POST", body=json.dumps({"path": "ok.md"}), raise_error=False,
+    )
+    assert response.code == 200
+    assert "X-Export-Warnings" not in response.headers

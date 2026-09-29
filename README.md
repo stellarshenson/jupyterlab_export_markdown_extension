@@ -33,6 +33,7 @@ Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No extern
 - **Export Spinner** - Modal dialog shows progress during export operations
 - **File Menu Integration** - "Export Markdown As" submenu appears when markdown is active
 - **Command Palette** - All export commands available via Ctrl+Shift+C
+- **Command Line** - `jupyterlab-export-markdown-extension convert` exports a file to PDF, DOCX and HTML without JupyterLab running
 - **Settings** - Configure export font size, SVG export width, math export width, themes, and alert label visibility via Settings Editor
 - **Pure Python** - No pandoc, no LaTeX, no system dependencies
 
@@ -50,7 +51,7 @@ sudo apt-get install libcairo2 libpango-1.0-0 libpangoft2-1.0-0 fonts-noto-color
 
 Mermaid diagrams are rendered client-side using JupyterLab's built-in Mermaid support - no additional installation required. An export driven through the REST endpoints instead of the UI has no browser to render them, so the server renders those diagrams itself with a bundled copy of Mermaid, in the same Playwright Chromium the SVG rasterizer uses - no network access involved.
 
-A diagram that cannot be rendered never fails the export: its source is kept and the response carries an `X-Export-Warnings` header describing what happened, as a JSON array of `{code, count, diagrams, message}`. `code` is one of `chromium-unavailable`, `bundle-missing`, `syntax-error`, `layout-unsupported`, `render-timeout`, `skipped`, `budget-exhausted`, `rasterize-failed` or `render-failed`; `count` is how many diagrams the warning covers, `diagrams` a bounded prefix of their positions in the document, and `message` the remedy in full - a caller needs nothing beyond the header. It is absent when everything rendered, and is listed in `Access-Control-Expose-Headers` so a cross-origin caller can read it.
+A diagram that cannot be rendered never fails the export: its source is kept and the response carries an `X-Export-Warnings` header describing what happened, as a JSON array of `{code, count, diagrams, message}`. `code` is one of `chromium-unavailable`, `bundle-missing`, `syntax-error`, `layout-unsupported`, `render-timeout`, `skipped`, `budget-exhausted`, `rasterize-failed` or `render-failed`; `count` is how many diagrams the warning covers, `diagrams` a bounded prefix of their zero-based positions in the document, and `message` the remedy in full - a caller needs nothing beyond the header. An image that is not embedded - its file does not exist or is outside the server root, or its download failed - is reported under the code `image-not-embedded`, with `images`, the first 3 of its paths as written, in place of `diagrams`; HTML keeps such an image's path, DOCX and PDF show a text placeholder. The header is absent when every diagram rendered and every image was embedded, and is listed in `Access-Control-Expose-Headers` so a cross-origin caller can read it.
 
 ## Install
 
@@ -65,6 +66,28 @@ That's it. No really, that's actually it. We spent considerable effort making su
 1. Open a markdown file in JupyterLab
 2. Use **File -> Export Markdown As** submenu, or
 3. Open command palette (Ctrl+Shift+C) and search "Export Markdown"
+
+## Command Line
+
+The package installs `jupyterlab-export-markdown-extension`, which converts a file without JupyterLab running. `convert` starts a private Jupyter server inside the command and calls the same export endpoints as the menu, so the result matches a UI export made with default settings; the one difference is that Mermaid diagrams render in the server's bundled Mermaid instead of the browser's.
+
+```bash
+jupyterlab-export-markdown-extension convert report.md --to pdf docx html
+jupyterlab-export-markdown-extension check     # test that Chromium launches
+jupyterlab-export-markdown-extension install   # download Chromium and its system libraries
+```
+
+- Each document is written beside the source, or to `-o PATH` when there is one format; an existing file is overwritten
+- Images are read only from inside `--root` (default: the current directory) - pass a folder that holds the file and every image it links to, such as the repository root; an image that is not embedded is named in a warning on stderr
+- Your own Jupyter configuration is not read, so a contents root or log level set there does not change the export
+- `--theme`, `--font-size` and `--alert-labels` set what the settings below set in the UI
+- `jupyterlab-export-markdown-extension --help` lists the commands, the exit codes and examples; `<command> --help` documents that command's flags and output
+
+An agent skill for AI coding assistants is in [.agents/skills/jupyterlab-export-markdown-extension](.agents/skills/jupyterlab-export-markdown-extension/SKILL.md). It is not part of the installed package; link it into Claude Code from a clone:
+
+```bash
+ln -s "$PWD/.agents/skills/jupyterlab-export-markdown-extension" ~/.claude/skills/jupyterlab-export-markdown-extension
+```
 
 ## Export Formats
 

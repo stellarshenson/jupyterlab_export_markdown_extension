@@ -59,6 +59,7 @@
 - [ ] `DEF-MARK-14` **block structure inside a GitHub alert is flattened** - MAJOR; a list, nested fence or heading written inside a `> [!NOTE]` body renders as run-on text: the alert is emitted as a single markdown paragraph, because the marker that the DOCX and HTML passes key on has to sit in one paragraph; `routes.py`
   - log: 2026-07-23T00:00:00Z @kj registered while fixing `DEF-MARK-11`, which made the paragraph structure visible but not the block structure. Pre-dates that change. A real fix needs an opening and closing marker and a body-element sweep in `style_docx_alert_boxes` and `style_html_alert_boxes`; the PDF's `process_alert` already walks every paragraph in the cell
   - log: 2026-08-27T00:00:00Z @kj edited severity
+  - log: 2026-09-29T13:00:20Z @kj still reproduces 2026-09-29: a two-item list in a [!TIP] alert exports as one paragraph '- item one- item two'
 - [ ] `DEF-MARK-15` **a PDF heading can be stranded at the foot of a page** - MEDIUM; no PDF heading style sets `keepWithNext`, and reportlab's default is off, so a page break can fall between a heading and its first paragraph; every DOCX Heading style carries `keep_with_next`, so Word never does this; `routes.py`
   - log: 2026-07-23T00:00:00Z @kj registered during the `DEF-MARK-12` fix, found earlier by the UX lens during the DEF-MARK-10 review. Not fixed with DEF-MARK-12: a separate defect about pagination, not about which face a level gets
   - log: 2026-08-27T00:00:00Z @kj edited severity
@@ -114,6 +115,7 @@
 - [ ] `DEF-MARK-44` **a table-of-contents link to a heading resolves to nothing in DOCX and PDF** - MEDIUM; `04-sow-broilers-field-poc-delivery.md` writes JupyterLab-preview anchors (`#1.-Introduction`), python-markdown's `toc` extension slugs the heading to `1-introduction`, and `_SAFE_BOOKMARK_ID_RE` then refuses that slug outright because a Word bookmark name may not open with a digit - so the DOCX carries 16 `w:hyperlink w:anchor` elements against 8 bookmarks, none of them matching, and the reportlab rebuild carries no internal links at all; `routes.py`
   - log: 2026-08-27T00:00:00Z @kj registered from the confirming review, which reported it against `DEF-MARK-42` - the TOC becoming a list of links is what made the dangling visible. Measured as pre-existing and independent of that change: a plain column-0 `[Intro](#1.-Introduction)` beside `## 1. Introduction` exports the same dead anchor on a document with no indented list in it, and the heading gets no `w:bookmarkStart` either way. Not fixed here: the remedy is a slug-equivalence pass over the anchor machinery plus a bookmark-name mangling scheme for headings that open with a number, which reaches every document, not the one the change touched
   - log: 2026-08-27T00:00:00Z @kj edited severity
+  - log: 2026-09-29T13:00:20Z @kj still reproduces 2026-09-29: w:anchor '1.-Introduction' with no bookmark in the DOCX
 - [ ] `DEF-MARK-45` **a tab-indented line is not moved with the block around it** - MAJOR; `normalize_list_indentation` measures indentation in literal spaces, so `Intro.` / blank / `  - a` / `\t- nested` / `  - b` dedents `- a` and leaves the other two, and the item written as a sibling of `a` comes out as its child; `routes.py`
   - log: 2026-08-27T00:00:00Z @kj registered from the confirming review. Not a regression - the same input previously exported as one literal source block, all three items and the structure lost. The reviewer's remedy (measure on `line.expandtabs(4)`) was refuted at the consumer two lines below: the shift is applied by slicing CHARACTERS, so a line measured at column 4 through one tab and sliced at index 2 becomes `' nested'` - a tab and a content character gone. The correct variant, rebuilding leading whitespace in columns, eats a tab inside a fenced body - a Makefile recipe in a sample inside an indented list - which is the same class of harm the fence ordering above was fixed for
   - log: 2026-08-27T00:00:00Z @kj edited severity
@@ -446,6 +448,7 @@
   - related: DEF-MARK-100 - the split's second list now restarts in Word as well
   - repro: export '1. Step' / blank / ' > [!NOTE]' / ' > noted' / blank / '2. Next' to DOCX or PDF; the second step reads 1.
   - log: 2026-08-27T22:34:48Z @kj added
+  - log: 2026-09-29T13:00:21Z @kj still reproduces 2026-09-29: DOCX paragraphs Step / empty / noted / Next, the alert outside the list
 - [x] `DEF-MARK-108` **a third-level list resets its parent's count in the PDF** - MAJOR; The PDF walker read every indent past the first as level 1, so a depth-2 ordered list shared the depth-1 counter and numbering-instance slot; returning to the parent looked like a change of list and restarted it at 1 where Word printed 3. Found by the reading-only architect round over commit 9480951
   - evidence: get_list_info now uses the DOCX pass's depth formula in twips; test test_pdf_a_third_level_list_does_not_reset_its_parent, mutation-proved against the binary level
   - related: DEF-MARK-103 - the carried-signal reset this partition mismatch undermined
@@ -502,6 +505,13 @@
   - related: DEF-MARK-117 - the merge fix whose review surfaced this pre-existing class
   - repro: Export 03-sizing-poc-models-and-outcomes.md to PDF; page 3 header reads Requirem/ents, page 8 breaks four headers of the hours table
   - log: 2026-09-21T18:03:45Z @kj added
+- [x] `DEF-MARK-120` **image syntax inside a code sample is rewritten to base64** - MEDIUM; a fenced or inline code sample showing ![logo](logo.png) exports with a data URI in place of the path when logo.png exists
+  - evidence: test_image_syntax_inside_code_is_left_as_written passes and fails without the _outside split; pytest 413 green
+  - repro: export a code block holding ![logo](logo.png) beside an existing logo.png; the block shows data:image/png;base64
+  - test-tags: FUNCTIONAL
+  - root-cause: 2026-09-29T13:47:52Z @kj embed_images_as_base64 runs its image regexes over the whole document, code samples and comments included
+  - log: 2026-09-29T13:47:52Z @kj added
+  - log: 2026-09-29T13:53:01Z @kj closed: fixed: embed_images_as_base64 applies its regexes only outside fenced blocks, one-line code spans and HTML comments
 
 ## Diagram rendering `DIAG`
 
@@ -523,9 +533,13 @@
 - [ ] `DEF-DIAG-32` **the italic slant is dropped for a whole run when one character is uncoverable** - MEDIUM; the PDF italic slot is filled from Liberation (DejaVu ships no oblique on most Linux boxes) and Liberation has no glyph for `U+2605 U+2606 U+2713 U+2714 U+2717 U+2718 U+2610 U+2612`, so `pdf_face_covers` renders such a run upright rather than let reportlab paint a blank advance; the granularity is the run because the PDF path does no run splitting, so one star in a blockquote costs the whole quote its slant; `routes.py`
   - log: 2026-08-26T00:00:00Z @kj registered while fixing the star deletion it replaced. The trade is deliberate - a visible character beats a slanted gap - but the narrower fix is to segment `run.text` at the uncoverable characters, the way `style_docx_symbol_runs` already does on the DOCX side, and emit the slant only around the covered stretches
   - log: 2026-08-27T00:00:00Z @kj edited severity
-- [ ] `DEF-DIAG-33` **an alert box's `w:tblBorders` children are out of schema order** - CRITICAL; `w:left` is emitted after `w:right` and `w:insideV`, which `ISO-IEC29500-4_2016/wml.xsd` rejects; Word evidently tolerates it, since alert boxes ship and have never been reported broken; `routes.py`
+- [x] `DEF-DIAG-33` **an alert box's `w:tblBorders` children are out of schema order** - CRITICAL; `w:left` is emitted after `w:right` and `w:insideV`, which `ISO-IEC29500-4_2016/wml.xsd` rejects; Word evidently tolerates it, since alert boxes ship and have never been reported broken; `routes.py`
+  - evidence: alert, frame and accent boxes all in schema order via convert on 2026-09-29; TestCalloutFrame::test_box_borders_follow_the_schema_order passes and fails when left moves last
+  - test-tags: FUNCTIONAL
   - log: 2026-08-26T00:00:00Z @kj registered from the third confirming round, which validated 88 documents against the schema and found this as the only invalid construct. Identical at HEAD - `> [!WARNING]` alone reproduces it on both trees - so not from this change
   - log: 2026-08-27T00:00:00Z @kj edited severity
+  - log: 2026-09-29T13:00:11Z @kj edited test-tags added "FUNCTIONAL"
+  - log: 2026-09-29T13:00:12Z @kj closed: fixed in 512d679 (v1.6.27): the box builder writes top, left, bottom, right, insideH, insideV
 - [x] `DEF-DIAG-34` **a `<div>` inside a list item, heading or table cell cut the block in two** - MEDIUM; the inline-div rule renamed a childless `<div>` to `<p>` whenever no `<p>` ancestor existed, but a `<li>`, `<td>`, `<th>` and every `<hN>` already own a run of text, so the nested block made htmldocx end the item, cell or heading early and the rest of the line became a paragraph of its own - measured: `# H <div>MID</div> tail` exported as a Heading 1 holding `H` plus two Normal paragraphs; `routes.py`
   - log: 2026-08-26T00:00:00Z @kj found by the fourth (correctness-only) round; a regression from the `DEF-MARK-23` inline-div fix, whose guard named only `<p>` because markdown's own inline wrapping was the case in hand. The guard now tests the full `_HTML_TEXT_HOLDERS` set and the div becomes a `<span>` there, keeping its style attribute for the colour pass. Regression test `test_a_div_inside_a_text_holder_keeps_the_block_whole`, mutation-proved
   - log: 2026-08-27T00:00:00Z @kj edited severity
@@ -535,9 +549,13 @@
 - [x] `DEF-DIAG-36` **the heading upright fallback could swap into a face no better** - MAJOR; the `DEF-DIAG-32` trade for headings replaced an italic heading face with its upright sibling unconditionally, so when the upright face also lacked the glyph the heading lost its slant and still lost the character; the swap now fires only when the fallback actually covers the text; `routes.py`
   - log: 2026-08-26T00:00:00Z @kj found by the fourth round; regression test `test_a_minor_heading_keeps_its_symbols` extended by the conditional, mutation-proved with the rest of the batch
   - log: 2026-08-27T00:00:00Z @kj edited severity
-- [ ] `DEF-DIAG-37` **an inline-math marker leaks into a table cell's text** - MEDIUM; a `$...$` inside a table cell leaves its U+2063-fenced OMML marker visible in the exported cell because the cell path rebuilds text without running the marker merge; pre-existing at HEAD, not widened by this change; `routes.py`
+- [x] `DEF-DIAG-37` **an inline-math marker leaks into a table cell's text** - MEDIUM; a `$...$` inside a table cell leaves its U+2063-fenced OMML marker visible in the exported cell because the cell path rebuilds text without running the marker merge; pre-existing at HEAD, not widened by this change; `routes.py`
+  - evidence: table cells with $x^2$ and $\alpha$ via convert on 2026-09-29: 3 m:oMath, no marker text in any w:t; test_docx_inline_math_in_a_table_cell passes
+  - test-tags: FUNCTIONAL
   - log: 2026-08-26T00:00:00Z @kj registered from the fourth round's bug hunter, which flagged it out of scope for the `DEF-MARK-22`/`DEF-MARK-23` fix. The in-paragraph merge (`merge_inline_math_omml`) walks document paragraphs; extending it to table cells is its own change with its own surface
   - log: 2026-08-27T00:00:00Z @kj edited severity
+  - log: 2026-09-29T13:00:12Z @kj edited test-tags added "FUNCTIONAL"
+  - log: 2026-09-29T13:00:12Z @kj closed: fixed in 9ebb0ff (v1.6.26) with DEF-MARK-113: the marker merge walks every body paragraph, table cells included
 - [x] `DEF-DIAG-38` **a literal twin of a wrapper tag un-formatted the text after it** - MAJOR; the CSS-to-tag pass wrapped `<p style="font-weight:bold">hot <b>stuff</b> more</p>` in a second `<b>`, and htmldocx keys its open tags by name and pops on the first close - so the inner `</b>` ended the outer wrapper and ` more` arrived regular in DOCX and PDF while every browser bolds it; the ancestor guard checked `find_parent` only, blind to a descendant twin; same route for `<i>` in `font-style:italic` and, via the alias pass, `<ins>`/`<del>` in their text-decoration twins; `routes.py`
   - log: 2026-08-26T00:00:00Z @kj found by the fifth (confirming) round's architect lens; new in this change - the wrapper mechanism itself is new. Fixed by unwrapping same-name descendants before wrapping: bold inside bold is bold, so the wrapper subsumes the twin and the emitted HTML shrinks. Regression test `test_a_literal_twin_does_not_unbold_the_tail`, mutation-proved
   - log: 2026-08-26T00:00:00Z @kj hardened by the sixth round, which found the unwrap took too much: it destroyed the twin's OWN attributes - `<b style="color:red">` lost its colour, `<b id="t1">` its anchor - and the inline path's re-wrap made the element its own next twin, unwrapping its kept styling; a twin inside a nested table also lost its weight to a wrapper that cannot reach that cell's runs. The subsume now takes only the NAME - a rename to `<span>` keeps style, id and place in the style snapshot - and skips twins across a nested-table boundary, where htmldocx scopes each cell so no early close crosses. Regression test `test_a_twin_keeps_its_colour_anchor_and_cell`, both halves mutation-proved
@@ -548,6 +566,7 @@
 - [ ] `DEF-DIAG-40` **`<center>` welds its text onto the previous paragraph and drops the centring** - MEDIUM; the block-vs-inline rescue added for `<div>` names `div` alone, so `<center>Centred</center>` between two paragraphs joins the paragraph already open with no space and no alignment, in DOCX and PDF both; the exact failure class the `<div>` pass fixed, on the unhandled sibling tag; `routes.py`
   - log: 2026-08-26T00:00:00Z @kj registered from the fifth round's ux lens; pre-existing - the diff neither introduced nor touched it. The remedy is an alias of `center` to `div` with `text-align:center` ahead of the div pass
   - log: 2026-08-27T00:00:00Z @kj edited severity
+  - log: 2026-09-29T13:00:20Z @kj still reproduces 2026-09-29: DOCX paragraph reads 'para beforeCentred', no w:jc center
 - [ ] `DEF-DIAG-41` **bold on a `<tr>` is dropped in DOCX and PDF while the HTML export shows it** - MEDIUM; `<tr style="font-weight:bold">` clears its wrappers because Word has no run inside a row and either wrapper placement loses the cells in htmldocx's direct-child walk; the in-code comment records the trade - losing emphasis beats losing cells; `routes.py`
   - log: 2026-08-26T00:00:00Z @kj registered from the fifth round's ux lens so the trade has a number; the closing move is distributing the wrapper per `<td>` instead of clearing it
   - log: 2026-08-27T00:00:00Z @kj edited severity
@@ -594,6 +613,14 @@
   - log: 2026-07-23T00:00:00Z @kj registered while reversing the tilde decision under `DEF-DIAG-16`. Pre-existing and not widened by that change - a tilde block was never substituted before, so it always reached those passes; it is now narrower, because a tilde-fenced diagram that renders is replaced by an image first and only a block left un-rendered is still exposed. Not fixed here because the backtick-only matcher is one of several fence mechanisms in the module and unifying them is a refactor of working code, recorded at `docs/acc-crit-jupyterlab-export-markdown-extension.md` as deferred
   - log: 2026-07-23T00:00:00Z @kj census (architect, sixth round): six independent fence matchers live in `routes.py`, not three. The mermaid scanner `_FENCE_RE` / `iter_mermaid_blocks` is container-aware and tilde-inclusive; the task-list tracker (`preprocess_task_lists`) tracks backtick+tilde by length; and four are backtick-only - `replace_math_with_images`, `replace_math_with_markers`, `highlight_code_blocks` and `extract_code_blocks`. The last two run in the DOCX/PDF pipelines and were omitted from the earlier "three mechanisms" tally. Unifying all six behind the container-aware scanner is the deferred refactor; DEF-DIAG-19 is the marker for it
   - log: 2026-08-27T00:00:00Z @kj edited severity
+  - log: 2026-09-29T13:00:20Z @kj still reproduces 2026-09-29: a ~~~ block holding 'a $x$ b' exports as 'a b' plus one m:oMath in DOCX
+- [x] `DEF-DIAG-119` **DOCX and PDF load images the export refused** - MAJOR; an image the embed pass refused still reaches the DOCX and the PDF: a missing sub/chart.png came out as the root's chart.png, a path outside the root was embedded, and a private-host URL was fetched
+  - evidence: test_a_refused_image_stays_out_of_docx and test_a_refused_download_is_not_fetched_for_docx pass (private host served 0 requests) and fail with the call removed; pytest 413 green
+  - repro: root/sub/doc.md holds ![c](chart.png), only root/chart.png exists; export DOCX with the server started in root
+  - test-tags: FUNCTIONAL
+  - root-cause: 2026-09-29T13:47:52Z @kj htmldocx loads every non-data <img> src itself: add_picture(path) from the working directory, fetch_image(url) with a plain urlopen, so the root boundary and the SSRF guard of embed_images_as_base64 do not apply
+  - log: 2026-09-29T13:47:52Z @kj added
+  - log: 2026-09-29T13:53:01Z @kj closed: fixed: drop_unembedded_images turns every non-data <img> into a text placeholder before htmldocx in the DOCX and PDF handlers
 
 ## Table pagination `TABL`
 
@@ -645,3 +672,10 @@
 - [x] `DEF-EXPO-57` **an item was moved out from under the sample it owns** - MAJOR; a fenced sample's bytes stand, so it cannot travel with its item; dedenting a marker whose own sample sits at or beyond its content column left the sample indented past the item, where it rendered as an indented code block showing its own fence markers; `routes.py`
   - log: 2026-08-27T00:00:00Z @kj found by the lead's corpus differential - the single file of 8,171 that rendered worse. The pass now looks at the chunk that follows a candidate and declines to move an item that owns a sample. Regression test `test_an_item_owning_a_sample_is_left_where_it_was`, mutation-proved. With it the differential is 37 changed, 27 better, 10 identical, 0 worse
   - log: 2026-08-27T00:00:00Z @kj edited severity
+- [x] `DEF-EXPO-121` **an export error with no message gives no cause** - MINOR; a DOCX or PDF export that fails on an exception with no text answers {error: ''}, so the caller sees only 'HTTP 500: Internal Server Error'
+  - evidence: test_an_error_without_text_is_named passes ('error: pdf: RuntimeError') and fails with str(e) alone; pytest 413 green
+  - repro: export DOCX of a file whose image is a Git LFS pointer saved as .png
+  - test-tags: FUNCTIONAL
+  - root-cause: 2026-09-29T13:47:52Z @kj the handlers answer str(e), and python-docx raises UnrecognizedImageError with no message
+  - log: 2026-09-29T13:47:52Z @kj added
+  - log: 2026-09-29T13:53:01Z @kj closed: fixed: the three handlers answer str(e) or the exception type name

@@ -454,3 +454,174 @@ Two-space lists, hand-drawn callout divs and per-list numbering in Word, PDF and
   - related: DEF-MARK-106, DEF-MARK-107
   - test: n/a
   - log: 2026-08-27T22:45:41Z @kj added
+
+## Command-line conversion `CLI`
+
+jupyterlab-export-markdown-extension convert exports a file through the extension's own endpoints, served by a private in-process Jupyter server
+
+- [x] `ACC-CLI-102` **Convert through the export endpoints** - HIGH; convert FILE --to FORMAT writes the document the matching export endpoint returns, beside FILE with the format's suffix
+  - evidence: test_each_format_is_written_beside_the_source passes (%PDF-, PK, <h1); danaeg sizing and broilers SOW export in all 3 formats via convert; pytest 413 green, galata 5/5
+  - test: test_cli.py::test_each_format_is_written_beside_the_source
+  - test-tags: FUNCTIONAL
+  - mechanism: 2026-09-29T12:56:50Z @kj in-process ServerApp with only this extension loaded; tornado client POSTs {path, options} to <base_url>/API_NAMESPACE/export/<format>
+  - log: 2026-09-29T12:56:50Z @kj added
+  - log: 2026-09-29T13:53:01Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-103` **Several formats in one run** - MEDIUM; --to takes several formats, and one server start serves them all
+  - evidence: test_each_format_is_written_beside_the_source writes pdf, docx and html from one run; pytest 413 green, galata 5/5
+  - test: test_cli.py::test_each_format_is_written_beside_the_source
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T12:56:50Z @kj added
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-104` **Stdout lists the written paths** - MEDIUM; stdout holds each written path, one per line, and nothing else
+  - evidence: test_each_format_is_written_beside_the_source asserts stdout equals the three paths; pytest 413 green, galata 5/5
+  - test: test_cli.py::test_each_format_is_written_beside_the_source
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T12:56:51Z @kj added
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-105` **Output path** - MEDIUM; -o PATH writes the single --to format to PATH
+  - evidence: test_output_path_takes_a_single_format passes; pytest 413 green, galata 5/5
+  - test: test_cli.py::test_output_path_takes_a_single_format
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T12:56:51Z @kj added
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-106` **Edge: output path with two formats** - MEDIUM; -o with more than one --to format exits 2 and writes nothing
+  - evidence: test_output_path_with_two_formats_is_a_usage_error passes, exit 2, nothing written; pytest 413 green, galata 5/5
+  - test: test_cli.py::test_output_path_with_two_formats_is_a_usage_error
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T12:56:51Z @kj added
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-107` **Edge: output is the source** - HIGH; an output path naming the source file - directly, through a link or a hard link - exits 2 and leaves the source untouched
+  - evidence: test_output_onto_the_source_is_refused and test_an_output_linked_to_the_source_is_refused pass; samefile mutation caught; pytest 413 green, galata 5/5
+  - test: test_cli.py::test_output_onto_the_source_is_refused and test_an_output_linked_to_the_source_is_refused
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T12:56:51Z @kj added
+  - log: 2026-09-29T13:30:05Z @kj amended text "an output path equal to FILE exits 2 and leaves FILE untouched" -> "HIGH; an output path naming the source file - directly, through a link or a hard link - exits 2 and leaves the source untouched"
+  - log: 2026-09-29T13:30:11Z @kj edited test "test_cli.py::test_output_onto_the_source_is_refused" -> "test_cli.py::test_output_onto_the_source_is_refused and test_an_output_linked_to_the_source_is_refused"
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-108` **Images only inside the root** - HIGH; --root is the server root, default the current directory; an image inside it embeds, one outside it or missing is not embedded and an X-Export-Warnings entry image-not-embedded names it
+  - evidence: test_images_are_read_only_inside_the_root passes: embeds under the parent root, warns '(images: ../img.png)' under sub; pytest 413 green, galata 5/5
+  - test: test_cli.py::test_images_are_read_only_inside_the_root
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T12:56:51Z @kj added
+  - log: 2026-09-29T13:30:05Z @kj amended text "root is the server root, default the current directory; an image inside it embeds, one outside stays a link" -> "HIGH; --root is the server root, default the current directory; an image inside it embeds, one outside it or missing is not embedded and an X-Export-Warnings entry image-not-embedded names it"
+  - log: 2026-09-29T13:30:11Z @kj edited test "test_cli.py::test_images_are_read_only_inside_the_root" -> "test_cli.py::test_images_are_read_only_inside_the_root"
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-109` **Edge: file outside the root** - HIGH; FILE outside --root exits 2, stderr names --root, nothing written
+  - evidence: test_a_file_outside_the_root_is_refused passes, exit 2; pytest 413 green, galata 5/5
+  - test: test_cli.py::test_a_file_outside_the_root_is_refused
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T12:56:51Z @kj added
+  - log: 2026-09-29T13:48:12Z @kj amended text "FILE outside --root exits 1, stderr names --root, nothing written" -> "HIGH; FILE outside --root exits 2, stderr names --root, nothing written"
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-110` **Edge: missing file** - MEDIUM; a FILE that does not exist or is a folder exits 2, and stderr says which
+  - evidence: test_a_missing_file_is_reported passes, exit 2 'does not exist'; pytest 413 green, galata 5/5
+  - test: test_cli.py::test_a_missing_file_is_reported
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T12:56:51Z @kj added
+  - log: 2026-09-29T13:30:05Z @kj amended text "a FILE that does not exist exits 1 with 'no such file' on stderr" -> "MEDIUM; a FILE that does not exist or is a folder exits 1, and stderr says which"
+  - log: 2026-09-29T13:48:12Z @kj amended text "a FILE that does not exist or is a folder exits 1, and stderr says which" -> "MEDIUM; a FILE that does not exist or is a folder exits 2, and stderr says which"
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-111` **Settings flags reach the export** - MEDIUM; --theme sets htmlTheme, which the DOCX and PDF handlers read when no docxTheme is sent; --font-size sets exportFontSize, --alert-labels showAlertLabels; an unset flag is not sent, so the handler default applies
+  - evidence: test_html_options_reach_the_export (10pt, color-scheme dark, NOTE:) and test_theme_reaches_the_docx_renderer pass; each mapping mutation caught; pytest 413 green, galata 5/5
+  - test: test_cli.py::test_html_options_reach_the_export and test_theme_reaches_the_docx_renderer
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T12:56:51Z @kj added
+  - log: 2026-09-29T13:30:05Z @kj amended text "theme sets docxTheme and htmlTheme, --font-size exportFontSize, --alert-labels showAlertLabels; an unset flag is not sent, so the handler default applies" -> "MEDIUM; --theme sets htmlTheme, which the DOCX and PDF handlers read when no docxTheme is sent; --font-size sets exportFontSize, --alert-labels showAlertLabels; an unset flag is not sent, so the handler default applies"
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-112` **Failed format reported** - HIGH; a non-200 answer prints 'error: <format>: <reason>' on stderr, the handler's remedy message in place of the raw error when it gives one, and exits 1; the other formats are still written
+  - evidence: test_a_failed_format_is_reported_and_the_others_still_written passes; Chromium error prints the remedy message; pytest 413 green, galata 5/5
+  - test: test_cli.py::test_a_failed_format_is_reported_and_the_others_still_written
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T12:56:51Z @kj added
+  - log: 2026-09-29T13:30:05Z @kj amended text "a non-200 answer prints 'error: <format>: <reason>' on stderr and exits 1; the other formats are still written" -> "HIGH; a non-200 answer prints 'error: <format>: <reason>' on stderr, the handler's remedy message in place of the raw error when it gives one, and exits 1; the other formats are still written"
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-113` **Export warnings on stderr** - MEDIUM; each X-Export-Warnings entry prints one 'warning:' line on stderr, mermaid blocks counted from 1, and the exit code stays 0
+  - evidence: test_export_warnings_go_to_stderr_without_failing passes '(mermaid blocks 1)'; zero-based mutation caught; pytest 413 green, galata 5/5
+  - test: test_cli.py::test_export_warnings_go_to_stderr_without_failing
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T12:56:51Z @kj added
+  - log: 2026-09-29T13:30:05Z @kj amended text "each X-Export-Warnings entry prints a 'warning:' line on stderr, and the exit code stays 0" -> "MEDIUM; each X-Export-Warnings entry prints one 'warning:' line on stderr, mermaid blocks counted from 1, and the exit code stays 0"
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-114` **Private server** - MEDIUM; the server binds 127.0.0.1 on a free port with a per-run random token, loads only this extension and writes no server info file
+  - evidence: no jpserver-*.json written by a convert (11 before, 11 after); binds 127.0.0.1:0, token secrets.token_hex(16), only this extension loaded (architect round 1 verified)
+  - test: read cli.py _export; run convert, then jupyter server list shows no new server
+  - test-tags: MANUAL
+  - log: 2026-09-29T12:56:51Z @kj added
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-115` **Agent skill** - MEDIUM; .agents/skills/jupyterlab-export-markdown-extension/SKILL.md, under 30 lines, points at --help and passes quick_validate; README links it with the ln -s line
+  - evidence: SKILL.md 16 lines, quick_validate 'Skill is valid!', README Command Line section carries the ln -s line
+  - test: quick_validate.py on the skill dir; wc -l; read README Command Line
+  - test-tags: MANUAL
+  - log: 2026-09-29T12:56:51Z @kj added
+  - log: 2026-09-29T13:53:02Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-116` **Help written for agents** - HIGH; --help lists each subcommand, the environment variable and the exit codes; convert --help gives output, side effects, duration and examples; every flag has help
+  - evidence: TestHelp passes (examples: in --help and convert --help); help read by the ux-designer lens in two rounds, every flag documented
+  - test: test_cli.py::TestHelp plus reading both --help texts
+  - test-tags: UNIT, MANUAL
+  - log: 2026-09-29T12:57:01Z @kj added
+  - log: 2026-09-29T13:53:03Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-117` **Edge: user Jupyter config not read** - HIGH; a contents root, preferred dir or log level in the user's Jupyter config does not change which file is exported or what stderr carries
+  - evidence: test_the_users_jupyter_config_is_not_read passes with a FileContentsManager.root_dir config; fails with the load_config_file skip removed; no jupyter-clean-cfg folder created
+  - test: test_cli.py::test_the_users_jupyter_config_is_not_read
+  - test-tags: FUNCTIONAL
+  - mechanism: 2026-09-29T13:48:12Z @kj ServerApp.load_config_file skipped on the instance; root, token and log level passed as argv. JUPYTER_NO_CONFIG, the first mechanism, left a jupyter-clean-cfg temp folder per run
+  - mechanism: 2026-09-29T13:30:05Z @kj JUPYTER_NO_CONFIG=1 before ServerApp.initialize; root, token and log level passed as argv
+  - log: 2026-09-29T13:30:05Z @kj added
+  - log: 2026-09-29T13:48:12Z @kj mechanism overridden; reason: round-2 review: the env var mechanism leaked a temp folder per run
+  - log: 2026-09-29T13:53:03Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-118` **Edge: transport failure fails its format only** - MEDIUM; a connection that fails or closes early prints 'error: <format>: <reason>', exits 1, and the other formats are still exported; responses up to 4 GiB are accepted
+  - evidence: test_a_transport_error_fails_its_format_only passes; except mutation caught; client max_body_size 4294967296 (bug-hunter round 2 probe)
+  - test: test_cli.py::test_a_transport_error_fails_its_format_only
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T13:30:06Z @kj added
+  - log: 2026-09-29T13:53:03Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-119` **Ctrl-C ends the command** - MEDIUM; one Ctrl-C during an export ends the command at once, with no traceback; a SIGINT the caller set to ignored stays ignored
+  - evidence: SIGINT 2.5 s and 5 s into a 40-diagram PDF export: exit in 0.05-0.07 s, no traceback; test_an_ignored_sigint_stays_ignored passes
+  - test: SIGINT to the process group 2.5 s and 5 s into a 40-diagram PDF export; test_cli.py::test_an_ignored_sigint_stays_ignored
+  - test-tags: FUNCTIONAL, MANUAL
+  - log: 2026-09-29T13:30:06Z @kj added
+  - log: 2026-09-29T13:48:12Z @kj amended text "one Ctrl-C during an export ends the command at once, with no traceback" -> "MEDIUM; one Ctrl-C during an export ends the command at once, with no traceback; a SIGINT the caller set to ignored stays ignored"
+  - log: 2026-09-29T13:48:12Z @kj edited test "SIGINT to the process group 2.5 s and 5 s into a 40-diagram PDF export; time the exit" -> "SIGINT to the process group 2.5 s and 5 s into a 40-diagram PDF export; test_cli.py::test_an_ignored_sigint_stays_ignored"; test-tags "MANUAL" -> "FUNCTIONAL, MANUAL"
+  - log: 2026-09-29T13:53:03Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-120` **Edge: symlinked file keeps its own path** - MEDIUM; a FILE that is a link exports as the lab exports it: images resolve from the link's folder and the output lands beside the link
+  - evidence: test_a_symlinked_file_exports_from_where_it_is_linked passes, image embedded; resolve() mutation caught
+  - test: test_cli.py::test_a_symlinked_file_exports_from_where_it_is_linked
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T13:30:06Z @kj added
+  - log: 2026-09-29T13:53:03Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-121` **Repeated --to keeps every format** - MEDIUM; --to html --to docx exports both formats
+  - evidence: test_a_repeated_to_keeps_every_format passes; action=extend mutation caught
+  - test: test_cli.py::test_a_repeated_to_keeps_every_format
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T13:30:06Z @kj added
+  - log: 2026-09-29T13:53:03Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-122` **Image left out is reported** - HIGH; every export endpoint reports local images it did not embed as X-Export-Warnings code image-not-embedded, with count and the first 3 paths as written
+  - evidence: test_an_image_left_out_is_reported (count 5, first 3 paths) and test_an_embedded_image_raises_no_warning pass
+  - test: test_routes.py::test_an_image_left_out_is_reported and test_an_embedded_image_raises_no_warning
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T13:30:06Z @kj added
+  - log: 2026-09-29T13:53:03Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-123` **Edge: folder reached through a link** - MEDIUM; FILE and --root that name the same folder, one through a link and one resolved (the current directory), are inside each other
+  - evidence: test_a_folder_reached_through_a_link_is_inside_the_root passes; abspath mutation caught
+  - test: test_cli.py::test_a_folder_reached_through_a_link_is_inside_the_root
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T13:48:12Z @kj added
+  - log: 2026-09-29T13:53:03Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-124` **Root boundary holds in DOCX and PDF** - HIGH; an image the export did not embed - outside the root, missing, a failed or refused download - is a text placeholder in DOCX and PDF, never loaded from the server's working directory or fetched
+  - evidence: test_a_refused_image_stays_out_of_docx and test_a_refused_download_is_not_fetched_for_docx pass; mutation caught
+  - test: test_cli.py::test_a_refused_image_stays_out_of_docx and test_a_refused_download_is_not_fetched_for_docx
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T13:48:12Z @kj added
+  - log: 2026-09-29T13:53:03Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-125` **Image syntax in code is not an image** - MEDIUM; image syntax inside a fenced block, an inline code span or an HTML comment is exported as written and raises no warning
+  - evidence: test_image_syntax_inside_code_is_left_as_written passes; mutation caught
+  - test: test_cli.py::test_image_syntax_inside_code_is_left_as_written
+  - test-tags: FUNCTIONAL
+  - log: 2026-09-29T13:48:12Z @kj added
+  - log: 2026-09-29T13:53:03Z @kj closed: verified 2026-09-29
+- [x] `ACC-CLI-126` **check names the remedy first** - MEDIUM; a failed check prints the install command on its first stderr line, before Playwright's own message
+  - evidence: test_check_names_the_remedy_first passes; mutation caught
+  - test: test_cli.py::test_check_names_the_remedy_first
+  - test-tags: UNIT
+  - log: 2026-09-29T13:48:12Z @kj added
+  - log: 2026-09-29T13:53:03Z @kj closed: verified 2026-09-29

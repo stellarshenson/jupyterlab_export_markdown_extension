@@ -18,7 +18,7 @@ import socket
 import tempfile
 import time
 import unicodedata
-from html import unescape
+from html import escape, unescape
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
@@ -76,11 +76,44 @@ class ChromiumUnavailableError(RuntimeError):
 
 
 #: The one command that fixes a missing Chromium, quoted rather than reworded
-#: wherever this module says it. `cli.py` and `src/index.ts` restate the same
-#: string because neither can import from here - the installer CLI must run
-#: without this module's heavy imports, and the frontend is another language -
-#: so those two are the copies to keep in step if the entry point is renamed.
+#: wherever this module says it. `src/index.ts` restates the same string
+#: because the frontend is another language, so it is the copy to keep in step
+#: if the entry point is renamed.
 CHROMIUM_INSTALL_COMMAND = 'jupyterlab-export-markdown-extension install'
+
+#: URL prefix of the export endpoints under the server's base URL - the route
+#: table below and the `convert` command of the CLI both build on it;
+#: `src/request.ts` restates it for the frontend.
+API_NAMESPACE = 'jupyterlab-export-markdown-extension'
+
+#: Why an `image-not-embedded` warning is raised and what fixes it.
+IMAGE_NOT_EMBEDDED_WARNING = (
+    'These images were not embedded: the image file does not exist or is '
+    'outside the server root, or its download failed. HTML keeps each path '
+    'as written; DOCX and PDF show a text placeholder. Fix the path, or '
+    'export with a server root that holds the image'
+)
+
+#: An `<img>` tag, quote-aware so a `>` inside an attribute value (e.g.
+#: alt="a > b") doesn't truncate the tag.
+_IMG_TAG_RE = re.compile(r'<img\b(?:[^>"\']|"[^"]*"|\'[^\']*\')*>', re.IGNORECASE)
+
+#: The `src` attribute of an `<img>` tag: prefix, quote, value. The
+#: (?<![-\w:]) guard keeps `data-src`/`lowsrc`/`xlink:src` from matching.
+_IMG_SRC_ATTR_RE = re.compile(r'(?<![-\w:])(src\s*=\s*)(["\'])(.*?)\2', re.IGNORECASE)
+
+#: Markdown the image passes leave as written: a fenced block, an inline code
+#: span on one line, a comment. Tilde fences are not covered - the same gap
+#: the math passes have (DEF-DIAG-19).
+_MARKDOWN_CODE_OR_COMMENT = r'```[\s\S]*?```|`[^`\n]+`|<!--[\s\S]*?-->'
+
+
+def _outside(skip: str, text: str, change) -> str:
+    """`change` applied to the parts of `text` the regex `skip` does not
+    match; the parts it matches are kept as written. `skip` must hold no
+    capturing group."""
+    parts = re.split(f'({skip})', text)
+    return ''.join(part if i % 2 else change(part) for i, part in enumerate(parts))
 
 #: Why a diagram kept its source instead of becoming a picture, and what the
 #: caller can do about it. Both the renderer (which detects the failures) and
@@ -1183,6 +1216,29 @@ class ExportHandlerBase(APIHandler):
     #: to hold the whole response header block, not just this one.
     MAX_REPORTED_DIAGRAMS = 10
 
+    #: Image paths listed in the `image-not-embedded` warning. A path is text
+    #: of any length where a diagram index is a number, so fewer of them fit
+    #: in the same header budget: three 40-character paths take about 400
+    #: bytes, which the diagram codes' 1.5KB leaves room for. Path length is
+    #: not capped.
+    MAX_REPORTED_IMAGES = 3
+
+    def image_warnings(self, sources: list[str]) -> list[dict]:
+        """The `X-Export-Warnings` entry for the local images
+        `embed_images_as_base64` left as written - `images` in place of
+        `diagrams`, the paths as the document wrote them."""
+        # One entry per image: a refused path is seen by the embed pass and
+        # again by `drop_unembedded_images`, and a document may repeat one
+        sources = list(dict.fromkeys(sources))
+        if not sources:
+            return []
+        return [{
+            'code': 'image-not-embedded',
+            'count': len(sources),
+            'images': sources[:self.MAX_REPORTED_IMAGES],
+            'message': IMAGE_NOT_EMBEDDED_WARNING,
+        }]
+
 
     async def render_mermaid_server_side(
         self, content: str, *, color_scheme: str, png_width: int | None,
@@ -1323,9 +1379,9 @@ class ExportHandlerBase(APIHandler):
 
         Nothing in `src/` reads it: asked how warnings should reach a caller,
         the answer was the response header alone rather than a dialog. It is
-        an API channel by decision - a UI export reaches this path only when
-        the mermaid manager token is missing, since otherwise the browser
-        renders every diagram and there is nothing left to warn about.
+        an API channel by decision - the `convert` CLI prints it; a UI export
+        reaches the diagram codes only when the mermaid manager token is
+        missing, since otherwise the browser renders every diagram.
         """
         if not warnings:
             return
@@ -1577,7 +1633,8 @@ class ExportHandlerBase(APIHandler):
         out.append(html[last:])
         return ''.join(out)
 
-    def embed_images_as_base64(self, content: str, markdown_dir: Path) -> str:
+    def embed_images_as_base64(self, content: str, markdown_dir: Path,
+                               not_embedded: list[str] | None = None) -> str:
         """
         Replace local and remote image references with base64-encoded data URIs.
 
@@ -1593,6 +1650,10 @@ class ExportHandlerBase(APIHandler):
           host resolves to a public IP (SSRF guard). Failures fall back to the
           original reference silently.
         - ``data:`` URIs are passed through.
+        - Every other source that is not embedded - refused, missing, a
+          failed download - is appended to ``not_embedded``, for
+          `image_warnings` to report.
+        - Image syntax inside a code sample or a comment is left alone.
         """
         img_pattern = r'!\[([^\]]*)\]\(([^)"\s]+)(?:\s+"[^"]*")?\)'
         mime_types = {
@@ -1736,8 +1797,12 @@ class ExportHandlerBase(APIHandler):
             if low.startswith('data:'):
                 return None
             if low.startswith(('http://', 'https://')):
-                return fetch_remote(src)
-            return local_data_uri(src)
+                data_uri = fetch_remote(src)
+            else:
+                data_uri = local_data_uri(src)
+            if data_uri is None and not_embedded is not None:
+                not_embedded.append(src)
+            return data_uri
 
         def replace_image(match):
             alt_text = match.group(1)
@@ -1746,13 +1811,7 @@ class ExportHandlerBase(APIHandler):
                 return match.group(0)
             return f'![{alt_text}]({data_uri})'
 
-        content = re.sub(img_pattern, replace_image, content)
-
         # Raw HTML <img> tags (inline badges/pills inside Markdown tables).
-        # The (?<![-\w:]) guard keeps `data-src`/`lowsrc`/`xlink:src` from
-        # matching as `src`.
-        src_attr_re = re.compile(r'(?<![-\w:])(src\s*=\s*)(["\'])(.*?)\2', re.IGNORECASE)
-
         def replace_html_img(tag_match):
             tag = tag_match.group(0)
 
@@ -1762,12 +1821,39 @@ class ExportHandlerBase(APIHandler):
                     return m.group(0)
                 return f'{m.group(1)}"{data_uri}"'
 
-            return src_attr_re.sub(sub_src, tag, count=1)
+            return _IMG_SRC_ATTR_RE.sub(sub_src, tag, count=1)
 
-        # Quote-aware tag match so a `>` inside an attribute value (e.g.
-        # alt="a > b") doesn't truncate the tag.
-        img_tag_re = r'<img\b(?:[^>"\']|"[^"]*"|\'[^\']*\')*>'
-        return re.sub(img_tag_re, replace_html_img, content, flags=re.IGNORECASE)
+        def embed(text: str) -> str:
+            text = re.sub(img_pattern, replace_image, text)
+            return _IMG_TAG_RE.sub(replace_html_img, text)
+
+        # Image syntax inside a code sample is text the author shows, not an
+        # image: it was rewritten to base64 when the path existed and reported
+        # as not embedded when it did not
+        return _outside(_MARKDOWN_CODE_OR_COMMENT, content, embed)
+
+    def drop_unembedded_images(self, body_html: str,
+                               not_embedded: list[str]) -> str:
+        """Put a text placeholder where htmldocx would load an image itself.
+
+        By here every image the export could read is a data URI. htmldocx
+        loads any other `<img>` source on its own terms - a local path from
+        the server's working directory, past the root boundary the embed pass
+        keeps, and a URL with a plain `urlopen`, past its SSRF guard. So an
+        image the embed pass refused, a failed download and a reference-style
+        image the embed pass never sees become text, and each source is
+        recorded for `image_warnings`.
+        """
+        def replace(match):
+            src = _IMG_SRC_ATTR_RE.search(match.group(0))
+            if src is None or src.group(3).lower().startswith('data:'):
+                return match.group(0)
+            source = unescape(src.group(3))
+            not_embedded.append(source)
+            return escape(f'<image: {Path(source).name}>')
+
+        return _outside(r'<!--[\s\S]*?-->', body_html,
+                        lambda text: _IMG_TAG_RE.sub(replace, text))
 
     def get_pygments_css(self, dark: bool = False) -> str:
         """Get Pygments CSS for syntax highlighting.
@@ -6368,7 +6454,9 @@ class ExportPdfHandler(ExportHandlerBase):
             content = self.preprocess_task_lists(content)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             content = self.replace_math_with_images(content, width=math_pixel_width)
-            content = self.embed_images_as_base64(content, file_path.parent)
+            not_embedded: list[str] = []
+            content = self.embed_images_as_base64(content, file_path.parent,
+                                                  not_embedded)
             # After every pass that rewrites the source and before the
             # format's own code-block handling: the pass measures what the
             # converter will render, so it must see the text the converter
@@ -6394,6 +6482,7 @@ class ExportPdfHandler(ExportHandlerBase):
             # Fix loose-list bullets and tag blockquotes before htmldocx
             body_html = self.restructure_html_for_docx(body_html)
             body_html = self.inject_anchor_markers(body_html)
+            body_html = self.drop_unembedded_images(body_html, not_embedded)
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 body_html = await self.extract_data_uri_images(
@@ -6458,7 +6547,8 @@ class ExportPdfHandler(ExportHandlerBase):
             pdf_content = self.convert_docx_to_pdf(docx_bytes, code_blocks,
                                                    base_pt=base_pt)
 
-            self.set_export_warnings(export_warnings)
+            self.set_export_warnings(
+                export_warnings + self.image_warnings(not_embedded))
             self.set_header('Content-Type', 'application/pdf')
             self.set_attachment_filename(f'{file_path.stem}.pdf')
             self.finish(pdf_content)
@@ -6480,7 +6570,9 @@ class ExportPdfHandler(ExportHandlerBase):
             }))
         except Exception as e:
             self.set_status(500)
-            self.finish(json.dumps({'error': str(e)}))
+            # A bare exception (python-docx's UnrecognizedImageError on a Git
+            # LFS pointer saved as .png) has no text; its name is the reason
+            self.finish(json.dumps({'error': str(e) or type(e).__name__}))
 
 
 class ExportDocxHandler(ExportHandlerBase):
@@ -6526,7 +6618,9 @@ class ExportDocxHandler(ExportHandlerBase):
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             # Use OMML markers for DOCX (native Word equations)
             content, inline_math, display_math = self.replace_math_with_markers(content)
-            content = self.embed_images_as_base64(content, file_path.parent)
+            not_embedded: list[str] = []
+            content = self.embed_images_as_base64(content, file_path.parent,
+                                                  not_embedded)
             # After every pass that rewrites the source and before the
             # format's own code-block handling: the pass measures what the
             # converter will render, so it must see the text the converter
@@ -6553,6 +6647,7 @@ class ExportDocxHandler(ExportHandlerBase):
             # Inject bookmark sentinels for every id="..." anchor so Word
             # internal links (#anchor) resolve after htmldocx strips them.
             body_html = self.inject_anchor_markers(body_html)
+            body_html = self.drop_unembedded_images(body_html, not_embedded)
 
             # Use temp directory for images (htmldocx can't handle data URIs)
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -6717,7 +6812,8 @@ class ExportDocxHandler(ExportHandlerBase):
                 document.save(docx_buffer)
                 docx_content = docx_buffer.getvalue()
 
-            self.set_export_warnings(export_warnings)
+            self.set_export_warnings(
+                export_warnings + self.image_warnings(not_embedded))
             self.set_header('Content-Type',
                           'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
             self.set_attachment_filename(f'{file_path.stem}.docx')
@@ -6740,7 +6836,9 @@ class ExportDocxHandler(ExportHandlerBase):
             }))
         except Exception as e:
             self.set_status(500)
-            self.finish(json.dumps({'error': str(e)}))
+            # A bare exception (python-docx's UnrecognizedImageError on a Git
+            # LFS pointer saved as .png) has no text; its name is the reason
+            self.finish(json.dumps({'error': str(e) or type(e).__name__}))
 
 
 class ExportHtmlHandler(ExportHandlerBase):
@@ -6781,7 +6879,9 @@ class ExportHtmlHandler(ExportHandlerBase):
                 png_width=None, diagram_indices=unrendered)
             content = self.preprocess_task_lists(content)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
-            content = self.embed_images_as_base64(content, file_path.parent)
+            not_embedded: list[str] = []
+            content = self.embed_images_as_base64(content, file_path.parent,
+                                                  not_embedded)
             # After every pass that rewrites the source and before the
             # format's own code-block handling: the pass measures what the
             # converter will render, so it must see the text the converter
@@ -6802,7 +6902,8 @@ class ExportHtmlHandler(ExportHandlerBase):
             html = self.drop_empty_table_headers(html)
             html = self.wrap_html_tables(html)
 
-            self.set_export_warnings(export_warnings)
+            self.set_export_warnings(
+                export_warnings + self.image_warnings(not_embedded))
             self.set_header('Content-Type', 'text/html; charset=utf-8')
             self.set_attachment_filename(f'{file_path.stem}.html')
             self.finish(html.encode('utf-8'))
@@ -6814,19 +6915,20 @@ class ExportHtmlHandler(ExportHandlerBase):
             }))
         except Exception as e:
             self.set_status(500)
-            self.finish(json.dumps({'error': str(e)}))
+            # A bare exception (python-docx's UnrecognizedImageError on a Git
+            # LFS pointer saved as .png) has no text; its name is the reason
+            self.finish(json.dumps({'error': str(e) or type(e).__name__}))
 
 
 def setup_route_handlers(web_app):
     """Register all route handlers for the extension."""
     host_pattern = ".*$"
     base_url = web_app.settings["base_url"]
-    namespace = "jupyterlab-export-markdown-extension"
 
     handlers = [
-        (url_path_join(base_url, namespace, "export/pdf"), ExportPdfHandler),
-        (url_path_join(base_url, namespace, "export/docx"), ExportDocxHandler),
-        (url_path_join(base_url, namespace, "export/html"), ExportHtmlHandler),
+        (url_path_join(base_url, API_NAMESPACE, "export/pdf"), ExportPdfHandler),
+        (url_path_join(base_url, API_NAMESPACE, "export/docx"), ExportDocxHandler),
+        (url_path_join(base_url, API_NAMESPACE, "export/html"), ExportHtmlHandler),
     ]
 
     web_app.add_handlers(host_pattern, handlers)
