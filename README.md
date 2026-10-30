@@ -39,7 +39,7 @@ Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No extern
 
 ## Requirements
 
-- JupyterLab >= 4.0.0
+- JupyterLab >= 4.6.0
 - Python >= 3.10
 
 For PDF export, install required system libraries and emoji font:

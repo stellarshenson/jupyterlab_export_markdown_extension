@@ -7,3 +7,4 @@ jupyterlab_export_markdown_extension
 .claude
 eslint.config.mjs
 .venv
+.agents

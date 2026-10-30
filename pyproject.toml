@@ -23,17 +23,17 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "jupyter_server>=2.13.0,<3",
-    "markdown>=3.4",
-    "python-docx>=1.0",
-    "htmldocx>=0.0.6",
-    "beautifulsoup4>=4.7",
-    "playwright>=1.40",
-    "Pillow>=9.0",
-    "reportlab>=4.0",
-    "latex2mathml>=3.0",
-    "matplotlib>=3.5",
-    "Pygments>=2.0"
+    "jupyter_server>=2.21,<3",
+    "markdown>=3.11,<4",
+    "python-docx>=1.2,<2",
+    "htmldocx>=0.0.6,<1",
+    "beautifulsoup4>=4.15,<5",
+    "playwright>=1.64,<2",
+    "Pillow>=13.0,<14",
+    "reportlab>=5.1,<6",
+    "latex2mathml>=3.81,<4",
+    "matplotlib>=3.11,<4",
+    "Pygments>=2.21,<3"
 ]
 dynamic = ["version", "description", "authors", "urls", "keywords"]
 
@@ -42,8 +42,8 @@ jupyterlab-export-markdown-extension = "jupyterlab_export_markdown_extension.cli
 
 [project.optional-dependencies]
 dev = [
-    "jupyterlab>=4",
-    "jupyter-builder>=1.2.0",
+    "jupyterlab>=4.6,<5",
+    "jupyter-builder>=1.2.0,<2",
 ]
 test = [
     "coverage",
@@ -52,7 +52,7 @@ test = [
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
-    "pytest-jupyter[server]>=0.6.0"
+    "pytest-jupyter[server]>=0.11,<1"
 ]
 
 [tool.hatch.version]
