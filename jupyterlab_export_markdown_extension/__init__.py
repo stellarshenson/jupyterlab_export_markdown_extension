@@ -13,7 +13,7 @@ from .routes import setup_route_handlers
 def _jupyter_labextension_paths():
     return [{
         "src": "labextension",
-        "dest": "jupyterlab_export_markdown_extension"
+        "dest": "@stellarshenson/jupyterlab-export-markdown-extension"
     }]
 
 

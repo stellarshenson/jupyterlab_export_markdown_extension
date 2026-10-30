@@ -22,7 +22,7 @@ test('should emit an activation console message', async ({ page }) => {
     logs.filter(
       s =>
         s ===
-        'JupyterLab extension jupyterlab_export_markdown_extension is activated!'
+        'JupyterLab extension @stellarshenson/jupyterlab-export-markdown-extension is activated!'
     )
   ).toHaveLength(1);
 });

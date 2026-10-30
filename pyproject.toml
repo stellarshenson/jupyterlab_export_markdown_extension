@@ -75,8 +75,8 @@ exclude = [".github", "binder"]
 artifacts = ["jupyterlab_export_markdown_extension/vendor"]
 
 [tool.hatch.build.targets.wheel.shared-data]
-"jupyterlab_export_markdown_extension/labextension" = "share/jupyter/labextensions/jupyterlab_export_markdown_extension"
-"install.json" = "share/jupyter/labextensions/jupyterlab_export_markdown_extension/install.json"
+"jupyterlab_export_markdown_extension/labextension" = "share/jupyter/labextensions/@stellarshenson/jupyterlab-export-markdown-extension"
+"install.json" = "share/jupyter/labextensions/@stellarshenson/jupyterlab-export-markdown-extension/install.json"
 "jupyter-config/server-config" = "etc/jupyter/jupyter_server_config.d"
 ".agents/skills/jupyterlab-export-markdown-extension" = "share/jupyter/agents/skills/jupyterlab-export-markdown-extension"
 

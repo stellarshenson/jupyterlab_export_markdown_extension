@@ -1,7 +1,7 @@
 # jupyterlab_export_markdown_extension
 
 [![GitHub Actions](https://github.com/stellarshenson/jupyterlab_export_markdown_extension/actions/workflows/build.yml/badge.svg)](https://github.com/stellarshenson/jupyterlab_export_markdown_extension/actions/workflows/build.yml)
-[![npm version](https://img.shields.io/npm/v/jupyterlab_export_markdown_extension.svg)](https://www.npmjs.com/package/jupyterlab_export_markdown_extension)
+[![npm version](https://img.shields.io/npm/v/@stellarshenson/jupyterlab-export-markdown-extension.svg)](https://www.npmjs.com/package/@stellarshenson/jupyterlab-export-markdown-extension)
 [![PyPI version](https://img.shields.io/pypi/v/jupyterlab-export-markdown-extension.svg)](https://pypi.org/project/jupyterlab-export-markdown-extension/)
 [![Total PyPI downloads](https://static.pepy.tech/badge/jupyterlab-export-markdown-extension)](https://pepy.tech/project/jupyterlab-export-markdown-extension)
 [![JupyterLab 4](https://img.shields.io/badge/JupyterLab-4-orange.svg)](https://jupyterlab.readthedocs.io/en/stable/)

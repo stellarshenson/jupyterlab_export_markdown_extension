@@ -1,7 +1,7 @@
 {
-  "name": "jupyterlab_export_markdown_extension-ui-tests",
+  "name": "@stellarshenson/jupyterlab-export-markdown-extension-ui-tests",
   "version": "1.0.0",
-  "description": "JupyterLab jupyterlab_export_markdown_extension Integration Tests",
+  "description": "JupyterLab @stellarshenson/jupyterlab-export-markdown-extension Integration Tests",
   "private": true,
   "scripts": {
     "start": "jupyter lab --config jupyter_server_test_config.py",

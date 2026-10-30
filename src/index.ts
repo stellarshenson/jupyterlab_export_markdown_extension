@@ -582,10 +582,10 @@ async function exportMarkdown(
 }
 
 /**
- * Initialization data for the jupyterlab_export_markdown_extension extension.
+ * Initialization data for the @stellarshenson/jupyterlab-export-markdown-extension extension.
  */
 const plugin: JupyterFrontEndPlugin<void> = {
-  id: 'jupyterlab_export_markdown_extension:plugin',
+  id: '@stellarshenson/jupyterlab-export-markdown-extension:plugin',
   description:
     'JupyterLab extension to export markdown files as PDF, DOCX and HTML with embedded images',
   autoStart: true,
@@ -599,7 +599,7 @@ const plugin: JupyterFrontEndPlugin<void> = {
     mermaidManager: IMermaidManager | null
   ) => {
     console.log(
-      'JupyterLab extension jupyterlab_export_markdown_extension is activated!'
+      'JupyterLab extension @stellarshenson/jupyterlab-export-markdown-extension is activated!'
     );
 
     // Load settings
