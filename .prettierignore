@@ -8,3 +8,4 @@ jupyterlab_export_markdown_extension
 eslint.config.mjs
 .venv
 .agents
+package-lock.json
