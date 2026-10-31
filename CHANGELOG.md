@@ -2,6 +2,16 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## [1.6.35] - 2026-10-31
+
+### Changed
+
+- Apply the template files and packages the upgrade left out
+
+### Fixed
+
+- Keep the indent of package-lock.json under make install
+
 ## [1.6.33] - 2026-10-31
 
 ### Changed
