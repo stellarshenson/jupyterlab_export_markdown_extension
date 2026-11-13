@@ -199,3 +199,49 @@ async def test_jpeg_is_not_recompressed(jp_fetch, jp_root_dir):
     original = Image.open(jp_root_dir / "photo.jpg")
     assert embedded.quantization == original.quantization, (
         "the JPEG was encoded again with other quantization tables")
+
+
+async def test_dollar_amounts_in_two_paragraphs_are_not_one_equation(
+        jp_fetch, jp_root_dir):
+    """DEF-MARK-130: the inline-math pattern ran across a blank line, so the
+    text between two dollar amounts became one equation and the paragraphs
+    merged."""
+    from docx import Document
+
+    lines = ["Oferta", "Budżet fazy pierwszej to $5000 netto.",
+             "Dwie fazy kosztują ($7000) łącznie.", "Harmonogram",
+             "Tekst końcowy."]
+    (jp_root_dir / "oferta.md").write_text(
+        "# {}\n\n{}\n\n{}\n\n## {}\n\n{}\n".format(*lines), encoding="utf-8")
+    response = await _post(jp_fetch, "docx", "oferta.md")
+    assert response.code == 200
+    doc = Document(io.BytesIO(response.body))
+    assert [p.text for p in doc.paragraphs] == lines
+    assert "oMath" not in _docx_xml(response.body)
+    # math inside one paragraph still pairs, a single line break included
+    (jp_root_dir / "math.md").write_text(
+        "Suma $a +\nb$ jest znana.\n", encoding="utf-8")
+    response = await _post(jp_fetch, "docx", "math.md")
+    assert "oMath" in _docx_xml(response.body)
+
+
+async def test_table_cell_that_begins_with_a_line_break_exports(
+        jp_fetch, jp_root_dir):
+    """DEF-MARK-129: htmldocx has no run to attach a cell's leading <br> to,
+    bare or inside emphasis, and the whole DOCX and PDF export answered 500."""
+    import fitz
+    from docx import Document
+
+    (jp_root_dir / "br.md").write_text(
+        "| A | B |\n|---|---|\n| x | <br>druga linia |\n"
+        "| y | **<br>gruba linia** |\n", encoding="utf-8")
+    response = await _post(jp_fetch, "docx", "br.md")
+    assert response.code == 200, response.body[:300]
+    table = Document(io.BytesIO(response.body)).tables[0]
+    assert table.cell(1, 1).text.strip() == "druga linia"
+    assert table.cell(2, 1).text.strip() == "gruba linia"
+    assert table.cell(2, 1).paragraphs[0].runs[-1].bold
+    response = await _post(jp_fetch, "pdf", "br.md")
+    assert response.code == 200, response.body[:300]
+    text = fitz.open(stream=response.body, filetype="pdf")[0].get_text()
+    assert "druga linia" in text and "gruba linia" in text

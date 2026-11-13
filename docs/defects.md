@@ -545,6 +545,20 @@
   - test-tags: INTEGRATION
   - log: 2026-11-13T18:09:59Z @kj added
   - log: 2026-11-13T18:10:44Z @kj closed
+- [x] `DEF-MARK-129-CELL-BR` **a table cell that begins with <br> fails the DOCX and PDF export with a 500** - MAJOR; a cell whose first content is a line break, bare or inside bold or italic, raises AttributeError in htmldocx ('HtmlToDocx' object has no attribute 'run') and the whole export answers 500; fix: restructure_html_for_docx moves such a cell's content into one <p>; `routes.py`
+  - evidence: test_hardening.py::test_table_cell_that_begins_with_a_line_break_exports: DOCX and PDF answer 200, the cells hold the text, bare and inside bold
+  - root-cause: 2026-11-13T18:56:12Z @kj htmldocx attaches a <br> to self.run (h2d.py handle_starttag), and its per-cell parser has no run before the cell's first text, <p>, <li> or <pre>; the parser class is hard-coded in handle_table, so a subclass does not reach it
+  - repro: export '| A | B |\n|---|---|\n| x | <br>druga linia |' to DOCX or PDF
+  - test-tags: INTEGRATION
+  - log: 2026-11-13T18:52:08Z @kj added
+  - log: 2026-11-13T18:56:12Z @kj closed
+- [x] `DEF-MARK-130-MATH-PARAGRAPHS` **inline math spans a blank line** - MAJOR; two dollar signs in different paragraphs pair as one inline equation: the text between two dollar amounts becomes an equation and the paragraphs merge; fix: an inline-math body cannot contain a blank line, as in the JupyterLab preview; `routes.py` replace_math_with_images, replace_math_with_markers
+  - evidence: test_hardening.py::test_dollar_amounts_in_two_paragraphs_are_not_one_equation: 5 paragraphs as written, no OMML; math across a single line break still pairs
+  - root-cause: 2026-11-13T18:56:12Z @kj the inline-math pattern's body [^$]*? matched newlines, so a dollar sign paired with the next one in a later paragraph; the JupyterLab preview ends inline math at a blank line
+  - repro: export a file with '$5000 netto.' in one paragraph and '($7000) lacznie.' in the next to DOCX; read the paragraphs
+  - test-tags: INTEGRATION
+  - log: 2026-11-13T18:52:21Z @kj added
+  - log: 2026-11-13T18:56:12Z @kj closed
 
 ## Diagram rendering `DIAG`
 
@@ -676,6 +690,14 @@
   - test-tags: UNIT
   - log: 2026-11-13T18:09:58Z @kj added; reason: names the three open widgets the symptom needs
   - log: 2026-11-13T18:10:43Z @kj closed
+- [x] `DEF-DIAG-131-MERMAID-CONFIG` **a UI export leaves JupyterLab's shared Mermaid on the export config** - MAJOR; renderMermaidInTheme calls mermaid.initialize on the instance JupyterLab shares and never restores it, so diagrams JupyterLab draws after an export use the export theme, securityLevel 'loose' and mermaid's default font and size ceilings; fix: the six options JupyterLab sets are saved and applied again in a finally; `src/index.ts`
+  - evidence: Jest mermaid.spec.ts: after a render that succeeds and one that throws, the last initialize call holds exactly the six options JupyterLab set
+  - root-cause: 2026-11-13T18:56:12Z @kj mermaid.initialize replaces the site config starting from mermaid's defaults, it does not merge; JupyterLab's manager initialises only on first load and on themeChanged, so the export's config stayed
+  - repro: dark JupyterLab theme, export a file with a mermaid diagram to PDF, then open another file with a diagram: it is drawn in the light theme
+  - test-tags: UNIT
+  - log: 2026-11-13T18:52:21Z @kj added
+  - log: 2026-11-13T18:56:13Z @kj closed
+  - log: 2026-11-13T19:00:13Z @kj edited evidence "src/**tests**/mermaid.spec.ts: after a render that succeeds and one that throws, the last initialize call holds exactly the six options JupyterLab set" -> "Jest mermaid.spec.ts: after a render that succeeds and one that throws, the last initialize call holds exactly the six options JupyterLab set"
 
 ## Table pagination `TABL`
 

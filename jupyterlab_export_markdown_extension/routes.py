@@ -357,11 +357,13 @@ class PlaywrightSvgRenderer:
     MERMAID_INIT_OPTIONS = {
         'startOnLoad': False,
         'securityLevel': 'loose',
-        # Not set by `renderMermaidInTheme` itself - `initialize` merges onto
-        # the config `@jupyterlab/mermaid`'s manager already applied, so the
-        # browser keeps these ceilings. Without them the server falls back to
-        # mermaid's own much lower defaults and reports a large generated
-        # diagram as a syntax error that JupyterLab renders perfectly well.
+        # Not set by `renderMermaidInTheme`: `initialize` starts from mermaid's
+        # defaults, it does not merge onto the config `@jupyterlab/mermaid`'s
+        # manager applied, so the browser's export render runs with mermaid's
+        # own much lower ceilings and falls back to the diagram JupyterLab
+        # already drew. The server has no such fallback: without these it
+        # reports a large generated diagram as a syntax error that JupyterLab
+        # renders perfectly well.
         'maxTextSize': 100000,
         'maxEdges': 100000,
     }
@@ -2757,6 +2759,8 @@ class ExportHandlerBase(APIHandler):
         content = re.sub(r'\$\$(.+?)\$\$', replace_display, content, flags=re.DOTALL)
 
         # Replace inline math $...$ (require non-space after opening and before closing $)
+        # A blank line ends the body, as in JupyterLab's preview: two dollar
+        # amounts in different paragraphs are not one equation
         def replace_inline(match):
             latex = match.group(1)
             try:
@@ -2765,7 +2769,7 @@ class ExportHandlerBase(APIHandler):
             except Exception:
                 return match.group(0)
 
-        content = re.sub(r'(?<!\$)\$(\S(?:[^$]*?\S)?)\$(?!\$)', replace_inline, content)
+        content = re.sub(r'(?<!\$)\$(\S(?:(?:(?!\n[ \t]*\n)[^$])*?\S)?)\$(?!\$)', replace_inline, content)
 
         # Restore escaped dollars as literal $ (both \$ and \\$ mean literal dollar)
         content = content.replace('[[ESCAPED_DOLLAR]]', '$')
@@ -2856,14 +2860,14 @@ class ExportHandlerBase(APIHandler):
 
         content = re.sub(r'\$\$(.+?)\$\$', replace_display, content, flags=re.DOTALL)
 
-        # Replace inline math $...$
+        # Replace inline math $...$; a blank line ends the body (see replace_math_with_images)
         def replace_inline(match):
             latex = match.group(1)
             idx = len(inline_math)
             inline_math.append(latex)
             return f'\u200dMATH_INLINE_{idx}\u200d'
 
-        content = re.sub(r'(?<!\$)\$(\S(?:[^$]*?\S)?)\$(?!\$)', replace_inline, content)
+        content = re.sub(r'(?<!\$)\$(\S(?:(?:(?!\n[ \t]*\n)[^$])*?\S)?)\$(?!\$)', replace_inline, content)
 
         # Restore escaped dollars as literal $ (both \$ and \\$ mean literal dollar)
         content = content.replace('[[ESCAPED_DOLLAR]]', '$')
@@ -4465,7 +4469,22 @@ class ExportHandlerBase(APIHandler):
                     cols, rows = span_of(cell, 'colspan'), span_of(cell, 'rowspan')
                     if cols > 1 or rows > 1:
                         cell.insert(0, f'⁣TSPAN:{cols}x{rows}⁣')
-            grid = max((sum(span_of(c, 'colspan') for c in cells)
+                    # htmldocx attaches a <br> to its current run and a cell
+                    # has none before its first text, <p>, <li> or <pre>, so a
+                    # cell that begins with a break raised AttributeError and
+                    # the export answered 500. A <p> opens that run
+                    for node in cell.descendants:
+                        name = getattr(node, 'name', None)
+                        if name == 'br':
+                            para = soup.new_tag('p')
+                            for child in list(cell.contents):
+                                para.append(child.extract())
+                            cell.append(para)
+                            break
+                        if name is None or name in ('img', 'p', 'li', 'pre',
+                                                    'table'):
+                            break
+            grid =max((sum(span_of(c, 'colspan') for c in cells)
                         for cells in row_cells), default=0)
             # Padding tops up the RAW cell count: htmldocx sizes its grid by
             # counting the first row's cells and indexes every row by cell

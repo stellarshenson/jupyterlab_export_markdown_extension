@@ -132,15 +132,29 @@ function svgToDataUri(svgString: string): string {
  * gives a diagram matching the chosen export theme. Returns null on any
  * failure so the caller can fall back to the already-rendered SVG.
  */
-async function renderMermaidInTheme(
+export async function renderMermaidInTheme(
   manager: IMermaidManager,
   source: string,
   theme: 'light' | 'dark'
 ): Promise<string | null> {
+  let restore: (() => void) | undefined;
   try {
     const mermaid = await manager.getMermaid();
-    // initialize() is global config; JupyterLab re-applies its own theme on
-    // its next render, so forcing it here only affects this export pass.
+    // initialize() replaces the config of the instance JupyterLab shares, and
+    // JupyterLab sets its own only on first load and on a theme change. So
+    // the six options its manager sets are kept and applied again below. Not
+    // the whole site config: mermaid would then treat its `layout: 'dagre'`
+    // as chosen by the user and stop laying mindmaps out its own way.
+    const site = mermaid.mermaidAPI.getSiteConfig();
+    restore = () =>
+      mermaid.initialize({
+        theme: site.theme,
+        fontFamily: site.fontFamily,
+        securityLevel: site.securityLevel,
+        maxTextSize: site.maxTextSize,
+        maxEdges: site.maxEdges,
+        startOnLoad: site.startOnLoad
+      });
     mermaid.initialize({
       startOnLoad: false,
       theme: theme === 'dark' ? 'dark' : 'default',
@@ -152,6 +166,8 @@ async function renderMermaidInTheme(
   } catch (error) {
     console.warn('Export Markdown: mermaid re-render failed:', error);
     return null;
+  } finally {
+    restore?.();
   }
 }
 
