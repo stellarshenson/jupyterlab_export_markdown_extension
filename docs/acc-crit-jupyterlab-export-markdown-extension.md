@@ -227,8 +227,9 @@ A `> [!NOTE]` block is one callout however many paragraphs it holds. The marker 
 - [x] `ACC-ALERT-44` **Widening the continuation captures no more than the alert** - two adjacent alerts stay two boxes, and an ordinary multi-paragraph blockquote is still a blockquote
   - log: 2026-07-23T00:00:00Z @kj criterion added - accepting a bare `>` widens what the pattern will swallow
   - log: 2026-07-23T00:00:00Z @kj held - tests `test_two_adjacent_alerts_stay_separate`, `test_a_plain_blockquote_is_still_a_blockquote`
-- [ ] `ACC-ALERT-45` **Block structure inside an alert survives** - a list or a fence written in an alert body still flattens to run-on text
+- [-] `ACC-ALERT-45` **Block structure inside an alert survives** - a list or a fence written in an alert body still flattens to run-on text
   - log: 2026-07-23T00:00:00Z @kj criterion added and left open; pre-dates DEF-MARK-11 and needs paired markers plus a body-element sweep in two passes. Registered as DEF-MARK-14
+  - log: 2026-11-13T18:11:06Z @kj rejected: rejected: the feature does not exist - an alert is emitted as one paragraph; block structure inside it needs the alert redesign tracked as DEF-MARK-14, left open for the owner
 
 ## Heading level fidelity `HEAD`
 
@@ -255,10 +256,13 @@ The PDF is built from the DOCX, so the two must draw the same document the same 
 - [x] `ACC-HEAD-49` **The italic heading faces draw in the document's own font, not a core substitute** - H4 and H6 must not fall back to Helvetica
   - log: 2026-07-23T00:00:00Z @kj criterion added after the confirming UX round measured H4/H6 in `Helvetica-BoldOblique`/`-Oblique` while H1-H3, H5 and body were DejaVu - `_register_unicode_fonts` committed to DejaVu (no oblique on this box) and stopped, so every italic fell to a core face
   - log: 2026-07-23T00:00:00Z @kj held - the registration now fills each variant from the first family that ships it; normal and bold stay DejaVu, the italics come from Liberation. Test `test_italic_headings_do_not_fall_back_to_a_core_font`, mutation-proved
-- [ ] `ACC-HEAD-50` **A heading is not stranded at the foot of a page** - no PDF heading style sets `keepWithNext`, so a page break can fall between a heading and its first paragraph
+- [x] `ACC-HEAD-50` **A heading is not stranded at the foot of a page** - no PDF heading style sets `keepWithNext`, so a page break can fall between a heading and its first paragraph
+  - evidence: test_hardening.py::test_pdf_heading_is_not_stranded_at_the_foot_of_a_page: a heading needs room for itself and two body lines or starts the next page (DEF-MARK-15 closed 2026-11-13)
   - log: 2026-07-23T00:00:00Z @kj criterion added and left open; a pagination question rather than a face question. Registered as DEF-MARK-15
-- [ ] `ACC-HEAD-51` **H5 is legible against body text** - H5 is regular navy at body size, told from black body text by colour alone (~2:1)
+  - log: 2026-11-13T18:11:06Z @kj closed
+- [-] `ACC-HEAD-51` **H5 is legible against body text** - H5 is regular navy at body size, told from black body text by colour alone (~2:1)
   - log: 2026-07-23T00:00:00Z @kj criterion added and left open as an accepted trade-off; the face is copied from Word's own Heading 5, so raising the contrast would break the PDF/DOCX parity above. Recorded in DEF-MARK-12
+  - log: 2026-11-13T18:11:06Z @kj rejected: rejected: H5 takes the face of the DOCX template (regular, #243F60) on purpose, so PDF and DOCX agree; a bolder H5 would make the PDF differ from its own DOCX
 
 ## Code line wrapping `WRAP`
 
@@ -276,8 +280,9 @@ The PDF is built from the DOCX, so the two must draw the same document the same 
 - [x] `ACC-WRAP-55` **The split is measured on real characters, not on markup** - escaping before the split would count `&amp;` as five columns where the reader sees one
   - log: 2026-07-23T00:00:00Z @kj criterion added; the token loop was rewritten to carry raw `(colour, text)` segments and escape at render time
   - log: 2026-07-23T00:00:00Z @kj held by construction - `render()` is the only place escaping happens, and it runs after `wrap()`
-- [ ] `ACC-WRAP-56` **Accepted limits** - a line dense with glyphs the fixed-width code font lacks (emoji, CJK) can still overrun, and a wrapped continuation carries no hanging indent to set it apart from a new statement
+- [-] `ACC-WRAP-56` **Accepted limits** - a line dense with glyphs the fixed-width code font lacks (emoji, CJK) can still overrun, and a wrapped continuation carries no hanging indent to set it apart from a new statement
   - log: 2026-07-23T00:00:00Z @kj both raised in the adversarial round and left as accepted trade-offs - the wide-glyph case is rare in code and still far better than the whole line running off the page; the continuation marker is the universal soft-wrap tradeoff. Both stated in the `code_columns` docstring
+  - log: 2026-11-13T18:11:06Z @kj rejected: rejected: states an accepted limit, not a behaviour to meet - emoji and CJK in a code line can overrun, and a wrapped line has no hanging indent
 
 ## Mermaid without a browser `MERM`
 
@@ -344,8 +349,9 @@ Mermaid is a browser library. The extension renders each diagram in the page and
 - [x] `ACC-MERM-76` **Reporting a warning cannot fail an export, and the header stays small enough to travel** - the report is only useful if it arrives
   - log: 2026-07-23T00:00:00Z @kj criterion added; the first version of this log cited a 4000-character Tornado limit, which a later round disproved by reading the installed 6.5.7 - `_convert_header_value` validates characters only. The real constraint is the front end: nginx's default `proxy_buffer_size` is 4KB and has to hold the whole response header block
   - log: 2026-07-23T00:00:00Z @kj held - at most six codes can co-occur and `MAX_REPORTED_DIAGRAMS` caps the indices, measured at 1655 bytes worst case; test `test_the_header_stays_bounded_on_a_document_full_of_diagrams` (900 diagrams) asserts against the constant rather than a literal, and the header is added rather than set so it cannot displace another exposed header
-- [ ] `ACC-MERM-77` **Nothing surfaces a warning in the JupyterLab UI** - a UI export that reaches the server-side path ships the document with the explanation in a header the client never reads
+- [-] `ACC-MERM-77` **Nothing surfaces a warning in the JupyterLab UI** - a UI export that reaches the server-side path ships the document with the explanation in a header the client never reads
   - log: 2026-07-23T00:00:00Z @kj left open deliberately at the user's direction: asked how warnings should reach the caller, they chose the response header alone over a dialog. Reachable only when the mermaid manager token is absent, since otherwise the browser renders every diagram and the server pass finds nothing to warn about
+  - log: 2026-11-13T18:11:06Z @kj rejected: rejected: by the owner's decision recorded in set_export_warnings - warnings reach a caller through the X-Export-Warnings header alone, not a dialog; the CLI prints them
 - [x] `ACC-MERM-78` **A diagram is counted wherever markdown counts one** - inside a list item, behind a blockquote marker, at any indentation
   - log: 2026-07-23T00:00:00Z @kj criterion added after the third round found the second round's fence rule anchored indentation at column 0. CommonMark measures it from the container's content column, JupyterLab renders those diagrams, and the browser pairs them with fences by position - so skipping one puts every later picture on the wrong diagram
   - log: 2026-07-23T00:00:00Z @kj held - prefix `[ \t>]*` on both sides, and a quoted block's markers stripped before mermaid parses it (which the original regex never did); tests `test_a_diagram_nested_in_a_list_is_still_a_diagram` and `test_a_blockquoted_diagram_is_still_a_diagram`, mutation-proved
@@ -387,8 +393,9 @@ Cambria, the DOCX body face, has no glyph for a star, a box-drawing rule or most
 - [x] `ACC-SYMB-88` **The export works through the real UI, not only through the handlers** - a rendering fix is worth nothing if the command, the menu entry or the download is broken
   - log: 2026-08-25T00:00:00Z @kj criterion added with DEF-MARK-22/DEF-MARK-23; the Python suite calls the endpoints directly and cannot see any of that
   - log: 2026-08-25T00:00:00Z @kj held - galata spec `ui-tests/tests/export-fidelity.spec.ts` opens the document in Lab, exports from File > Export Markdown As > Microsoft Word (.docx), and reads the downloaded `word/document.xml` back. Proved live against the released build: it fails on the star assertion, passes against the fix
-- [ ] `ACC-SYMB-89` **Accepted limit** - the font is named, not embedded; a machine without `Segoe UI Symbol` (a Mac, a bare Linux) substitutes as before
+- [-] `ACC-SYMB-89` **Accepted limit** - the font is named, not embedded; a machine without `Segoe UI Symbol` (a Mac, a bare Linux) substitutes as before
   - log: 2026-08-27T00:00:00Z @kj accepted limit recorded alongside the criteria it bounds
+  - log: 2026-11-13T18:11:07Z @kj rejected: rejected: states an accepted limit, not a behaviour to meet - the symbol font is named, not embedded
 
 ## Inline HTML fidelity `HTML`
 
@@ -403,10 +410,12 @@ Markdown files carry HTML, and a Jupyter one carries more than most - `<font col
 - [x] `ACC-HTML-92` **A `<div>` opens its own block** - with no handler its content joined whatever paragraph was already open, so two blocks ran together and one alignment overwrote the other
   - log: 2026-08-25T00:00:00Z @kj criterion added after measuring `<p align="center">A</p><div align="right">B</div>` arrive as one right-aligned paragraph holding both
   - log: 2026-08-25T00:00:00Z @kj held - test `test_aligned_div_is_its_own_centred_paragraph` asserts the block is centred and has not swallowed the paragraph after it
-- [ ] `ACC-HTML-93` **Accepted limit** - PDF alignment reaches a body paragraph and a heading only. `process_paragraph` maps `para.alignment` onto those two styles; a list item, a blockquote and a table cell keep the indent their own style sets, so a centred `<div>` inside one draws at that style's left edge. Registered as `DEF-MARK-25`
+- [-] `ACC-HTML-93` **Accepted limit** - PDF alignment reaches a body paragraph and a heading only. `process_paragraph` maps `para.alignment` onto those two styles; a list item, a blockquote and a table cell keep the indent their own style sets, so a centred `<div>` inside one draws at that style's left edge. Registered as `DEF-MARK-25`
   - log: 2026-08-27T00:00:00Z @kj accepted limit recorded alongside the criteria it bounds
-- [ ] `ACC-HTML-94` **Accepted limit** - `font-size`, `font-family` and `<small>` are still dropped; every property closed above had an equivalent tag to be rewritten into and these have none, so they need a marker and a run pass of their own. Registered as `DEF-MARK-24`
+  - log: 2026-11-13T18:11:07Z @kj rejected: rejected: states an accepted limit, not a behaviour to meet - PDF alignment reaches body paragraphs and headings only; DEF-MARK-25 rejected with it
+- [-] `ACC-HTML-94` **Accepted limit** - `font-size`, `font-family` and `<small>` are still dropped; every property closed above had an equivalent tag to be rewritten into and these have none, so they need a marker and a run pass of their own. Registered as `DEF-MARK-24`
   - log: 2026-08-27T00:00:00Z @kj accepted limit recorded alongside the criteria it bounds
+  - log: 2026-11-13T18:11:07Z @kj rejected: rejected: states an accepted limit, not a behaviour to meet - font-size, font-family and small are dropped; DEF-MARK-24 rejected with it
 
 ## Indented list and callout rescue `LIST`
 
@@ -450,10 +459,11 @@ Two-space lists, hand-drawn callout divs and per-list numbering in Word, PDF and
   - test-tags: unit
   - log: 2026-08-27T22:45:41Z @kj added
   - log: 2026-08-27T22:46:10Z @kj closed
-- [ ] `ACC-LIST-101` **Accepted limit** - A one-space fence lets the sample extractor cut a rescued chunk (DEF-MARK-106) and a GitHub alert inside a numbered step still splits the list (DEF-MARK-107); both pre-date the rescue and stay open
+- [-] `ACC-LIST-101` **Accepted limit** - A one-space fence lets the sample extractor cut a rescued chunk (DEF-MARK-106) and a GitHub alert inside a numbered step still splits the list (DEF-MARK-107); both pre-date the rescue and stay open
   - related: DEF-MARK-106, DEF-MARK-107
   - test: n/a
   - log: 2026-08-27T22:45:41Z @kj added
+  - log: 2026-11-13T18:11:07Z @kj rejected: rejected: states an accepted limit, not a behaviour to meet - DEF-MARK-106 rejected as exotic, DEF-MARK-107 stays open with the alert redesign
 
 ## Command-line conversion `CLI`
 

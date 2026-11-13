@@ -42,14 +42,15 @@ Export markdown files to PDF, DOCX, and HTML directly from JupyterLab. No extern
 - JupyterLab >= 4.6.0
 - Python >= 3.12
 
-For PDF export, install required system libraries and emoji font:
+An SVG image or a Mermaid diagram in a DOCX or PDF export is drawn by Playwright Chromium on the server. Install the browser and its system libraries once (about 270 MB; uses `sudo apt-get` on Debian/Ubuntu):
 
 ```bash
-# Ubuntu/Debian
-sudo apt-get install libcairo2 libpango-1.0-0 libpangoft2-1.0-0 fonts-noto-color-emoji
+jupyterlab-export-markdown-extension install
 ```
 
-Mermaid diagrams are rendered client-side using JupyterLab's built-in Mermaid support - no additional installation required. An export driven through the REST endpoints instead of the UI has no browser to render them, so the server renders those diagrams itself with a bundled copy of Mermaid, in the same Playwright Chromium the SVG rasterizer uses - no network access involved.
+PDF export reads its fonts from `/usr/share/fonts/truetype` (DejaVu, Liberation or FreeSans); without them it falls back to Helvetica, which draws Latin-1 text only.
+
+Mermaid diagrams are rendered client-side using JupyterLab's built-in Mermaid support; a DOCX or PDF export then rasterizes them in that Chromium. An export driven through the REST endpoints instead of the UI has no browser to render them, so the server renders those diagrams itself with a bundled copy of Mermaid, in the same Playwright Chromium the SVG rasterizer uses - no network access involved.
 
 A diagram that cannot be rendered never fails the export: its source is kept and the response carries an `X-Export-Warnings` header describing what happened, as a JSON array of `{code, count, diagrams, message}`. `code` is one of `chromium-unavailable`, `bundle-missing`, `syntax-error`, `layout-unsupported`, `render-timeout`, `skipped`, `budget-exhausted`, `rasterize-failed` or `render-failed`; `count` is how many diagrams the warning covers, `diagrams` a bounded prefix of their zero-based positions in the document, and `message` the remedy in full - a caller needs nothing beyond the header. An image that is not embedded - its file does not exist or is outside the server root, or its download failed - is reported under the code `image-not-embedded`, with `images`, the first 3 of its paths as written, in place of `diagrams`; HTML keeps such an image's path, DOCX and PDF show a text placeholder. The header is absent when every diagram rendered and every image was embedded, and is listed in `Access-Control-Expose-Headers` so a cross-origin caller can read it.
 

@@ -11,6 +11,7 @@ import { IMainMenu } from '@jupyterlab/mainmenu';
 import { IMermaidManager } from '@jupyterlab/mermaid';
 import { ISettingRegistry } from '@jupyterlab/settingregistry';
 import { Menu, Widget } from '@lumino/widgets';
+import { diagramTheme, renderedMarkdownFor } from './preview';
 import { requestBlobAPI } from './request';
 
 /**
@@ -383,8 +384,7 @@ function mermaidBlocksFromSource(source: string): string[] {
 async function captureMermaidDiagrams(
   shell: JupyterFrontEnd.IShell,
   manager: IMermaidManager | null,
-  theme: 'light' | 'dark',
-  reThemeDom = true
+  theme: 'light' | 'dark'
 ): Promise<IMermaidDiagram[]> {
   const diagrams: IMermaidDiagram[] = [];
   const currentWidget = shell.currentWidget;
@@ -393,15 +393,12 @@ async function captureMermaidDiagrams(
     return diagrams;
   }
 
-  // Find rendered markdown content - first try within the widget, then search entire document
-  // This handles cases where preview is in a separate panel from the editor
-  const widgetNode = currentWidget.node;
-  let renderedMarkdown = widgetNode.querySelector('.jp-RenderedMarkdown');
-
-  // If not found in current widget, search entire document for rendered markdown
-  if (!renderedMarkdown) {
-    renderedMarkdown = document.querySelector('.jp-RenderedMarkdown');
-  }
+  // Rendered markdown of this file: in the widget, or in its preview when the
+  // preview is in a separate panel from the editor
+  const renderedMarkdown = renderedMarkdownFor(
+    currentWidget,
+    shell.widgets('main')
+  );
 
   let mermaidIndex = 0;
 
@@ -430,7 +427,7 @@ async function captureMermaidDiagrams(
       let svgData: string | null = null;
 
       // Prefer re-rendering the source in the chosen export theme
-      if (manager && reThemeDom) {
+      if (manager) {
         const source = findMermaidSource(img);
         if (source) {
           const themed = await renderMermaidInTheme(manager, source, theme);
@@ -726,13 +723,13 @@ const plugin: JupyterFrontEndPlugin<void> = {
           const dialog = showExportingDialog(format);
 
           try {
-            // Resolve the DOCX/PDF theme and re-render mermaid to match it
+            // Resolve the DOCX/PDF theme and re-render mermaid in the theme
+            // of the format being exported
             const resolvedDocxTheme = resolveDocxTheme(docxTheme);
             const mermaidDiagrams = await captureMermaidDiagrams(
               shell,
               mermaidManager,
-              resolvedDocxTheme,
-              format !== 'html'
+              diagramTheme(format, htmlTheme, resolvedDocxTheme)
             );
             await exportMarkdown(
               path,

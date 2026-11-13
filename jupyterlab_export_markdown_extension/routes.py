@@ -33,7 +33,7 @@ try:
     from reportlab.lib.units import inch
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage,
-        Preformatted, XPreformatted
+        Preformatted, XPreformatted, CondPageBreak
     )
     from reportlab.lib import colors
     from reportlab.pdfbase import pdfmetrics
@@ -102,10 +102,12 @@ _IMG_TAG_RE = re.compile(r'<img\b(?:[^>"\']|"[^"]*"|\'[^\']*\')*>', re.IGNORECAS
 #: (?<![-\w:]) guard keeps `data-src`/`lowsrc`/`xlink:src` from matching.
 _IMG_SRC_ATTR_RE = re.compile(r'(?<![-\w:])(src\s*=\s*)(["\'])(.*?)\2', re.IGNORECASE)
 
+#: A fenced block, backticks or tildes, matched as a pair of fence runs.
+_MARKDOWN_FENCE = r'```[\s\S]*?```|~~~[\s\S]*?~~~'
+
 #: Markdown the image passes leave as written: a fenced block, an inline code
-#: span on one line, a comment. Tilde fences are not covered - the same gap
-#: the math passes have (DEF-DIAG-19).
-_MARKDOWN_CODE_OR_COMMENT = r'```[\s\S]*?```|`[^`\n]+`|<!--[\s\S]*?-->'
+#: span on one line, a comment.
+_MARKDOWN_CODE_OR_COMMENT = _MARKDOWN_FENCE + r'|`[^`\n]+`|<!--[\s\S]*?-->'
 
 
 def _outside(skip: str, text: str, change) -> str:
@@ -400,6 +402,25 @@ class PlaywrightSvgRenderer:
         """
         await ctx.route('**/*', lambda route: route.abort())
 
+    @staticmethod
+    async def _block_private_hosts(ctx) -> None:
+        """Refuse a request to a non-public address - localhost, the intranet,
+        cloud metadata - and let a public one through, so a web font still
+        loads. For an SVG the document supplied: an `<image href>` inside it
+        made this server fetch that URL (DEF-DIAG-17).
+        """
+        async def guard(route):
+            host = urlparse(route.request.url).hostname
+            # shortcut: the name is checked here and resolved again by
+            # Chromium, so a rebinding DNS name passes; upgrade to a proxy
+            # that pins the address if that is ever in the threat model
+            if await asyncio.to_thread(ExportHandlerBase._host_is_blocked, host):
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await ctx.route('**/*', guard)
+
     #: Mermaid's own words when a diagram asks for a layout engine that was
     #: never registered. Told apart from a syntax error because the remedy is
     #: the opposite: the diagram is fine, this server just cannot draw it.
@@ -580,9 +601,11 @@ class PlaywrightSvgRenderer:
         try:
             if block_network:
                 # Only for an SVG this server generated from document text -
-                # see `_block_network`. An SVG the user supplied keeps the
-                # browser's own behaviour, web fonts and all, as it always had.
+                # see `_block_network`. An SVG the user supplied keeps its web
+                # fonts and loses only requests to non-public addresses.
                 await self._block_network(ctx)
+            else:
+                await self._block_private_hosts(ctx)
             page = await ctx.new_page()
             probe_html = (
                 "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
@@ -851,10 +874,18 @@ class ExportHandlerBase(APIHandler):
         low, high = bounds
         return min(max(width, low), high)
 
-    def get_absolute_path(self, relative_path: str) -> Path:
-        """Convert a relative path to an absolute path within the server root."""
-        root_dir = self.contents_manager.root_dir
-        return Path(root_dir) / relative_path
+    def get_absolute_path(self, relative_path: str) -> Path | None:
+        """The file a path names inside the server root, or None when the
+        path leaves the root (``../``, an absolute path).
+
+        Links are not resolved, as jupyter_server's own contents manager does
+        not: a folder linked into the root still exports.
+        """
+        root = os.path.abspath(self.contents_manager.root_dir)
+        path = os.path.normpath(os.path.join(root, str(relative_path).lstrip('/')))
+        if not (path + os.sep).startswith(root.rstrip(os.sep) + os.sep):
+            return None
+        return Path(path)
 
     @staticmethod
     def _ip_is_blocked(ip_str: str) -> bool:
@@ -1606,7 +1637,10 @@ class ExportHandlerBase(APIHandler):
                     try:
                         from PIL import Image
                         img = Image.open(filepath)
-                        img.save(filepath, dpi=(dpi, dpi))
+                        # 'keep': saved again at the default quality 75, a
+                        # photo lost detail it had on disk
+                        keep = {'quality': 'keep'} if img.format == 'JPEG' else {}
+                        img.save(filepath, dpi=(dpi, dpi), **keep)
                     except Exception:
                         pass
 
@@ -2470,7 +2504,9 @@ class ExportHandlerBase(APIHandler):
             else:
                 return f'\n\n{marker}{alert_content}\n\n'
 
-        return re.sub(alert_pattern, replace_alert, content)
+        # An alert written inside a fence is a sample of the syntax
+        return _outside(_MARKDOWN_FENCE, content,
+                        lambda text: re.sub(alert_pattern, replace_alert, text))
 
     def clean_alert_markers_from_html(self, html: str, show_labels: bool = False) -> str:
         """Remove zero-width space markers from HTML output.
@@ -2694,7 +2730,7 @@ class ExportHandlerBase(APIHandler):
             code_placeholders.append(match.group(0))
             return f'[[MATH_CODE_BLOCK_{len(code_placeholders) - 1}]]'
 
-        content = re.sub(r'```[\s\S]*?```', protect_fenced, content)
+        content = re.sub(_MARKDOWN_FENCE, protect_fenced, content)
 
         # Protect inline code (`...`)
         def protect_inline(match):
@@ -2797,7 +2833,7 @@ class ExportHandlerBase(APIHandler):
             code_placeholders.append(match.group(0))
             return f'[[MATH_CODE_BLOCK_{len(code_placeholders) - 1}]]'
 
-        content = re.sub(r'```[\s\S]*?```', protect_fenced, content)
+        content = re.sub(_MARKDOWN_FENCE, protect_fenced, content)
 
         def protect_inline(match):
             code_placeholders.append(match.group(0))
@@ -4227,6 +4263,10 @@ class ExportHandlerBase(APIHandler):
             del el['align']
             if align in ('left', 'right', 'center', 'justify'):
                 self._add_css(el, f'text-align:{align}')
+        # <center> is a centred <div>, and takes the div pass below
+        for el in soup.find_all('center'):
+            el.name = 'div'
+            self._add_css(el, 'text-align:center')
         # A <div> has no handler either, so its text joins whatever paragraph
         # is already open and two blocks run together. One holding only inline
         # content becomes the paragraph it stands for; one wrapping blocks
@@ -4618,7 +4658,9 @@ class ExportHandlerBase(APIHandler):
         body = document.element.body
         for run_elem in body.iter(qn('w:r')):
             text = ''.join((t.text or '') for t in run_elem.findall(qn('w:t')))
-            if not text or text.isascii():
+            # Below the arrows Courier has the glyphs: accented Latin, Greek,
+            # Cyrillic, the euro sign
+            if all(c < '\u2190' for c in text):
                 continue
             rpr = run_elem.find(qn('w:rPr'))
             if rpr is None:
@@ -5153,7 +5195,7 @@ class ExportHandlerBase(APIHandler):
             font-size: 0.85em;
             border: 1px solid {border_color};
         }}
-        code {{
+        code, kbd, samp {{
             background: {code_bg};
             padding: 2px 6px;
             border-radius: 4px;
@@ -5269,7 +5311,7 @@ class ExportHandlerBase(APIHandler):
                 background: {dk_code};
                 border-color: {dk_border};
             }}
-            code {{
+            code, kbd, samp {{
                 background: {dk_code};
             }}
             pre code {{
@@ -5884,7 +5926,11 @@ class ExportHandlerBase(APIHandler):
             # Detect heading styles
             heading = heading_style_for(para)
             if heading is not None:
-                return Paragraph(text, aligned(heading, para))
+                # Room for the heading and two body lines, or it starts the
+                # next page: a heading alone at a page foot reads as orphaned
+                return [CondPageBreak(heading.leading + heading.spaceAfter
+                                      + 2 * normal_style.leading),
+                        Paragraph(text, aligned(heading, para))]
 
             # Blockquote: style_docx_blockquotes gave it a left border, shading
             # and indent that process_paragraph would otherwise drop. Render it
@@ -6438,7 +6484,7 @@ class ExportPdfHandler(ExportHandlerBase):
 
             file_path = self.get_absolute_path(relative_path)
 
-            if not file_path.exists():
+            if file_path is None or not file_path.is_file():
                 self.set_status(404)
                 self.finish(json.dumps({'error': 'File not found'}))
                 return
@@ -6455,8 +6501,11 @@ class ExportPdfHandler(ExportHandlerBase):
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             content = self.replace_math_with_images(content, width=math_pixel_width)
             not_embedded: list[str] = []
-            content = self.embed_images_as_base64(content, file_path.parent,
-                                                  not_embedded)
+            # In a thread: a remote image is a blocking download of up to
+            # 10 s, and on the event loop it froze every kernel and terminal
+            content = await asyncio.to_thread(
+                self.embed_images_as_base64, content, file_path.parent,
+                not_embedded)
             # After every pass that rewrites the source and before the
             # format's own code-block handling: the pass measures what the
             # converter will render, so it must see the text the converter
@@ -6600,7 +6649,7 @@ class ExportDocxHandler(ExportHandlerBase):
 
             file_path = self.get_absolute_path(relative_path)
 
-            if not file_path.exists():
+            if file_path is None or not file_path.is_file():
                 self.set_status(404)
                 self.finish(json.dumps({'error': 'File not found'}))
                 return
@@ -6619,8 +6668,11 @@ class ExportDocxHandler(ExportHandlerBase):
             # Use OMML markers for DOCX (native Word equations)
             content, inline_math, display_math = self.replace_math_with_markers(content)
             not_embedded: list[str] = []
-            content = self.embed_images_as_base64(content, file_path.parent,
-                                                  not_embedded)
+            # In a thread: a remote image is a blocking download of up to
+            # 10 s, and on the event loop it froze every kernel and terminal
+            content = await asyncio.to_thread(
+                self.embed_images_as_base64, content, file_path.parent,
+                not_embedded)
             # After every pass that rewrites the source and before the
             # format's own code-block handling: the pass measures what the
             # converter will render, so it must see the text the converter
@@ -6864,7 +6916,7 @@ class ExportHtmlHandler(ExportHandlerBase):
 
             file_path = self.get_absolute_path(relative_path)
 
-            if not file_path.exists():
+            if file_path is None or not file_path.is_file():
                 self.set_status(404)
                 self.finish(json.dumps({'error': 'File not found'}))
                 return
@@ -6880,8 +6932,11 @@ class ExportHtmlHandler(ExportHandlerBase):
             content = self.preprocess_task_lists(content)
             content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
             not_embedded: list[str] = []
-            content = self.embed_images_as_base64(content, file_path.parent,
-                                                  not_embedded)
+            # In a thread: a remote image is a blocking download of up to
+            # 10 s, and on the event loop it froze every kernel and terminal
+            content = await asyncio.to_thread(
+                self.embed_images_as_base64, content, file_path.parent,
+                not_embedded)
             # After every pass that rewrites the source and before the
             # format's own code-block handling: the pass measures what the
             # converter will render, so it must see the text the converter

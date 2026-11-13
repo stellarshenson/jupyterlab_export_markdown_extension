@@ -1,6 +1,6 @@
 {
     "name": "@stellarshenson/jupyterlab-export-markdown-extension",
-    "version": "1.6.36",
+    "version": "1.6.38",
     "description": "Jupyterlab extension to export markdown file as pdf, docx and html (with embedded images)",
     "keywords": [
         "jupyter",
@@ -155,6 +155,6 @@
         }
     },
     "allowScripts": {
-        "@fortawesome/fontawesome-free": true
+        "@fortawesome/fontawesome-free@5.15.4": true
     }
 }
