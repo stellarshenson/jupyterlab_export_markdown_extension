@@ -4475,6 +4475,147 @@ class TestMultiParagraphAlert:
         assert "Just a quote." in html and "Second quoted paragraph." in html
 
 
+class TestAlertBlockStructure:
+    """DEF-MARK-14: a list, a heading or a fence inside a `> [!NOTE]` body was
+    folded into the alert's one paragraph. DEF-MARK-107: an alert inside a
+    numbered step ended the list."""
+
+    DOC = (
+        "> [!TIP]\n"
+        "> Remember:\n"
+        "> - item one\n"
+        "> - item two\n"
+        ">\n"
+        "> ### Sample\n"
+        "> ```python\n"
+        "> answer = 42\n"
+        "> ```\n"
+        "> After the sample.\n\n"
+        "Closing text.\n"
+    )
+    STEP = "1. Step\n\n   > [!NOTE]\n   > noted\n\n2. Next\n"
+
+    async def _export(self, jp_fetch, jp_root_dir, fmt, doc):
+        (jp_root_dir / "blocks.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", f"export/{fmt}",
+            method="POST", body=json.dumps({"path": "blocks.md"}),
+            raise_error=False)
+        assert r.code == 200, f"{fmt} export returned {r.code}"
+        return r.body
+
+    @staticmethod
+    def _alert_tables(doc, bar):
+        from docx.oxml.ns import qn
+
+        found = []
+        for table in doc.tables:
+            borders = table._tbl.find(qn('w:tblPr')).find(qn('w:tblBorders'))
+            left = borders.find(qn('w:left')) if borders is not None else None
+            if left is not None and left.get(qn('w:color')) == bar:
+                found.append(table)
+        return found
+
+    def test_a_body_the_box_cannot_carry_stays_one_paragraph(self):
+        """A table would end a Word cell and the PDF callout draws none; an
+        unclosed fence would swallow the end mark."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        handler = ExportHandlerBase.__new__(ExportHandlerBase)
+        for body in ("> - item\n> \n> a | b\n> --- | ---\n> 1 | 2\n",
+                     "> - item\n> ```\n> never closed\n"):
+            out = handler.preprocess_github_alerts("> [!NOTE]\n" + body)
+            assert handler._ALERT_END not in out, out
+            assert out.strip().startswith("\u200bNOTE\u200b- item<br>"), out
+        # a fence written as a sample of the syntax is left as written
+        sample = "```md\n> [!NOTE]\n> - item\n```\n"
+        assert handler.preprocess_github_alerts(sample) == sample
+
+    async def test_html_box_holds_the_list_the_heading_and_the_sample(
+            self, jp_fetch, jp_root_dir):
+        html = (await self._export(
+            jp_fetch, jp_root_dir, "html", self.DOC)).decode("utf-8")
+        assert html.count('border-left:4px solid') == 1, "expected one box"
+        box = html[html.index('border-left:4px solid'):
+                   html.index('Closing text.')]
+        assert re.search(r'<ul>\s*<li>item one</li>\s*<li>item two</li>\s*</ul>',
+                         box), f"the list is not a list in the box: {box!r}"
+        assert re.search(r'<h3[^>]*>Sample</h3>', box), box
+        assert '<pre>' in box and 'answer' in box, (
+            f"the fence is not a code block in the box: {box!r}")
+        assert 'After the sample.' in box, box
+        assert '\u200b' not in html, "an alert marker reached the page"
+
+    async def test_docx_box_holds_the_list_the_heading_and_the_sample(
+            self, jp_fetch, jp_root_dir):
+        from docx import Document
+
+        body = await self._export(jp_fetch, jp_root_dir, "docx", self.DOC)
+        doc = Document(io.BytesIO(body))
+        tables = self._alert_tables(doc, '1A7F37')
+        assert len(tables) == 1, f"expected one TIP table, got {len(tables)}"
+        cell = tables[0].rows[0].cells[0]
+        styles = {p.text: p.style.name for p in cell.paragraphs}
+        assert styles.get('item one') == styles.get('item two') == 'List Bullet', (
+            f"the items are not list paragraphs of the box: {styles}")
+        assert styles.get('Sample') == 'Heading 3', styles
+        assert 'answer = 42' in cell.text and 'After the sample.' in cell.text, (
+            f"the box lost the sample or the text under it: {cell.text!r}")
+        assert [p.text for p in doc.paragraphs if p.text.strip()] == [
+            'Closing text.'], "a block of the alert stands outside its box"
+        with zipfile.ZipFile(io.BytesIO(body)) as z:
+            assert '\u200b' not in z.read('word/document.xml').decode('utf-8')
+
+    async def test_pdf_box_holds_the_list_and_the_sample(
+            self, jp_fetch, jp_root_dir):
+        import fitz
+
+        doc = fitz.open(
+            stream=await self._export(jp_fetch, jp_root_dir, "pdf", self.DOC),
+            filetype="pdf")
+        page = doc[0]
+        text = page.get_text()
+        assert "\u2022 item one" in text and "\u2022 item two" in text, (
+            f"the items are not drawn as list items: {text!r}")
+        # The TIP fill: every block of the alert lies on it
+        boxes = [d["rect"] for d in page.get_drawings() if d.get("fill")
+                 and _color_near([d["fill"]], (0.929, 0.984, 0.949))]
+        assert boxes, "TIP green shading missing"
+        for words in ("item two", "Sample", "answer = 42", "After the sample."):
+            where = page.search_for(words)
+            assert where and any(box.contains(where[0]) for box in boxes), (
+                f"{words!r} is not inside the alert box")
+        doc.close()
+
+    async def test_an_alert_inside_a_numbered_step_keeps_one_list(
+            self, jp_fetch, jp_root_dir):
+        from docx import Document
+        import fitz
+
+        html = (await self._export(
+            jp_fetch, jp_root_dir, "html", self.STEP)).decode("utf-8")
+        assert html.count('<ol') == 1 and '<pre' not in html, (
+            "the alert ended the list or its text became a code block")
+        assert re.search(r'border-left:4px solid[^>]*>noted</div>', html)
+
+        doc = Document(io.BytesIO(
+            await self._export(jp_fetch, jp_root_dir, "docx", self.STEP)))
+        tables = self._alert_tables(doc, '0969DA')
+        assert len(tables) == 1 and tables[0].rows[0].cells[0].text == 'noted'
+        steps = [p for p in doc.paragraphs if p.style.name == 'List Number']
+        assert [p.text.strip('\u2062 ') for p in steps] == ['Step', 'Next']
+        assert len({p._p.pPr.numPr.numId.val for p in steps}) == 1, (
+            "the second step starts a new numbering in Word")
+
+        pdf = fitz.open(
+            stream=await self._export(jp_fetch, jp_root_dir, "pdf", self.STEP),
+            filetype="pdf")
+        text = "".join(page.get_text() for page in pdf)
+        pdf.close()
+        assert "1. Step" in text and "2. Next" in text, (
+            f"the second step is not numbered 2: {text!r}")
+
+
 class TestPdfMinorHeadings:
     """DEF-MARK-12: Heading 4, 5 and 6 render distinctly in the PDF instead of all
     collapsing onto the Heading 3 face."""

@@ -2457,6 +2457,13 @@ class ExportHandlerBase(APIHandler):
                 lines, before = candidate, after
         return '\n'.join(lines)
 
+    #: Ends an alert whose body holds blocks, and follows the marker that
+    #: opens one. Zero-width only, so a pass that misses it shows nothing.
+    _ALERT_END = '\u200b\u200b'
+
+    #: A line of an alert body that opens a list, a heading or a fence
+    _ALERT_BLOCK_RE = re.compile(r' *(?:(?:\d+\.|[*+-])[ \t]|#{1,6} |```|~~~)')
+
     def preprocess_github_alerts(self, content: str, show_labels: bool = False) -> str:
         """Convert GitHub-style alerts to paragraphs with markers.
 
@@ -2466,16 +2473,24 @@ class ExportHandlerBase(APIHandler):
         Preserves <br> tags and markdown links/formatting within alert content.
         When show_labels is False, the alert type label is hidden from output.
 
-        The marker has to sit in one paragraph for the DOCX and HTML passes to
-        find it, so the body's own structure is carried by explicit breaks
-        instead: a source newline becomes one break, exactly as `nl2br` gives
-        body text, and the bare `>` line that separates two paragraphs of an
-        alert becomes two. Requiring `"> "` on every continuation line was
-        what ended the match at that bare `>`, leaving the rest of the alert
-        behind as a plain blockquote - one alert rendered as two boxes.
+        A body of plain paragraphs is one paragraph behind the marker, its
+        structure carried by explicit breaks: a source newline becomes one
+        break, exactly as `nl2br` gives body text, and the bare `>` line that
+        separates two paragraphs of an alert becomes two. Requiring `"> "` on
+        every continuation line was what ended the match at that bare `>`,
+        leaving the rest of the alert behind as a plain blockquote - one alert
+        rendered as two boxes.
+
+        A body holding a list, a heading or a fence stays markdown, so the
+        converter builds those blocks: `_ALERT_END` after the marker says the
+        blocks follow, and a paragraph of `_ALERT_END` alone closes the box.
+        The DOCX and HTML passes put everything between the two in the box.
+
+        The alert keeps the indent it was written at, so one inside a list
+        item stays in that item instead of ending the list.
         """
-        alert_pattern = (r'> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\] *\n'
-                         r'((?:>.*\n?)*)')
+        alert_pattern = (r'^( *)> \[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\] *\n'
+                         r'((?:\1>.*\n?)*)')
 
         def add_breaks(text, count):
             """Append `count` breaks, counting one the author already wrote."""
@@ -2483,12 +2498,73 @@ class ExportHandlerBase(APIHandler):
                 count -= 1
             return text + '<br>' * max(0, count)
 
+        def as_blocks(body):
+            """The body as markdown the converter reads blocks from, or None
+            when it holds none - or holds what the box cannot carry."""
+            lines = [re.sub(r'^ *> ?', '', line) for line in body.split('\n')]
+            out, fence = [], ''
+
+            def plain(line):
+                return (line.strip() and not line.startswith(' ')
+                        and not self._ALERT_BLOCK_RE.match(line))
+            for line in lines:
+                opens = self._ALERT_BLOCK_RE.match(line)
+                run = line.lstrip()[:3]
+                if fence:
+                    out.append(line)
+                    if run == fence:
+                        fence = ''
+                        out.append('')
+                    continue
+                # shortcut: a table - known by its separator row - keeps the
+                # alert on the one-paragraph path, the PDF callout draws
+                # paragraphs only and a Word cell cannot end in a table;
+                # upgrade when process_alert renders a nested table
+                if '|' in line and re.fullmatch(r'[ :|-]*-[ :|-]*', line):
+                    return None
+                if (len(out) > 1 and not out[-1] and plain(out[-2])
+                        and plain(line)):
+                    # Two paragraphs stay one behind breaks, as in a body
+                    # of paragraphs alone, so both kinds of alert set alike
+                    out[-2:] = [add_breaks(out[-2], 2) + line]
+                    continue
+                is_item = self._CONVERTER_ITEM_RE.match(line)
+                # The converter opens a list or a fence only after a blank
+                # line, where GitHub lets either interrupt a paragraph
+                if opens and out and out[-1].strip() and not (
+                        is_item and (out[-1].startswith(' ')
+                                     or self._CONVERTER_ITEM_RE.match(out[-1]))):
+                    out.append('')
+                out.append(line)
+                if run in ('```', '~~~'):
+                    fence = run
+            # An unclosed fence would swallow the end mark
+            if fence or not any(map(self._ALERT_BLOCK_RE.match, lines)):
+                return None
+            return '\n'.join(out).strip('\n').split('\n')
+
         def replace_alert(match):
-            alert_type = match.group(1).upper()
+            indent, alert_type = match.group(1), match.group(2).upper()
+            # Zero-width space markers for DOCX post-processing
+            marker = f'\u200b{alert_type}\u200b'
+            head = '**{}:**' if show_labels else '{}'
+            gap = ' ' if show_labels else ''
+
+            blocks = as_blocks(match.group(3))
+            if blocks:
+                head = head.format(marker + self._ALERT_END)
+                if self._ALERT_BLOCK_RE.match(blocks[0]):
+                    blocks[:0] = [head, '']
+                else:
+                    blocks[0] = f'{head}{gap}{blocks[0]}'
+                blocks += ['', self._ALERT_END]
+                return ('\n\n' + '\n'.join(indent + line if line else ''
+                                           for line in blocks) + '\n\n')
+
             # Strip the blockquote prefix; an emptied line is the bare `>` that
             # separates two paragraphs of the alert
             alert_content, owed = '', 0
-            for line in match.group(2).split('\n'):
+            for line in match.group(3).split('\n'):
                 line = line.lstrip('> ').strip()
                 if not line:
                     if alert_content:
@@ -2499,16 +2575,13 @@ class ExportHandlerBase(APIHandler):
                 alert_content += line
                 owed = 0
 
-            # Zero-width space markers for DOCX post-processing
-            marker = f'\u200b{alert_type}\u200b'
-            if show_labels:
-                return f'\n\n**{marker}:** {alert_content}\n\n'
-            else:
-                return f'\n\n{marker}{alert_content}\n\n'
+            return f'\n\n{indent}{head.format(marker)}{gap}{alert_content}\n\n'
 
-        # An alert written inside a fence is a sample of the syntax
-        return _outside(_MARKDOWN_FENCE, content,
-                        lambda text: re.sub(alert_pattern, replace_alert, text))
+        # An alert written inside a fence is a sample of the syntax. A fence
+        # that opens its line only: one quoted inside an alert is its body
+        return _outside(r'(?<![^\n]) *(?:' + _MARKDOWN_FENCE + ')', content,
+                        lambda text: re.sub(alert_pattern, replace_alert, text,
+                                            flags=re.M))
 
     def clean_alert_markers_from_html(self, html: str, show_labels: bool = False) -> str:
         """Remove zero-width space markers from HTML output.
@@ -2618,6 +2691,8 @@ class ExportHandlerBase(APIHandler):
         HTML patterns from markdown conversion:
         - show_labels=True:  <p><strong>\u200bNOTE\u200b:</strong> content</p>
         - show_labels=False: <p>\u200bNOTE\u200bcontent</p>
+        - a body holding blocks: either of the two with `_ALERT_END` after the
+          marker, then the blocks, then <p>`_ALERT_END`</p>
         """
         for alert_type, colors in self.ALERT_COLORS.items():
             marker = f'\u200b{alert_type}\u200b'
@@ -2626,6 +2701,25 @@ class ExportHandlerBase(APIHandler):
 
             border = f'#{colors["border"]}'
             shading = f'#{colors["shading"]}'
+
+            # An alert holding blocks first, which the patterns below would
+            # cut at the end of its opening paragraph: the box takes that
+            # paragraph and every block up to the end mark
+            def make_blocks(m, _border=border, _shading=shading, _type=alert_type):
+                lead = f'<strong>{_type}:</strong> ' if show_labels else ''
+                lead = (lead + m.group(1).strip()).strip()
+                return (
+                    f'<div class="alert-blocks" style="border-left:4px solid '
+                    f'{_border};background:{_shading};padding:12px 16px;'
+                    f'border-radius:4px;margin:1em 0">'
+                    + (f'<p>{lead}</p>' if lead else '')
+                    + f'{m.group(2)}</div>'
+                )
+
+            html = re.sub(
+                r'<p>(?:<strong>)?' + re.escape(marker + self._ALERT_END)
+                + r':?(?:</strong>)?(.*?)</p>(.*?)<p>' + self._ALERT_END
+                + r'</p>', make_blocks, html, flags=re.DOTALL)
 
             if show_labels:
                 # Pattern: <p><strong>\u200bTYPE\u200b:</strong> content</p>
@@ -3136,8 +3230,16 @@ class ExportHandlerBase(APIHandler):
         # Collect paragraphs to replace (can't modify while iterating)
         alert_tables = []
         replacements = []
+        in_blocks = False
         for paragraph in document.paragraphs:
             text = paragraph.text
+            if in_blocks:
+                # The body of an alert holding blocks: all of it is the box's,
+                # up to the end mark that closes it
+                if text == self._ALERT_END:
+                    replacements[-1][0].append(paragraph)
+                    in_blocks = False
+                continue
             box = self._BOX_MARKER_RE.search(text)
             if box is not None:
                 # No alert type: the colours are the author's own, read off the
@@ -3158,11 +3260,20 @@ class ExportHandlerBase(APIHandler):
                 if marker not in text:
                     continue
                 replacements.append(([paragraph], alert_type, colors))
+                in_blocks = marker + self._ALERT_END in text
                 break
 
         for paragraphs, alert_type, colors in replacements:
             first = paragraphs[0]
             parent = first._p.getparent()
+            # An alert holding blocks is its marker paragraph, its end mark
+            # and every body element between the two
+            blocks = bool(alert_type) and len(paragraphs) > 1
+            elements = [paragraph._p for paragraph in paragraphs]
+            if blocks:
+                elements = [first._p]
+                while elements[-1] is not paragraphs[-1]._p:
+                    elements.append(elements[-1].getnext())
 
             # Clean zero-width markers from runs; strip type label only when hidden
             for run in (r for paragraph in paragraphs for r in paragraph.runs):
@@ -3253,8 +3364,14 @@ class ExportHandlerBase(APIHandler):
 
             # Move the original paragraphs into the cell (preserves all
             # formatting, hyperlinks, bold, italic, line breaks, etc.)
-            for paragraph in paragraphs:
-                tc.append(copy.deepcopy(paragraph._p))
+            for element in elements:
+                # The end mark is no content, and neither is a marker that
+                # stood alone above a list, a heading or a fence
+                if blocks and (element is elements[-1] or (
+                        element is first._p and not first.text.strip()
+                        and first._p.find('.//' + qn('w:drawing')) is None)):
+                    continue
+                tc.append(copy.deepcopy(element))
             tr.append(tc)
             tbl.append(tr)
 
@@ -3264,8 +3381,8 @@ class ExportHandlerBase(APIHandler):
             tbl.addnext(spacer)
 
             # Remove the originals
-            for paragraph in paragraphs:
-                parent.remove(paragraph._p)
+            for element in elements:
+                parent.remove(element)
             alert_tables.append(tbl)
 
         return alert_tables
@@ -5231,6 +5348,10 @@ class ExportHandlerBase(APIHandler):
             width: 100%;
             margin: 1em 0;
         }}
+        /* An alert holding blocks: the box padding is the space above its
+           first block and below its last */
+        .alert-blocks > :first-child {{ margin-top: 0; }}
+        .alert-blocks > :last-child {{ margin-bottom: 0; }}
         .table-scroll {{
             /* Wrapping alone cannot shrink a table past one character per
                column, so a table with very many columns scrolls inside this
@@ -5879,8 +6000,12 @@ class ExportHandlerBase(APIHandler):
                                        parent=style, fontName=upright)
             return style
 
-        def process_paragraph(para):
-            """Process a single paragraph and return reportlab element(s)."""
+        def process_paragraph(para, avail_width=None):
+            """Process a single paragraph and return reportlab element(s).
+
+            ``avail_width`` is the width a code sample wraps in, where that is
+            less than the frame - inside a callout.
+            """
             nonlocal last_list_level
 
             # Check for horizontal rule/divider first
@@ -5903,7 +6028,7 @@ class ExportHandlerBase(APIHandler):
                     block = code_blocks[idx]
                     return self.highlight_code_for_pdf(
                         block['code'], block['lang'], base_pt,
-                        avail_width=frame_width)
+                        avail_width=avail_width or frame_width)
                 return Paragraph("&nbsp;", normal_style)
 
             # Escape XML special characters for base text
@@ -6120,6 +6245,13 @@ class ExportHandlerBase(APIHandler):
             normal (not table-header) text, preserving run formatting."""
             flow = []
             for p in tbl.rows[0].cells[0].paragraphs:
+                if get_list_info(p)[0] or re.match(r'\[\[CODE_BLOCK_\d+\]\]',
+                                                   p.text.strip()):
+                    # A list item or a code sample in the box is drawn as in
+                    # the body, in the width the box's 12 + 8 padding leaves
+                    result = process_paragraph(p, frame_width - 20)
+                    flow.extend(result if isinstance(result, list) else [result])
+                    continue
                 markup = ''.join(format_run(run) for run in self.docx_paragraph_runs(p)).strip()
                 if markup:
                     style = heading_style_for(p) or callout_body_style

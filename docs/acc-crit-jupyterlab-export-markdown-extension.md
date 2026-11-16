@@ -215,6 +215,10 @@ One setting picks the base body size and everything else follows from it, so a d
 
 A `> [!NOTE]` block is one callout however many paragraphs it holds. The marker the DOCX and HTML passes key on has to live in a single paragraph, so the body's own structure is carried by explicit breaks rather than by several paragraphs.
 
+A body holding a list, a heading or a fence is the exception: it stays markdown between the marker and an end mark, and the DOCX and HTML passes box everything between the two
+
+- log: 2026-11-16T06:27:18Z @kj added note "A body holding a list, a heading or a fence is the exception: it stays markdown between the marker and an end mark, and the DOCX and HTML passes box everything between the two"
+
 - [x] `ACC-ALERT-41` **A multi-paragraph alert is one box** - a bare `>` separating two paragraphs of an alert does not end it
   - log: 2026-07-23T00:00:00Z @kj criterion added with DEF-MARK-11; the continuation group required `"> "` with a space, so the bare `>` terminated the match and the rest of the alert fell out as a plain blockquote - a coloured box followed by a grey one
   - log: 2026-07-23T00:00:00Z @kj held in all three formats - tests `test_html_is_one_box_holding_both_paragraphs`, `test_docx_is_one_alert_table_holding_both_paragraphs`, `test_pdf_is_one_callout_with_no_stray_blockquote`; mutation-proved. The PDF needed no code change: `process_alert` already walks every paragraph in the alert cell
@@ -227,9 +231,26 @@ A `> [!NOTE]` block is one callout however many paragraphs it holds. The marker 
 - [x] `ACC-ALERT-44` **Widening the continuation captures no more than the alert** - two adjacent alerts stay two boxes, and an ordinary multi-paragraph blockquote is still a blockquote
   - log: 2026-07-23T00:00:00Z @kj criterion added - accepting a bare `>` widens what the pattern will swallow
   - log: 2026-07-23T00:00:00Z @kj held - tests `test_two_adjacent_alerts_stay_separate`, `test_a_plain_blockquote_is_still_a_blockquote`
-- [-] `ACC-ALERT-45` **Block structure inside an alert survives** - a list or a fence written in an alert body still flattens to run-on text
+- [x] `ACC-ALERT-45` **Block structure inside an alert survives** - HIGH; a list, a heading or a fence written in an alert body is that block inside the one box, in HTML, DOCX and PDF; a body holding a table keeps the one-paragraph form
+  - related: DEF-MARK-14 - the defect this closes
+  - evidence: TestAlertBlockStructure: test_html_box_holds_the_list_the_heading_and_the_sample, test_docx_box_holds_the_list_the_heading_and_the_sample, test_pdf_box_holds_the_list_and_the_sample, test_a_body_the_box_cannot_carry_stays_one_paragraph pass; the first three fail at a44b51d
+  - test-tags: FUNCTIONAL
+  - test: export '> [!TIP]' with a two-item list, a ### heading and a python fence to html, docx, pdf; assert ul, h3 and pre in the box, List Bullet and Heading 3 paragraphs in the alert cell, bullets on the TIP fill
   - log: 2026-07-23T00:00:00Z @kj criterion added and left open; pre-dates DEF-MARK-11 and needs paired markers plus a body-element sweep in two passes. Registered as DEF-MARK-14
   - log: 2026-11-13T18:11:06Z @kj rejected: rejected: the feature does not exist - an alert is emitted as one paragraph; block structure inside it needs the alert redesign tracked as DEF-MARK-14, left open for the owner
+  - log: 2026-11-16T06:27:08Z @kj reopened: reopened: DEF-MARK-14 is solved, the feature exists
+  - log: 2026-11-16T06:27:09Z @kj amended text "a list or a fence written in an alert body still flattens to run-on text" -> "HIGH; a list, a heading or a fence written in an alert body is that block inside the one box, in HTML, DOCX and PDF; a body holding a table keeps the one-paragraph form"
+  - log: 2026-11-16T06:27:09Z @kj edited test added "export '> [!TIP]' with a two-item list, a ### heading and a python fence to html, docx, pdf; assert ul, h3 and pre in the box, List Bullet and Heading 3 paragraphs in the alert cell, bullets on the TIP fill"; test-tags added "FUNCTIONAL"
+  - log: 2026-11-16T06:27:09Z @kj closed
+- [x] `ACC-ALERT-128-IN-STEP` **An alert inside a list item stays in the item** - MEDIUM; an alert indented under a numbered step is a box between the steps and the list stays one list, the next step keeping its number, in HTML, DOCX and PDF
+  - related: DEF-MARK-107 - the defect this closes
+  - evidence: TestAlertBlockStructure::test_an_alert_inside_a_numbered_step_keeps_one_list passes; fails at a44b51d, where the alert ended the list
+  - test: export '1. Step', a blank line, '> [!NOTE]' and '> noted' each indented 3 spaces, a blank line, '2. Next'; assert one ol, one numId on both steps, '2. Next' in the PDF text
+  - test-tags: FUNCTIONAL
+  - mechanism: 2026-11-16T06:27:09Z @kj the alert pattern is anchored to the line start, requires the same indent on every body line and writes that indent on what it emits
+  - log: 2026-11-16T06:27:09Z @kj added
+  - log: 2026-11-16T06:27:18Z @kj closed
+  - log: 2026-11-16T06:32:18Z @kj edited test "export '1. Step' / blank / ' > [!NOTE]' / ' > noted' / blank / '2. Next'; assert one ol, one numId on both steps, '2. Next' in the PDF text" -> "export '1. Step', a blank line, '> [!NOTE]' and '> noted' each indented 3 spaces, a blank line, '2. Next'; assert one ol, one numId on both steps, '2. Next' in the PDF text"
 
 ## Heading level fidelity `HEAD`
 

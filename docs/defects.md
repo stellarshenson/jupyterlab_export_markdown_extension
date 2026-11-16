@@ -56,10 +56,13 @@
   - log: 2026-07-23T00:00:00Z @kj accepted limitation (adversarial review): the column count assumes the code font's fixed width, so a line dense with characters the code font lacks - an emoji, a CJK glyph - renders through a wider substitute and can still overrun; rare in code, and still far better than the whole line running off the page, which was the reported failure for ASCII. A wrapped continuation line carries no hanging indent or marker, the universal soft-wrap trade-off; a reader cannot tell it from a new statement. Both stated in the `code_columns` docstring, neither fixed
   - log: 2026-08-27T00:00:00Z @kj edited severity
 
-- [ ] `DEF-MARK-14` **block structure inside a GitHub alert is flattened** - MAJOR; a list, nested fence or heading written inside a `> [!NOTE]` body renders as run-on text: the alert is emitted as a single markdown paragraph, because the marker that the DOCX and HTML passes key on has to sit in one paragraph; `routes.py`
+- [x] `DEF-MARK-14` **block structure inside a GitHub alert is flattened** - MAJOR; a list, nested fence or heading written inside a `> [!NOTE]` body renders as run-on text: the alert is emitted as a single markdown paragraph, because the marker that the DOCX and HTML passes key on has to sit in one paragraph; `routes.py`
+  - evidence: a body with a list, heading or fence stays markdown between the marker and an end mark; style_docx_alert_boxes and style_html_alert_boxes box all between, the PDF callout draws list items and code; TestAlertBlockStructure 5 tests, 4 fail at a44b51d; a table in the body keeps the one-paragraph path
+  - root-cause: 2026-11-16T06:26:55Z @kj preprocess_github_alerts folded every body line into the one paragraph that carries the marker, and no pass read more than that paragraph; the fence guard also cut an alert at a fence quoted in its body
   - log: 2026-07-23T00:00:00Z @kj registered while fixing `DEF-MARK-11`, which made the paragraph structure visible but not the block structure. Pre-dates that change. A real fix needs an opening and closing marker and a body-element sweep in `style_docx_alert_boxes` and `style_html_alert_boxes`; the PDF's `process_alert` already walks every paragraph in the cell
   - log: 2026-08-27T00:00:00Z @kj edited severity
   - log: 2026-09-29T13:00:20Z @kj still reproduces 2026-09-29: a two-item list in a [!TIP] alert exports as one paragraph '- item one- item two'
+  - log: 2026-11-16T06:26:55Z @kj closed
 - [x] `DEF-MARK-15` **a PDF heading can be stranded at the foot of a page** - MEDIUM; no PDF heading style sets `keepWithNext`, and reportlab's default is off, so a page break can fall between a heading and its first paragraph; every DOCX Heading style carries `keep_with_next`, so Word never does this; `routes.py`
   - evidence: test_hardening.py::test_pdf_heading_is_not_stranded_at_the_foot_of_a_page: CondPageBreak of heading plus two body lines; 30 filler lines stranded the heading before, none of 26 to 33 does now; an image or table row taller than two lines under a heading is not covered
   - root-cause: 2026-11-13T18:10:41Z @kj no heading flowable reserved room for the text under it; reportlab breaks a page between any two flowables
@@ -460,11 +463,14 @@
   - repro: export ' `' / ' x' / blank / '  - a' / '  - b' / blank / ' `' to DOCX; the sample reads '- a' at column 0
   - log: 2026-08-27T22:34:48Z @kj added
   - log: 2026-11-13T18:11:05Z @kj rejected: rejected: exotic input - a fence indented one space whose body holds a two-space marker chunk; accepted limit ACC-LIST-101
-- [ ] `DEF-MARK-107` **an alert inside a numbered step splits the list** - MINOR; preprocess_github_alerts lifts an indented '> [!NOTE]' to column 0 and leaves the quoted lines indented, so the converter closes the list, renders the quoted line as a code block and opens a second list; HTML export shows one list of two items; pre-existing at HEAD, with the second list now numbered from 1 in Word too since each list has its own instance; open
+- [x] `DEF-MARK-107` **an alert inside a numbered step splits the list** - MINOR; preprocess_github_alerts lifts an indented '> [!NOTE]' to column 0 and leaves the quoted lines indented, so the converter closes the list, renders the quoted line as a code block and opens a second list; HTML export shows one list of two items; pre-existing at HEAD, with the second list now numbered from 1 in Word too since each list has its own instance; open
+  - evidence: the pattern is anchored to the line start and keeps the indent on what it emits; test_an_alert_inside_a_numbered_step_keeps_one_list: one ol in HTML, one numId and the alert table between the steps in DOCX, '2. Next' in PDF; solved with DEF-MARK-14
+  - root-cause: 2026-11-16T06:26:55Z @kj the alert pattern matched '> [!NOTE]' anywhere in a line and dropped the indent before it, and its body lines had to start at column 0, so the marker left the list item and the quoted lines stayed behind
   - related: DEF-MARK-100 - the split's second list now restarts in Word as well
   - repro: export '1. Step' / blank / ' > [!NOTE]' / ' > noted' / blank / '2. Next' to DOCX or PDF; the second step reads 1.
   - log: 2026-08-27T22:34:48Z @kj added
   - log: 2026-09-29T13:00:21Z @kj still reproduces 2026-09-29: DOCX paragraphs Step / empty / noted / Next, the alert outside the list
+  - log: 2026-11-16T06:26:55Z @kj closed
 - [x] `DEF-MARK-108` **a third-level list resets its parent's count in the PDF** - MAJOR; The PDF walker read every indent past the first as level 1, so a depth-2 ordered list shared the depth-1 counter and numbering-instance slot; returning to the parent looked like a change of list and restarted it at 1 where Word printed 3. Found by the reading-only architect round over commit 9480951
   - evidence: get_list_info now uses the DOCX pass's depth formula in twips; test test_pdf_a_third_level_list_does_not_reset_its_parent, mutation-proved against the binary level
   - related: DEF-MARK-103 - the carried-signal reset this partition mismatch undermined
