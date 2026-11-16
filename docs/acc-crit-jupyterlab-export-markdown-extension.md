@@ -417,6 +417,15 @@ Cambria, the DOCX body face, has no glyph for a star, a box-drawing rule or most
 - [-] `ACC-SYMB-89` **Accepted limit** - the font is named, not embedded; a machine without `Segoe UI Symbol` (a Mac, a bare Linux) substitutes as before
   - log: 2026-08-27T00:00:00Z @kj accepted limit recorded alongside the criteria it bounds
   - log: 2026-11-13T18:11:07Z @kj rejected: rejected: states an accepted limit, not a behaviour to meet - the symbol font is named, not embedded
+- [x] `ACC-SYMB-130-ITALIC-SPLIT` **An italic run keeps its slant beside a symbol in the PDF** - MEDIUM; in the PDF a character the italic face has no glyph for is drawn upright and the other characters of the same italic run stay slanted, in a quote, a table cell and body text; bold italic keeps its weight
+  - evidence: TestPdfRunShading::test_only_the_uncovered_glyph_of_an_italic_run_is_upright passes over a quote, a body paragraph and a table cell; it fails with the routes.py change stashed
+  - related: DEF-DIAG-32 - the defect this closes
+  - test: export a quote, a body paragraph and a table cell that each hold an italic run with U+2605 or U+2612 to PDF, on a box whose italic face is Liberation; assert each symbol is present and each word span has an Italic or Oblique font
+  - test-tags: FUNCTIONAL
+  - mechanism: 2026-11-16T07:39:59Z @kj format_run groups run.text with itertools.groupby on pdf_face_covers(face, ch) and wraps only the covered groups in <i>
+  - log: 2026-11-16T07:39:59Z @kj added
+  - log: 2026-11-16T07:40:33Z @kj edited test "export '> Cytat U+2605 w kursywie' to PDF on a box whose italic face is Liberation; assert the star is present and each word span has an Italic or Oblique font" -> "export a quote, a body paragraph and a table cell that each hold an italic run with U+2605 or U+2612 to PDF, on a box whose italic face is Liberation; assert each symbol is present and each word span has an Italic or Oblique font"
+  - log: 2026-11-16T07:40:34Z @kj closed
 
 ## Inline HTML fidelity `HTML`
 

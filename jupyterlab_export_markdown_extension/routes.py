@@ -19,6 +19,7 @@ import tempfile
 import time
 import unicodedata
 from html import escape, unescape
+from itertools import groupby
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
@@ -5604,11 +5605,11 @@ class ExportHandlerBase(APIHandler):
         dropped. It matters for the italic slots: DejaVu ships no oblique on
         most Linux boxes, so those are filled from Liberation, which carries
         no star, check mark or ballot box. Slant is decoration and the glyph
-        is content, so a run the italic face cannot draw is rendered upright
+        is content, so what the italic face cannot draw is rendered upright
         rather than blank.
 
-        The answer is per RUN, not per character - the PDF path does no run
-        splitting - so one star costs its whole paragraph the slant.
+        A run asks per character, so one star costs only itself the slant. A
+        heading asks about its whole text: its slant comes from the style.
         """
         from reportlab.pdfbase import pdfmetrics
 
@@ -5981,24 +5982,28 @@ class ExportHandlerBase(APIHandler):
 
         def format_run(run):
             """Format a single run with all its styling."""
-            run_text = run.text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            if not run_text:
-                return run_text
+            def markup(text):
+                # XML-escaped, newlines as HTML line breaks
+                return escape(text, quote=False).replace('\n', '<br/>')
 
-            # Convert newlines to HTML line breaks
-            run_text = run_text.replace('\n', '<br/>')
-            result = run_text
+            result = markup(run.text)
+            if not result:
+                return result
 
             # Apply formatting tags (can be combined)
+            if run.italic:
+                # Slant only the stretches the italic face can draw: see
+                # pdf_face_covers - a star it has no glyph for stays upright
+                # and visible, and the words beside it keep the slant
+                face = (self._pdf_bold_italic_face if run.bold
+                        else self._pdf_italic_face)
+                result = ''.join(
+                    f'<i>{markup("".join(chars))}</i>' if covered
+                    else markup(''.join(chars))
+                    for covered, chars in groupby(
+                        run.text, lambda ch: self.pdf_face_covers(face, ch)))
             if run.bold:
                 result = f'<b>{result}</b>'
-            # Slant only when the italic face can actually draw the text:
-            # see pdf_face_covers - an italic table cell or blockquote would
-            # otherwise delete a star rather than un-slant it
-            if run.italic and self.pdf_face_covers(
-                    self._pdf_bold_italic_face if run.bold
-                    else self._pdf_italic_face, run.text):
-                result = f'<i>{result}</i>'
             if run.underline:
                 result = f'<u>{result}</u>'
             if run.font.strike:

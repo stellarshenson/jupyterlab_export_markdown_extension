@@ -7058,6 +7058,44 @@ class TestPdfRunShading:
         assert text.count("\u2605") == 2, (
             f"the star is missing from an italic run - text: {text!r}")
 
+    async def test_only_the_uncovered_glyph_of_an_italic_run_is_upright(
+            self, jp_fetch, jp_root_dir):
+        """DEF-DIAG-32: one star the italic face cannot draw made the whole
+        run upright, so a quote holding one lost its slant from end to end."""
+        import fitz
+
+        doc = (
+            "> Cytat \u2605 w kursywie, **mocno \u2713 dalej**\n\n"
+            "Prosty *tekst \u2605 pochylony* koniec.\n\n"
+            "| a | b |\n"
+            "| --- | --- |\n"
+            "| *\u2612 komorka i reszta* | x |\n"
+        )
+        (jp_root_dir / "italicsplit.md").write_text(doc, encoding="utf-8")
+        r = await jp_fetch(
+            "jupyterlab-export-markdown-extension", "export/pdf",
+            method="POST", body=json.dumps({"path": "italicsplit.md"}),
+            raise_error=False)
+        assert r.code == 200
+        pdf = fitz.open(stream=r.body, filetype="pdf")
+        spans = [(s["text"], s["font"])
+                 for b in pdf[0].get_text("dict")["blocks"]
+                 for line in b.get("lines", []) for s in line["spans"]
+                 if s["text"].strip()]
+        pdf.close()
+        text = "".join(t for t, _ in spans)
+        assert (text.count("\u2605") == 2 and "\u2713" in text
+                and "\u2612" in text and "\x00" not in text), (
+            f"a symbol is missing: {spans!r}")
+        # The quote, the body paragraph and the table cell
+        for word in ("Cytat", "kursywie", "mocno", "dalej", "tekst",
+                     "pochylony", "komorka", "reszta"):
+            fonts = [f for t, f in spans if word in t]
+            assert fonts and _is_italic_font(fonts[0]), (
+                f"{word!r} beside a symbol lost its slant: {spans!r}")
+            assert ("Bold" in fonts[0]) == (word in ("mocno", "dalej")), (
+                f"{word!r} has the wrong weight: {spans!r}")
+
     async def test_the_pdf_keeps_a_link_label_in_a_highlighted_paragraph(
             self, jp_fetch, jp_root_dir):
         """`Paragraph.runs` is `./w:r`, so it never returns a run Word nested
