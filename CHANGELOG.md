@@ -2,6 +2,13 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## [1.6.40] - 2026-11-16
+
+### Fixed
+
+- Export a table cell that begins with a line break, end inline math at a blank line, restore JupyterLab's Mermaid config
+- Hold the document path to the server root and close 12 export defects
+
 ## [1.6.36] - 2026-10-31
 
 ### Changed
