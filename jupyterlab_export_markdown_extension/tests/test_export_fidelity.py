@@ -2113,6 +2113,137 @@ class TestAnchorLinksAndArrowFonts:
         assert response.body.startswith(b"%PDF-")
 
 
+# A contents list as JupyterLab writes it (the preview's heading id), as
+# GitHub reads it (its slug, `-1` on a repeated heading), and one dead link
+TEST_MARKDOWN_HEADING_LINKS = """# Contract
+
+- [Intro](#1.-Introduction)
+- [Scope](#2-scope-of-the-work-and-of-the-acceptance-of-the-delivery)
+- [Second notes](#notes-1)
+- [Terms](#W%C5%82a%C5%9Bciwo%C5%9Bci-&-terms)
+- [Dead](#nowhere)
+
+## 1. Introduction
+
+First.
+
+## 2. Scope of the work and of the acceptance of the delivery
+
+Second.
+
+## Notes
+
+Third.
+
+## Notes
+
+Fourth.
+
+## Właściwości & terms
+
+Fifth.
+"""
+
+#: Link label -> the heading it must reach, and the text under that heading
+HEADING_LINK_TARGETS = {
+    "Intro": "1. Introduction",
+    "Scope": "2. Scope of the work and of the acceptance of the delivery",
+    "Second notes": "Notes",
+    "Terms": "Właściwości & terms",
+}
+
+
+class TestHeadingLinksResolve:
+    """A link to a heading reaches it, written as a JupyterLab preview id or
+    as a GitHub slug (DEF-MARK-44)."""
+
+    @pytest.fixture(autouse=True)
+    def heading_links_file(self, jp_root_dir):
+        (jp_root_dir / "heading_links.md").write_text(
+            TEST_MARKDOWN_HEADING_LINKS, encoding="utf-8")
+
+    async def test_html_links_reach_their_headings(self, jp_fetch):
+        from bs4 import BeautifulSoup
+
+        r = await _export(jp_fetch, "html", "heading_links.md")
+        soup = BeautifulSoup(r.body.decode("utf-8"), "html.parser")
+        links = {a.get_text(): a["href"][1:]
+                 for a in soup.find_all("a", href=re.compile("^#"))}
+        for label, heading in HEADING_LINK_TARGETS.items():
+            target = soup.find(id=links[label])
+            assert target is not None and target.get_text() == heading, (
+                f"[{label}] links to #{links[label]}, which is "
+                f"{target.get_text() if target else 'no element'!r}")
+        notes = [h["id"] for h in soup.find_all("h2") if h.get_text() == "Notes"]
+        assert links["Second notes"] == notes[1], "`#notes-1` is the second Notes"
+        assert links["Dead"] == "nowhere", "a link to no heading stays as written"
+
+    async def test_docx_links_reach_their_headings(self, jp_fetch):
+        from docx import Document as _Doc
+        from docx.oxml.ns import qn
+
+        r = await _export(jp_fetch, "docx", "heading_links.md")
+        document = _Doc(io.BytesIO(r.body))
+        body = document.element.body
+        marks = {}
+        for para in document.paragraphs:
+            for bm in para._p.iter(qn("w:bookmarkStart")):
+                marks[bm.get(qn("w:name"))] = para
+        links = {"".join(t.text or "" for t in link.iter(qn("w:t"))):
+                 link.get(qn("w:anchor"))
+                 for link in body.iter(qn("w:hyperlink"))}
+        for label, heading in HEADING_LINK_TARGETS.items():
+            name = links[label]
+            assert name in marks and marks[name].text == heading, (
+                f"[{label}] links to {name!r}, bookmarks: {sorted(marks)!r}")
+            assert re.fullmatch(r"[A-Za-z][\w\-:.]{0,39}", name), (
+                f"Word refuses the bookmark name {name!r}")
+        notes = [p for p in document.paragraphs if p.text == "Notes"]
+        assert marks[links["Second notes"]]._p is notes[1]._p
+        assert "⁣BM:" not in body.xml, "bookmark sentinel must not leak"
+
+    async def test_pdf_links_reach_their_headings(self, jp_fetch, jp_root_dir):
+        """Each link is clickable and lands directly above its heading. The
+        43 sections added here fill several pages, so a heading that starts
+        a page takes its bookmark with it."""
+        import fitz
+
+        filler = {f"S{i}": f"{i}. Section number {i}" for i in range(3, 46)}
+        text = TEST_MARKDOWN_HEADING_LINKS + "\n" + "".join(
+            f"- [{label}](#{heading.replace(' ', '-')})\n"
+            for label, heading in filler.items())
+        for n, heading in enumerate(filler.values()):
+            text += f"\n## {heading}\n\n{'Body text of the section. ' * (3 + n % 5)}\n"
+        (jp_root_dir / "heading_links.md").write_text(text, encoding="utf-8")
+        expected = {**HEADING_LINK_TARGETS, **filler}
+
+        r = await _export(jp_fetch, "pdf", "heading_links.md")
+        doc = fitz.open(stream=r.body, filetype="pdf")
+        assert len(doc) > 2, "the document must span pages to test page breaks"
+        lines = [sorted(
+            (line["bbox"][1], "".join(s["text"] for s in line["spans"]).strip())
+            for block in page.get_text("dict")["blocks"]
+            for line in block.get("lines", [])) for page in doc]
+        landed = {}
+        for page in doc:
+            for link in page.get_links():
+                label = page.get_textbox(link["from"]).strip()
+                top = link["to"].y
+                below = [(y, t) for y, t in lines[link["page"]]
+                         if t and y >= top - 1]
+                assert below and below[0][1] == expected[label] \
+                    and below[0][0] - top < 30, (
+                    f"[{label}] lands on page {link['page']} at {top:.0f}, "
+                    f"above {below[:1]!r}")
+                landed[label] = (link["page"], top)
+        assert set(landed) == set(expected), (
+            f"links not clickable: {sorted(set(expected) - set(landed))!r}")
+        first_notes = min(y for y, t in lines[0] if t == "Notes")
+        assert landed["Second notes"] > (0, first_notes), \
+            "`#notes-1` is the second Notes"
+        doc.close()
+
+
 TEST_MARKDOWN_WIDE_TABLE = """# Wide table
 
 | Component | Purpose | Service | Configuration detail | Monthly cost | Notes |
@@ -7611,9 +7742,11 @@ class TestIndentedTopLevelList:
         )
         assert response.code == 200
         html = response.body.decode("utf-8")
-        assert '<a href="#1.-Introduction">1. Introduction</a>' in html, (
+        # The link names the id the heading has in the export (DEF-MARK-44)
+        assert '<a href="#1-introduction">1. Introduction</a>' in html, (
             "the two-space TOC did not become a list of links"
         )
+        assert '<h2 id="1-introduction">' in html
         assert "[1. Introduction](#1.-Introduction)" not in html, (
             "literal markdown source leaked into the HTML"
         )

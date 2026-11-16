@@ -33,7 +33,7 @@ try:
     from reportlab.lib.units import inch
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage,
-        Preformatted, XPreformatted, CondPageBreak
+        Preformatted, XPreformatted, CondPageBreak, AnchorFlowable
     )
     from reportlab.lib import colors
     from reportlab.pdfbase import pdfmetrics
@@ -3629,6 +3629,62 @@ class ExportHandlerBase(APIHandler):
     _BOOKMARK_MARKER_RE = re.compile(r'⁣BM:([A-Za-z0-9_\-:.]+)⁣')
     _SAFE_BOOKMARK_ID_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_\-:.]*$')
 
+    @classmethod
+    def _bookmark_name(cls, anchor_id: str) -> str:
+        """The Word bookmark name of an element id, the same for the bookmark
+        and for every link to it.
+
+        Word wants a name that opens with a letter and is at most 40
+        characters long. A heading id opens with a digit when the heading is
+        numbered (``1-introduction``) and is as long as the heading, so such
+        an id takes a hash of itself as its name.
+        """
+        if cls._SAFE_BOOKMARK_ID_RE.match(anchor_id) and len(anchor_id) <= 40:
+            return anchor_id
+        import hashlib
+        return 'h' + hashlib.sha1(anchor_id.encode('utf-8')).hexdigest()[:31]
+
+    @staticmethod
+    def _heading_key(text: str) -> str:
+        """What a heading's text, its JupyterLab preview id and its GitHub
+        slug have in common: the letters and digits, case ignored."""
+        return re.sub(r'[\W_]+', '', text).casefold()
+
+    def resolve_heading_links(self, body: str) -> str:
+        """Point every ``href="#..."`` that names a heading at that heading's id.
+
+        The converter gives ``## 1. Introduction`` the id ``1-introduction``.
+        A contents list written in JupyterLab links to ``#1.-Introduction``,
+        the id its preview gives the heading, and one written for GitHub
+        links to GitHub's slug. A link whose target is no id and no anchor
+        name of the document is matched to a heading by ``_heading_key``; one
+        that matches no heading stays as written.
+        """
+        # `name` too: the browser follows a link to `<a name="x">`
+        ids = set(re.findall(r'\b(?:id|name)="([^"]+)"', body))
+        headings = {}
+        for heading_id, inner in re.findall(
+                r'<h[1-6]\b[^>]*?\bid="([^"]+)"[^>]*>(.*?)</h[1-6]>', body,
+                re.DOTALL):
+            text = unescape(re.sub(r'<[^>]+>', '', inner))
+            headings.setdefault(self._heading_key(text), []).append(heading_id)
+
+        def replace(match):
+            target = unquote(unescape(match.group(2)))
+            if target in ids:
+                return match.group(0)
+            found = headings.get(self._heading_key(target) or None)
+            # GitHub numbers a repeated heading: `#notes-1` is the second
+            # "Notes"
+            repeat = re.fullmatch(r'(.+)-(\d+)', target)
+            if not found and repeat:
+                found = headings.get(
+                    self._heading_key(repeat.group(1)) or None,
+                    [])[int(repeat.group(2)):]
+            return f'{match.group(1)}#{found[0]}"' if found else match.group(0)
+
+        return re.sub(r'(<a\b[^>]*?\bhref=")#([^"]+)"', replace, body)
+
     def inject_anchor_markers(self, html: str) -> str:
         """Inject sentinel markers for every HTML element with an id attribute.
 
@@ -3639,9 +3695,7 @@ class ExportHandlerBase(APIHandler):
         """
         def replace(match):
             open_tag = match.group(0)
-            anchor_id = match.group(1)
-            if not self._SAFE_BOOKMARK_ID_RE.match(anchor_id):
-                return open_tag
+            anchor_id = self._bookmark_name(match.group(1))
             return f'{open_tag}⁣BM:{anchor_id}⁣'
 
         return re.sub(r'<[^>]*?\bid="([^"]+)"[^>]*?>', replace, html)
@@ -3719,7 +3773,7 @@ class ExportHandlerBase(APIHandler):
             ref = hyperlink.get(r_id_qn)
             if ref in anchor_rels:
                 del hyperlink.attrib[r_id_qn]
-                hyperlink.set(anchor_qn, anchor_rels[ref])
+                hyperlink.set(anchor_qn, self._bookmark_name(anchor_rels[ref]))
 
         for rel_id in anchor_rels:
             del rels[rel_id]
@@ -5163,7 +5217,7 @@ class ExportHandlerBase(APIHandler):
             # above. It is a cosmetic refinement either way, so any failure
             # falls back: one blank line too many beats a 500 on every export.
             md = markdown.Markdown(extensions=base + ['nl2br'], tab_length=2)
-        body = md.convert(content)
+        body = self.resolve_heading_links(md.convert(content))
 
         if compact:
             # PDF-optimized stylesheet with tighter spacing
@@ -5846,6 +5900,15 @@ class ExportHandlerBase(APIHandler):
         from docx.table import Table as DocxTable
         from docx.oxml.ns import qn
 
+        def bookmark_names(element):
+            return [mark.get(qn('w:name'))
+                    for mark in element.iter(qn('w:bookmarkStart'))]
+
+        # Every bookmark is drawn by the body loop below. reportlab fails the
+        # whole build on a link to a name that was never drawn, so format_run
+        # links to these names only
+        pdf_anchors = set(bookmark_names(doc.element.body))
+
         def get_list_info(para):
             """Get list type and level from paragraph style and indentation.
 
@@ -5961,6 +6024,11 @@ class ExportHandlerBase(APIHandler):
             fill = self.docx_run_shading(run)
             if fill:
                 result = f'<font backColor="#{fill}">{result}</font>'
+
+            # A link to a bookmark of this document
+            target = run._r.getparent().get(qn('w:anchor'))
+            if target in pdf_anchors:
+                result = f'<a href="#{target}">{result}</a>'
 
             return result
 
@@ -6563,6 +6631,7 @@ class ExportHandlerBase(APIHandler):
         i = 0
         while i < len(body_elements):
             element = body_elements[i]
+            first, drawn = i, len(story)
             if element.tag == qn('w:p'):  # Paragraph
                 para = DocxParagraph(element, doc)
                 drawings = element.findall('.//' + qn('w:drawing'))
@@ -6582,10 +6651,8 @@ class ExportHandlerBase(APIHandler):
                         group.append(nxt)
                         j += 1
                     add_to_story(build_blockquote_callout(group, bq))
-                    i = j
-                    continue
-
-                if drawings:
+                    i = j - 1
+                elif drawings:
                     # Process paragraph text first (if any)
                     if para.text.strip():
                         add_to_story(process_paragraph(para))
@@ -6600,6 +6667,17 @@ class ExportHandlerBase(APIHandler):
             elif element.tag == qn('w:tbl'):  # Table
                 tbl = DocxTable(element, doc)
                 story.extend(process_table(tbl))
+            # The bookmarks of what was just drawn go above it - below a
+            # heading's conditional page break, or a link to the heading
+            # lands at the foot of the page before it.
+            # shortcut: a quote or a table moved whole to the next page
+            # leaves its bookmark at the foot of the page before, upgrade
+            # when a link to one is reported
+            at = drawn + any(isinstance(flowable, CondPageBreak)
+                             for flowable in story[drawn:drawn + 1])
+            story[at:at] = [
+                AnchorFlowable(name) for done in body_elements[first:i + 1]
+                for name in bookmark_names(done)]
             i += 1
 
         # Build the PDF

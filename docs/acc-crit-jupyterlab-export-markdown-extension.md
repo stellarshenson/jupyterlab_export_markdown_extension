@@ -662,3 +662,18 @@ jupyterlab-export-markdown-extension convert exports a file through the extensio
   - test-tags: UNIT
   - log: 2026-09-29T20:04:00Z @kj added
   - log: 2026-09-29T20:10:44Z @kj closed
+
+## Internal links `LINK`
+
+Links from one place of a document to another: a contents list, a reference to an anchor
+
+- log: 2026-11-16T07:14:50Z @kj category created
+
+- [x] `ACC-LINK-129-HEADING` **A link to a heading reaches it** - MEDIUM; a link written as the JupyterLab preview id (#1.-Introduction) or as the GitHub slug (#1-introduction, #notes-1 for a repeated heading) reaches its heading in HTML and DOCX and is clickable in the PDF; a link to no heading stays as written
+  - evidence: TestHeadingLinksResolve passes: 3 tests over HTML, DOCX and PDF, 47 PDF links across 3 pages; all 3 fail at f7d48f8
+  - related: DEF-MARK-44 - the defect this closes
+  - test: export a list linking to '## 1. Introduction' as #1.-Introduction and to the second '## Notes' as #notes-1; assert the href is the heading id in HTML, the w:anchor is the heading's bookmark in DOCX, the PDF link lands above the heading
+  - test-tags: FUNCTIONAL
+  - mechanism: 2026-11-16T07:14:50Z @kj resolve_heading_links rewrites an href that is no id to the id of the heading with the same letters and digits; _bookmark_name hashes an id Word refuses; the PDF draws each bookmark as an AnchorFlowable
+  - log: 2026-11-16T07:14:50Z @kj added
+  - log: 2026-11-16T07:15:01Z @kj closed
