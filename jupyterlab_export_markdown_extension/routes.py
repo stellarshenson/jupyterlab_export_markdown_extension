@@ -3239,6 +3239,12 @@ class ExportHandlerBase(APIHandler):
                 if text == self._ALERT_END:
                     replacements[-1][0].append(paragraph)
                     in_blocks = False
+                elif '⁣' in text:
+                    # A box drawn by hand inside the alert: Word has no box
+                    # in a box, so its text stays and its marker goes
+                    for run in paragraph.runs:
+                        run.text = self._BOX_MARKER_RE.sub('', run.text).replace(
+                            self._BOX_MORE_MARKER, '')
                 continue
             box = self._BOX_MARKER_RE.search(text)
             if box is not None:

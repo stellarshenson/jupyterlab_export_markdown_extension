@@ -4566,6 +4566,13 @@ class TestAlertBlockStructure:
         with zipfile.ZipFile(io.BytesIO(body)) as z:
             assert '\u200b' not in z.read('word/document.xml').decode('utf-8')
 
+        # a box drawn by hand inside such an alert leaves no marker behind
+        boxed = Document(io.BytesIO(await self._export(
+            jp_fetch, jp_root_dir, "docx",
+            '> [!NOTE]\n> - item\n>\n'
+            '> <div style="border:1px solid red">boxed</div>\n')))
+        assert [t.rows[0].cells[0].text for t in boxed.tables] == ['item\nboxed']
+
     async def test_pdf_box_holds_the_list_and_the_sample(
             self, jp_fetch, jp_root_dir):
         import fitz
