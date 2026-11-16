@@ -4885,7 +4885,8 @@ class ExportHandlerBase(APIHandler):
                 rpr.remove(rfonts)
 
     @staticmethod
-    def fit_column_widths(natural: list, minimums: list, available: float) -> list:
+    def fit_column_widths(natural: list, minimums: list, available: float,
+                          header: list | None = None) -> list:
         """Scale natural column widths down so the row fits ``available``.
 
         ``natural`` holds the width each column would take on a single line and
@@ -4895,6 +4896,13 @@ class ExportHandlerBase(APIHandler):
         mid-word - and the remaining space is shared in proportion to the
         excess, keeping wide columns wide. Falls back to equal columns when
         every column is already capped at its fair share.
+
+        ``header`` holds the width of the longest word of each column's header,
+        and lifts the fair-share cap in three steps. While every word of the
+        table fits ``available``, no minimum is capped. Else a column keeps its
+        header word, past its fair share, while the header words together fit,
+        and the body words give way to them. When the header words alone are
+        wider, the fit wins and they are capped like any other word.
         """
         ncols = len(natural)
         if ncols == 0:
@@ -4904,7 +4912,22 @@ class ExportHandlerBase(APIHandler):
         # No single column may claim more than its fair share as a minimum,
         # otherwise one very long word starves every other column.
         fair_share = available / ncols
-        minimums = [min(m, fair_share) for m in minimums]
+        capped = [min(m, fair_share) for m in minimums]
+        if header:
+            kept = [max(m, h) for m, h in zip(capped, header)]
+            room = available - sum(header)
+            if sum(minimums) < available:
+                # Every word fits, so no column starves another
+                capped = minimums
+            elif sum(kept) < available:
+                capped = kept
+            elif room > 0:
+                # The header words fit and the body words do not: the body
+                # words share the room the header words leave
+                short = sum(kept) - sum(header)
+                return [h + (k - h) * room / short
+                        for h, k in zip(header, kept)]
+        minimums = capped
         slack = available - sum(minimums)
         excess = [max(0.0, n - m) for n, m in zip(natural, minimums)]
         if slack == 0 or sum(excess) == 0:
@@ -4914,7 +4937,8 @@ class ExportHandlerBase(APIHandler):
 
     @classmethod
     def measured_column_widths(cls, table_data: list, available: float,
-                               measure, floors: list | None = None) -> list:
+                               measure, floors: list | None = None,
+                               has_header: bool = False) -> list:
         """Column widths for a table of cell strings that fit ``available``.
 
         ``measure(text, row_index)`` returns the rendered width of one string,
@@ -4925,10 +4949,11 @@ class ExportHandlerBase(APIHandler):
         image but scales it to whatever column its text earns rather than
         flooring the column to it). Every column keeps at least the width of an
         empty cell, so none comes back zero-width, unless an equal share of
-        ``available`` is itself smaller than that.
+        ``available`` is itself smaller than that. ``has_header`` says row 0 is
+        a header, whose longest words fit_column_widths then keeps whole.
         """
         ncols = max((len(row) for row in table_data), default=0)
-        natural, minimums = [], []
+        natural, minimums, header = [], [], []
         for c in range(ncols):
             cells = [(r, row[c]) for r, row in enumerate(table_data)
                      if c < len(row)]
@@ -4941,11 +4966,16 @@ class ExportHandlerBase(APIHandler):
             minimums.append(max(
                 [measure(word, r) for r, t in cells for word in t.split()]
                 + [floor]))
-        return cls.fit_column_widths(natural, minimums, available)
+            header.append(max(
+                [measure(word, r) for r, t in cells if r == 0
+                 for word in t.split()] + [floor]))
+        return cls.fit_column_widths(natural, minimums, available,
+                                     header if has_header else None)
 
     @classmethod
     def pdf_table_column_layout(cls, table_data: list, available: float,
-                                string_width, image_widths: list | None = None) -> tuple:
+                                string_width, image_widths: list | None = None,
+                                has_header: bool = False) -> tuple:
         """Cell padding and column widths for a PDF table of ``available`` width.
 
         ``string_width(text, row_index)`` measures rendered text. reportlab
@@ -4960,6 +4990,11 @@ class ExportHandlerBase(APIHandler):
         points (the DOCX path floors the same way). measured_column_widths caps
         each floor at a fair share so an image cannot starve its text neighbours.
 
+        ``has_header`` says row 0 is a header: each column is then at least as
+        wide as the longest word of its header while the table still fits. A
+        table with a header that splits a word at the full padding gets half
+        of it, or 1pt, when no word is split then.
+
         Past roughly 150 columns a column is narrower than a single wide glyph
         at any font size used here, and reportlab paints such a glyph past its
         column - the borders stay inside the margin but the ink can pass it by
@@ -4972,22 +5007,40 @@ class ExportHandlerBase(APIHandler):
         # (>= 16pt) and then past a hairline column (>= 3pt)
         full = cls.PDF_TABLE_CELL_PADDING
         side_padding = full if fair_share >= 16 else (1 if fair_share >= 3 else 0)
-        # Both paddings, plus rounding slack so a word whose width matches its
-        # column is not split mid-word
-        cell_padding = 2 * side_padding + 2
 
-        def measure(text, row_index):
-            return string_width(text, row_index) + cell_padding
+        def layout(padding):
+            """Column widths at one padding, and whether no word is split."""
+            # Both paddings, plus rounding slack so a word whose width matches
+            # its column is not split mid-word
+            cell_padding = 2 * padding + 2
 
-        # An image floor is the image content width plus the same padding a
-        # text measurement carries, so the column holds the image at full size
-        floors = None
-        if image_widths and any(image_widths):
-            floors = [w + cell_padding if w else 0.0 for w in image_widths]
+            def measure(text, row_index):
+                return string_width(text, row_index) + cell_padding
 
-        # The empty-cell floor already keeps every width above the padding
-        return side_padding, cls.measured_column_widths(
-            table_data, available, measure, floors)
+            # An image floor is the image content width plus the same padding
+            # a text measurement carries, so the column holds the image at
+            # full size
+            floors = None
+            if image_widths and any(image_widths):
+                floors = [w + cell_padding if w else 0.0 for w in image_widths]
+
+            # The empty-cell floor already keeps every width above the padding
+            widths = cls.measured_column_widths(
+                table_data, available, measure, floors, has_header)
+            return widths, all(
+                measure(word, r) <= widths[c] + 1e-6
+                for r, row in enumerate(table_data)
+                for c, text in enumerate(row) for word in text.split())
+
+        widths, whole = layout(side_padding)
+        if has_header and not whole:
+            # The header floor takes width from the body columns: less padding
+            # when that alone keeps every word of the table whole
+            for tighter in (p for p in (full / 2, 1) if p < side_padding):
+                tight, whole = layout(tighter)
+                if whole:
+                    return tighter, tight
+        return side_padding, widths
 
     # Cell content a `w:t` run does not carry, so `cell.text` cannot see it.
     # The blank-row predicate is the only thing between the header delete below
@@ -6456,7 +6509,8 @@ class ExportHandlerBase(APIHandler):
                         image_widths[c] = max(image_widths[c], widest)
 
             side_padding, col_widths = self.pdf_table_column_layout(
-                measure_data, frame_width, string_width, image_widths)
+                measure_data, frame_width, string_width, image_widths,
+                has_header)
 
             # A cell adds 4pt top + 4pt bottom padding around its content, and
             # the header row overrides its bottom padding to 8pt (12pt total).

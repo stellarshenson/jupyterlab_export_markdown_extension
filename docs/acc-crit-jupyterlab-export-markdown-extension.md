@@ -17,6 +17,14 @@ Exported content must stay inside the printable page - a table must not strand i
 | Image scaled to page width              | existing             | existing             | `max-width:100%` existing |
 | Image scaled down further when too tall | scale to page height | existing             | `@media print` max-height |
 
+- [x] `ACC-PAGE-132-HEADER-WORD` **PDF: header words stay whole** - MEDIUM; a PDF table column is at least as wide as its header's longest word while the header words fit the page; else the table stays inside the page and words split; a table with a header takes 3pt or 1pt cell padding when that keeps every word whole
+  - evidence: test_pdf_header_words_stay_whole, test_header_word_passes_the_fair_share_only_while_the_row_fits, test_pdf_layout_takes_less_padding_to_keep_every_word_whole pass and fail at dffddfa; pytest 438 green
+  - test: pytest -k 'header_word or less_padding'
+  - test-tags: UNIT, FUNCTIONAL
+  - mechanism: 2026-11-16T08:30:48Z @kj fit_column_widths lifts the fair-share cap: all words when they fit, else header words; pdf_table_column_layout retries at less padding
+  - log: 2026-11-16T08:30:48Z @kj added
+  - log: 2026-11-16T08:34:38Z @kj closed
+
 ### Orphan header pagination
 
 - [x] `ACC-PAGE-1` **PDF: no header-only page bottom** - a content table whose header row would sit at a page bottom with no body row after it on that page is moved whole to the next page

@@ -531,10 +531,15 @@
   - log: 2026-09-21T17:34:57Z @kj added
   - log: 2026-09-21T18:03:46Z @kj closed
   - log: 2026-09-21T18:06:17Z @kj round-2 bug-hunter: the full-row undo now also stops the merge chain (a continuation below the gap merged the wrong cell and its neighbour vanished from the PDF), test test_a_gap_in_the_rowspan_stops_the_merge_chain, mutation-proved; architect comment fixes applied; ux width residue is DEF-MARK-118
-- [ ] `DEF-MARK-118` **PDF columns have no floor at their longest unbreakable token, so headers break mid-word** - MEDIUM; pdf_table_column_layout normalises measured widths with no minimum at a column's widest token, and reportlab then splits characters: the danaeg sizing PDF renders Requirem/ents in the 7-column header and Develop/ment, Experime/nts, Integrati/on, Validatio/n in the spanless 8-column hours table, which no span change touches - the class predates the merge feature. A longest-token floor trades against the fitted-within-page design the wide-table tests pin, so it needs its own measured change
+- [x] `DEF-MARK-118` **PDF columns have no floor at their longest unbreakable token, so headers break mid-word** - MEDIUM; pdf_table_column_layout normalises measured widths with no minimum at a column's widest token, and reportlab then splits characters: the danaeg sizing PDF renders Requirem/ents in the 7-column header and Develop/ment, Experime/nts, Integrati/on, Validatio/n in the spanless 8-column hours table, which no span change touches - the class predates the merge feature. A longest-token floor trades against the fitted-within-page design the wide-table tests pin, so it needs its own measured change
+  - evidence: fixed: cap lifted while every word fits, else for header words; a header table takes 3pt or 1pt padding when that keeps every word whole; danaeg sizing PDF: no split word in the 7- and 8-column tables; test_pdf_header_words_stay_whole fails at dffddfa; pytest 438, Galata 5
+  - test-tags: UNIT, FUNCTIONAL
+  - root-cause: 2026-11-16T08:34:38Z @kj fit_column_widths caps every column minimum at available/ncols, so a header word wider than an equal share of the page (8 columns: 66pt, Development needs 95pt) gets a column narrower than itself and reportlab splits it between letters
   - related: DEF-MARK-117 - the merge fix whose review surfaced this pre-existing class
   - repro: Export 03-sizing-poc-models-and-outcomes.md to PDF; page 3 header reads Requirem/ents, page 8 breaks four headers of the hours table
   - log: 2026-09-21T18:03:45Z @kj added
+  - log: 2026-11-16T08:34:38Z @kj edited test-tags added "UNIT, FUNCTIONAL"
+  - log: 2026-11-16T08:34:38Z @kj closed
 - [x] `DEF-MARK-120` **image syntax inside a code sample is rewritten to base64** - MEDIUM; a fenced or inline code sample showing `![logo](logo.png)` exports with a data URI in place of the path when logo.png exists
   - evidence: test_image_syntax_inside_code_is_left_as_written passes and fails without the _outside split; pytest 413 green
   - repro: export a code block holding `![logo](logo.png)` beside an existing logo.png; the block shows data:image/png;base64

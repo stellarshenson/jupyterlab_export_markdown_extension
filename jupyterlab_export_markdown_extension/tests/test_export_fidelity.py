@@ -2436,6 +2436,36 @@ class TestWideTableFitsPage:
         overflowing = pdf_text_past_margin(response.body)
         assert not overflowing, f"text past the right margin: {overflowing[:3]}"
 
+    async def test_pdf_header_words_stay_whole(self, jp_fetch, jp_root_dir):
+        """DEF-MARK-118: a header word wider than an equal share of the page
+        is not split while the table still fits the page."""
+        import fitz
+
+        heads = ["ID", "Model", "Development", "Experiments", "Data prep",
+                 "Integration", "Validation", "Total"]
+        row = ["M1", "One run on the data of each site and each barn"] \
+            + ["12 h"] * 6
+        (jp_root_dir / "hours.md").write_text(
+            "| " + " | ".join(heads) + " |\n" + "|---" * 8 + "|\n"
+            + "| " + " | ".join(row) + " |\n", encoding="utf-8")
+
+        response = await jp_fetch(
+            "jupyterlab-export-markdown-extension",
+            "export/pdf",
+            method="POST",
+            body=json.dumps({"path": "hours.md"}),
+            raise_error=False,
+        )
+        assert response.code == 200, response.body[:300]
+
+        doc = fitz.open(stream=response.body, filetype="pdf")
+        words = {w[4] for page in doc for w in page.get_text("words")}
+        doc.close()
+        whole = set(" ".join(heads).split())
+        assert whole <= words, f"header words split: {sorted(whole - words)}"
+        overflowing = pdf_text_past_margin(response.body)
+        assert not overflowing, f"text past the right margin: {overflowing[:3]}"
+
     async def test_docx_overflowing_table_is_always_fitted(self, jp_fetch,
                                                            jp_root_dir):
         """A table over the page width must never slip past the fitter.
@@ -2947,6 +2977,35 @@ class TestColumnWidthFitting:
     def test_minimums_wider_than_the_page_fall_back_to_equal_columns(self):
         widths = self._fit([900, 900], [400, 400], 500)
         assert widths == [250, 250]
+
+    def test_header_word_passes_the_fair_share_only_while_the_row_fits(self):
+        """DEF-MARK-118: the fair share is 100, a header word needs 150."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        fit = ExportHandlerBase.fit_column_widths
+        # The body words of columns 1 and 2 do not fit; they give way
+        widths = fit([400] * 3, [150, 400, 400], 300, [150, 20, 20])
+        assert widths[0] >= 150, "the header word is split"
+        assert sum(widths) == pytest.approx(300)
+        # Header words wider than the page: the fit inside the page wins
+        assert fit([400] * 3, [150] * 3, 300, [150] * 3) == [100, 100, 100]
+
+    def test_pdf_layout_takes_less_padding_to_keep_every_word_whole(self):
+        """DEF-MARK-118: 8 words of 55pt fit 528pt at 3pt padding, not at 6."""
+        from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
+
+        table_data = [["x" * 11] * 8, ["a b c d e f g h i j k l m n"] * 8]
+
+        def layout(has_header):
+            return ExportHandlerBase.pdf_table_column_layout(
+                table_data, 528.0, lambda text, _row: len(text) * 5.0,
+                None, has_header)
+
+        padding, widths = layout(True)
+        assert padding == ExportHandlerBase.PDF_TABLE_CELL_PADDING / 2
+        assert min(widths) >= 55 + 2 * padding, "a header word is split"
+        assert sum(widths) <= 528 + 1e-6
+        assert layout(False)[0] == ExportHandlerBase.PDF_TABLE_CELL_PADDING
 
     def _measure(self, table_data, available, floors=None):
         from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
