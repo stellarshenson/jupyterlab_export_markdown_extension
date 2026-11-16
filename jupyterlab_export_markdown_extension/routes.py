@@ -3392,7 +3392,10 @@ class ExportHandlerBase(APIHandler):
                 # stood alone above a list, a heading or a fence
                 if blocks and (element is elements[-1] or (
                         element is first._p and not first.text.strip()
-                        and first._p.find('.//' + qn('w:drawing')) is None)):
+                        and not any(
+                            first._p.findall(
+                                './/' + (tag if tag.startswith('{') else qn(tag)))
+                            for tag in self.DOCX_CONTENT_ELEMENTS))):
                     continue
                 tc.append(copy.deepcopy(element))
             tr.append(tc)
@@ -6399,16 +6402,23 @@ class ExportHandlerBase(APIHandler):
                     # the body, in the width the box's 12 + 8 padding leaves
                     result = process_paragraph(p, frame_width - 20)
                     flow.extend(result if isinstance(result, list) else [result])
-                    continue
-                markup = ''.join(format_run(run) for run in self.docx_paragraph_runs(p)).strip()
-                if markup:
-                    style = heading_style_for(p) or callout_body_style
-                    if not flow and style.spaceBefore:
-                        # The cell's own top padding is the space above the
-                        # first line; the heading's would sit on top of it
-                        style = ParagraphStyle(f'{style.name}-boxtop',
-                                               parent=style, spaceBefore=0)
-                    flow.append(Paragraph(markup, style))
+                else:
+                    markup = ''.join(format_run(run) for run in self.docx_paragraph_runs(p)).strip()
+                    if markup:
+                        style = heading_style_for(p) or callout_body_style
+                        if not flow and style.spaceBefore:
+                            # The cell's own top padding is the space above the
+                            # first line; the heading's would sit on top of it
+                            style = ParagraphStyle(f'{style.name}-boxtop',
+                                                   parent=style, spaceBefore=0)
+                        flow.append(Paragraph(markup, style))
+                # A picture or a formula of the paragraph, in the height the
+                # box's 6 + 6 padding leaves on one page
+                for drawing in p._p.findall('.//' + qn('w:drawing')):
+                    img = process_image(drawing, doc, max_width=frame_width - 20,
+                                        max_height=frame_height - 12)
+                    if img is not None:
+                        flow.append(img)
             if not flow:
                 flow = [Paragraph('&nbsp;', callout_body_style)]
             return make_callout(flow, bar_hex, shd_hex, left_pad=12, frame=frame)

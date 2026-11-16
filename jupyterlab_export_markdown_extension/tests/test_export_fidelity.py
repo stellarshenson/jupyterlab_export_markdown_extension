@@ -4763,6 +4763,20 @@ class TestAlertBlockStructure:
             '> <div style="border:1px solid red">boxed</div>\n')))
         assert [t.rows[0].cells[0].text for t in boxed.tables] == ['item\nboxed']
 
+    async def test_docx_box_keeps_a_formula_alone_on_its_first_line(
+            self, jp_fetch, jp_root_dir):
+        """The marker paragraph holds no text when a formula is all that
+        follows the marker; it was taken for an empty marker and removed."""
+        from docx import Document
+
+        doc = Document(io.BytesIO(await self._export(
+            jp_fetch, jp_root_dir, "docx",
+            "> [!NOTE]\n> $E = mc^2$\n> - a\n> - b\n")))
+        tables = self._alert_tables(doc, '0969DA')
+        assert len(tables) == 1, f"expected one NOTE table, got {len(tables)}"
+        assert tables[0]._tbl.xml.count("</m:oMath>") == 1, (
+            "the formula is not in the alert box")
+
     async def test_pdf_box_holds_the_list_and_the_sample(
             self, jp_fetch, jp_root_dir):
         import fitz
@@ -4783,6 +4797,27 @@ class TestAlertBlockStructure:
             assert where and any(box.contains(where[0]) for box in boxes), (
                 f"{words!r} is not inside the alert box")
         doc.close()
+
+    async def test_pdf_box_keeps_the_picture_and_the_formula(
+            self, jp_fetch, jp_root_dir):
+        """The callout drew the text of each paragraph and none of its
+        drawings, so an alert that holds a list lost every picture and
+        formula. A picture taller than the page must still fit one."""
+        from PIL import Image as PILImage
+        from pypdf import PdfReader
+
+        PILImage.new("RGB", (60, 40), color=(20, 60, 180)).save(
+            jp_root_dir / "pic.png")
+        PILImage.new("RGB", (600, 4000), color=(180, 40, 40)).save(
+            jp_root_dir / "tall.png")
+        for body in ("> - mass $E = mc^2$\n> - b\n",
+                     "> $E = mc^2$\n> - a\n> - b\n",
+                     "> - a\n>\n> ![pic](pic.png)\n",
+                     "> - a\n>\n> ![tall](tall.png)\n"):
+            pdf = PdfReader(io.BytesIO(await self._export(
+                jp_fetch, jp_root_dir, "pdf", "> [!NOTE]\n" + body)))
+            found = sum(len(page.images) for page in pdf.pages)
+            assert found == 1, f"{found} images in the PDF of {body!r}"
 
     async def test_an_alert_inside_a_numbered_step_keeps_one_list(
             self, jp_fetch, jp_root_dir):

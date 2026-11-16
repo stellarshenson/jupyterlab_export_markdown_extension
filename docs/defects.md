@@ -575,6 +575,21 @@
   - test-tags: INTEGRATION
   - log: 2026-11-13T18:52:21Z @kj added
   - log: 2026-11-13T18:56:12Z @kj closed
+- [x] `DEF-MARK-132-ALERT-DRAWING` **PDF alert that holds a list loses its pictures and formulas** - MAJOR; a picture or a formula inside an alert that also holds a list, a heading or a code fence is absent from the PDF; DOCX and HTML keep it; fix: process_alert draws every w:drawing of each paragraph, capped at frame_height - 12; `routes.py`
+  - evidence: test_pdf_box_keeps_the_picture_and_the_formula: 1 image in the PDF for a formula in a list item, a formula on the first line and a picture under a list (0 before the fix); a 600x4000 px picture in the box answers 200
+  - repro: export to PDF: '> [!NOTE]' / '> - mass $E = mc^2$' / '> - b'; the formula is absent
+  - test-tags: INTEGRATION
+  - root-cause: 2026-11-16T09:18:30Z @kj process_alert built each paragraph of the box from its text runs or process_paragraph and never read a w:drawing; an alert on the block path (list, heading or fence, added with DEF-MARK-14) carries its pictures and formulas as w:drawing in those paragraphs
+  - log: 2026-11-16T09:17:35Z @kj added
+  - log: 2026-11-16T09:17:42Z @kj closed
+  - log: 2026-11-16T09:18:30Z @kj root-cause updated "2026-11-16T09:17:35Z @kj process_alert built each paragraph of the box from its text runs or process_paragraph and never read a w:drawing; the one-paragraph alert path draws through process_table cells, the block path added with DEF-MARK-14 does not" -> "process_alert built each paragraph of the box from its text runs or process_paragraph and never read a w:drawing; an alert on the block path (list, heading or fence, added with DEF-MARK-14) carries its pictures and formulas as w:drawing in those paragraphs"
+- [x] `DEF-MARK-133-ALERT-FORMULA` **DOCX alert loses a formula alone on its first line** - MEDIUM; an alert whose first line is only a formula and whose body holds a list exports to DOCX without the formula; fix: the marker paragraph is removed only when it holds none of DOCX_CONTENT_ELEMENTS; `routes.py`
+  - evidence: test_docx_box_keeps_a_formula_alone_on_its_first_line: 1 m:oMath inside the NOTE table (0 before the fix)
+  - repro: export to DOCX: '> [!NOTE]' / '> $E = mc^2$' / '> - a' / '> - b'; no m:oMath in the alert table
+  - test-tags: INTEGRATION
+  - root-cause: 2026-11-16T09:17:35Z @kj style_docx_alert_boxes took the marker paragraph for empty when it had no text and no w:drawing; a DOCX formula is m:oMath, which carries no w:t text and is no drawing
+  - log: 2026-11-16T09:17:35Z @kj added
+  - log: 2026-11-16T09:17:43Z @kj closed
 
 ## Diagram rendering `DIAG`
 
