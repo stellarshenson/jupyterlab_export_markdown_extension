@@ -2,6 +2,21 @@
 
 <!-- <START NEW CHANGELOG ENTRY> -->
 
+## [1.6.48] - 2026-11-16
+
+### Changed
+
+- Build every export off the server's event loop, one at a time
+
+### Fixed
+
+- Keep a picture or a formula inside an alert that holds a list
+- Keep the words of a PDF table header whole while the table fits the page
+- Keep the slant of an italic run beside a symbol in the PDF
+- Make a link to a heading reach it in HTML, DOCX and PDF
+- Remove the marker of a hand-drawn box written inside an alert that holds blocks
+- Keep lists, headings and code inside a GitHub alert box, and an alert inside a list item
+
 ## [1.6.40] - 2026-11-16
 
 ### Fixed
