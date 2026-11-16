@@ -686,3 +686,17 @@ Links from one place of a document to another: a contents list, a reference to a
   - mechanism: 2026-11-16T07:14:50Z @kj resolve_heading_links rewrites an href that is no id to the id of the heading with the same letters and digits; _bookmark_name hashes an id Word refuses; the PDF draws each bookmark as an AnchorFlowable
   - log: 2026-11-16T07:14:50Z @kj added
   - log: 2026-11-16T07:15:01Z @kj closed
+
+## Server responsiveness `LOOP`
+
+An export must not stop the rest of the lab: kernels, terminals and other requests are served by the same server process
+
+- log: 2026-11-16T08:02:00Z @kj category created
+
+- [x] `ACC-LOOP-131-BUILD-THREAD` **An export is built off the server's event loop, one at a time** - HIGH; every export route builds its document in one worker thread, so kernel output and terminals continue during a long export; a second export starts when the first has ended; routes, requests and responses are as before
+  - evidence: test_hardening.py::test_the_build_runs_off_the_event_loop_one_at_a_time: 3 exports sent together are built one after another, none on the main thread; fails at 854a84a
+  - test: pytest jupyterlab_export_markdown_extension/tests/test_hardening.py -k one_at_a_time
+  - test-tags: INTEGRATION
+  - mechanism: 2026-11-16T08:02:00Z @kj ExportHandlerBase.build_off_loop runs the handler's build coroutine with asyncio.run in the one-worker executor _BUILD_THREAD; the handler writes the response on the server's loop
+  - log: 2026-11-16T08:02:00Z @kj added
+  - log: 2026-11-16T08:02:07Z @kj closed

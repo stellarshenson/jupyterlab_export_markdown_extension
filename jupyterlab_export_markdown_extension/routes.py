@@ -18,6 +18,7 @@ import socket
 import tempfile
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from html import escape, unescape
 from itertools import groupby
 from pathlib import Path
@@ -176,6 +177,13 @@ BREAK_TAG_RE = re.compile(r'<br(?:\s[^>]*?)?/?>', re.IGNORECASE)
 #: The same tag, at the very end of a string. Used where a break is about to be
 #: appended and one the author already wrote has to count towards it.
 TRAILING_BREAK_RE = re.compile(BREAK_TAG_RE.pattern + r'\s*\Z', re.IGNORECASE)
+
+#: The one thread every export is built in. Off the server's event loop: on
+#: it, a long document stopped kernel output and terminals for the seconds its
+#: build took (DEF-EXPO-124). One worker, so one build at a time: matplotlib
+#: and reportlab's font registry are not safe for two builds at once.
+_BUILD_THREAD = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix='export-markdown-build')
 
 #: Built once - the rule is stateless, and `markdown_to_html` runs per export
 _MANUAL_BREAK_RULE = None
@@ -876,6 +884,14 @@ class ExportHandlerBase(APIHandler):
             return default
         low, high = bounds
         return min(max(width, low), high)
+
+    async def build_off_loop(self, build):
+        """Run the coroutine function ``build`` in the build thread, on an
+        event loop of its own, and return its result. An exception it raises
+        is raised here. ``build`` must not write the response: a tornado
+        handler is written on the server's loop only."""
+        return await asyncio.get_running_loop().run_in_executor(
+            _BUILD_THREAD, lambda: asyncio.run(build()))
 
     def get_absolute_path(self, relative_path: str) -> Path | None:
         """The file a path names inside the server root, or None when the
@@ -6729,115 +6745,118 @@ class ExportPdfHandler(ExportHandlerBase):
                 self.finish(json.dumps({'error': 'File not found'}))
                 return
 
-            content = self.read_markdown_file(file_path)
-            # Diagrams first, on the document as written - see the ordering
-            # rule on render_mermaid_server_side.
-            content, unrendered = self.replace_mermaid_with_images(
-                content, mermaid_diagrams, use_png=True)
-            content, export_warnings = await self.render_mermaid_server_side(
-                content, color_scheme=svg_color_scheme,
-                png_width=svg_pixel_width, diagram_indices=unrendered)
-            content = self.preprocess_task_lists(content)
-            content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
-            content = self.replace_math_with_images(content, width=math_pixel_width)
-            not_embedded: list[str] = []
-            # In a thread: a remote image is a blocking download of up to
-            # 10 s, and on the event loop it froze every kernel and terminal
-            content = await asyncio.to_thread(
-                self.embed_images_as_base64, content, file_path.parent,
-                not_embedded)
-            # After every pass that rewrites the source and before the
-            # format's own code-block handling: the pass measures what the
-            # converter will render, so it must see the text the converter
-            # gets. Measured on the raw source, a display-math item that the
-            # math pass rewrites to a bare `- ` line was certified as a list
-            # and rendered as the setext underline of the item above it.
-            content = self.normalize_list_indentation(content)
+            # Off the event loop, one build at a time - see _BUILD_THREAD
+            async def build():
+                content = self.read_markdown_file(file_path)
+                # Diagrams first, on the document as written - see the ordering
+                # rule on render_mermaid_server_side.
+                content, unrendered = self.replace_mermaid_with_images(
+                    content, mermaid_diagrams, use_png=True)
+                content, export_warnings = await self.render_mermaid_server_side(
+                    content, color_scheme=svg_color_scheme,
+                    png_width=svg_pixel_width, diagram_indices=unrendered)
+                content = self.preprocess_task_lists(content)
+                content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
+                content = self.replace_math_with_images(content, width=math_pixel_width)
+                not_embedded: list[str] = []
+                # In a thread: a remote image is a blocking download of up to
+                # 10 s, and on the event loop it froze every kernel and terminal
+                content = await asyncio.to_thread(
+                    self.embed_images_as_base64, content, file_path.parent,
+                    not_embedded)
+                # After every pass that rewrites the source and before the
+                # format's own code-block handling: the pass measures what the
+                # converter will render, so it must see the text the converter
+                # gets. Measured on the raw source, a display-math item that the
+                # math pass rewrites to a bare `- ` line was certified as a list
+                # and rendered as the setext underline of the item above it.
+                content = self.normalize_list_indentation(content)
 
-            # Extract code blocks for PDF rendering (before DOCX conversion)
-            content, code_blocks = self.extract_code_blocks(content)
+                # Extract code blocks for PDF rendering (before DOCX conversion)
+                content, code_blocks = self.extract_code_blocks(content)
 
-            html = self.markdown_to_html(content, file_path.stem,
-                                         base_pt=base_pt)
+                html = self.markdown_to_html(content, file_path.stem,
+                                             base_pt=base_pt)
 
-            # Step 1: Create DOCX in memory (same logic as DOCX export)
-            from htmldocx import HtmlToDocx
-            from docx import Document
-            from docx.shared import Inches
+                # Step 1: Create DOCX in memory (same logic as DOCX export)
+                from htmldocx import HtmlToDocx
+                from docx import Document
+                from docx.shared import Inches
 
-            body_match = re.search(r'<body>(.*?)</body>', html, re.DOTALL)
-            body_html = body_match.group(1) if body_match else html
+                body_match = re.search(r'<body>(.*?)</body>', html, re.DOTALL)
+                body_html = body_match.group(1) if body_match else html
 
-            # Fix loose-list bullets and tag blockquotes before htmldocx
-            body_html = self.restructure_html_for_docx(body_html)
-            body_html = self.inject_anchor_markers(body_html)
-            body_html = self.drop_unembedded_images(body_html, not_embedded)
+                # Fix loose-list bullets and tag blockquotes before htmldocx
+                body_html = self.restructure_html_for_docx(body_html)
+                body_html = self.inject_anchor_markers(body_html)
+                body_html = self.drop_unembedded_images(body_html, not_embedded)
 
-            with tempfile.TemporaryDirectory() as temp_dir:
-                body_html = await self.extract_data_uri_images(
-                    body_html, temp_dir,
-                    convert_svg=True,
-                    svg_pixel_width=svg_pixel_width,
-                    color_scheme=svg_color_scheme,
-                )
-
-                document = Document()
-
-                for section in document.sections:
-                    section.top_margin = Inches(0.5)
-                    section.bottom_margin = Inches(0.5)
-                    section.left_margin = Inches(0.5)
-                    section.right_margin = Inches(0.5)
-
-                parser = HtmlToDocx()
-                parser.add_html_to_document(body_html, document)
-
-                self.apply_anchor_bookmarks(document)
-                # One numbering instance per ordered list, mark removed
-                self.restart_docx_list_numbering(document)
-                # Style and de-marker blockquotes (also strips the marker so it
-                # never leaks into the PDF text rebuild below)
-                self.style_docx_blockquotes(document)
-                # Apply true run shading to coloured pills (background spans)
-                self.style_docx_color_runs(document)
-
-                # Style GitHub alert boxes with colored borders and shading
-                self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
-
-                # Rebuild colspan/rowspan merges: the PDF rebuild reads the
-                # gridSpan/vMerge off this intermediate, and the marker must
-                # not reach the text it renders
-                self.merge_docx_table_spans(document)
-
-                # No table styling or fitting here: this DOCX is only an
-                # intermediate for convert_docx_to_pdf, which reads cell text
-                # and applies its own style and column widths
-
-                while document.paragraphs and not document.paragraphs[0].text.strip():
-                    p_elem = document.paragraphs[0]._element
-                    # Keep paragraphs that contain images (drawings or VML)
-                    from docx.oxml.ns import qn as _qn
-                    has_image = bool(
-                        p_elem.findall('.//' + _qn('w:drawing')) or
-                        p_elem.findall('.//{urn:schemas-microsoft-com:vml}imagedata')
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    body_html = await self.extract_data_uri_images(
+                        body_html, temp_dir,
+                        convert_svg=True,
+                        svg_pixel_width=svg_pixel_width,
+                        color_scheme=svg_color_scheme,
                     )
-                    if has_image:
-                        break
-                    p_elem.getparent().remove(p_elem)
 
-                # Remove empty paragraphs before images
-                self.remove_empty_paragraphs_before_images(document)
+                    document = Document()
 
-                docx_buffer = io.BytesIO()
-                document.save(docx_buffer)
-                docx_bytes = docx_buffer.getvalue()
+                    for section in document.sections:
+                        section.top_margin = Inches(0.5)
+                        section.bottom_margin = Inches(0.5)
+                        section.left_margin = Inches(0.5)
+                        section.right_margin = Inches(0.5)
 
-            # Step 2: Convert DOCX to PDF using reportlab (with code blocks)
-            pdf_content = self.convert_docx_to_pdf(docx_bytes, code_blocks,
-                                                   base_pt=base_pt)
+                    parser = HtmlToDocx()
+                    parser.add_html_to_document(body_html, document)
 
-            self.set_export_warnings(
-                export_warnings + self.image_warnings(not_embedded))
+                    self.apply_anchor_bookmarks(document)
+                    # One numbering instance per ordered list, mark removed
+                    self.restart_docx_list_numbering(document)
+                    # Style and de-marker blockquotes (also strips the marker so it
+                    # never leaks into the PDF text rebuild below)
+                    self.style_docx_blockquotes(document)
+                    # Apply true run shading to coloured pills (background spans)
+                    self.style_docx_color_runs(document)
+
+                    # Style GitHub alert boxes with colored borders and shading
+                    self.style_docx_alert_boxes(document, show_labels=show_alert_labels)
+
+                    # Rebuild colspan/rowspan merges: the PDF rebuild reads the
+                    # gridSpan/vMerge off this intermediate, and the marker must
+                    # not reach the text it renders
+                    self.merge_docx_table_spans(document)
+
+                    # No table styling or fitting here: this DOCX is only an
+                    # intermediate for convert_docx_to_pdf, which reads cell text
+                    # and applies its own style and column widths
+
+                    while document.paragraphs and not document.paragraphs[0].text.strip():
+                        p_elem = document.paragraphs[0]._element
+                        # Keep paragraphs that contain images (drawings or VML)
+                        from docx.oxml.ns import qn as _qn
+                        has_image = bool(
+                            p_elem.findall('.//' + _qn('w:drawing')) or
+                            p_elem.findall('.//{urn:schemas-microsoft-com:vml}imagedata')
+                        )
+                        if has_image:
+                            break
+                        p_elem.getparent().remove(p_elem)
+
+                    # Remove empty paragraphs before images
+                    self.remove_empty_paragraphs_before_images(document)
+
+                    docx_buffer = io.BytesIO()
+                    document.save(docx_buffer)
+                    docx_bytes = docx_buffer.getvalue()
+
+                # Step 2: Convert DOCX to PDF using reportlab (with code blocks)
+                pdf_content = self.convert_docx_to_pdf(docx_bytes, code_blocks,
+                                                       base_pt=base_pt)
+                return pdf_content, export_warnings + self.image_warnings(not_embedded)
+
+            pdf_content, warnings = await self.build_off_loop(build)
+            self.set_export_warnings(warnings)
             self.set_header('Content-Type', 'application/pdf')
             self.set_attachment_filename(f'{file_path.stem}.pdf')
             self.finish(pdf_content)
@@ -6894,218 +6913,221 @@ class ExportDocxHandler(ExportHandlerBase):
                 self.finish(json.dumps({'error': 'File not found'}))
                 return
 
-            content = self.read_markdown_file(file_path)
-            # Diagrams first, on the document as written - see the ordering
-            # rule on render_mermaid_server_side. Use PNG for DOCX (better
-            # Word compatibility).
-            content, unrendered = self.replace_mermaid_with_images(
-                content, mermaid_diagrams, use_png=True)
-            content, export_warnings = await self.render_mermaid_server_side(
-                content, color_scheme=svg_color_scheme,
-                png_width=svg_pixel_width, diagram_indices=unrendered)
-            content = self.preprocess_task_lists(content)
-            content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
-            # Use OMML markers for DOCX (native Word equations)
-            content, inline_math, display_math = self.replace_math_with_markers(content)
-            not_embedded: list[str] = []
-            # In a thread: a remote image is a blocking download of up to
-            # 10 s, and on the event loop it froze every kernel and terminal
-            content = await asyncio.to_thread(
-                self.embed_images_as_base64, content, file_path.parent,
-                not_embedded)
-            # After every pass that rewrites the source and before the
-            # format's own code-block handling: the pass measures what the
-            # converter will render, so it must see the text the converter
-            # gets. Measured on the raw source, a display-math item that the
-            # math pass rewrites to a bare `- ` line was certified as a list
-            # and rendered as the setext underline of the item above it.
-            content = self.normalize_list_indentation(content)
-            # Highlight code blocks with inline styles for DOCX
-            content = self.highlight_code_blocks(content, use_inline_styles=True)
-            html = self.markdown_to_html(content, file_path.stem,
-                                         base_pt=base_pt)
+            # Off the event loop, one build at a time - see _BUILD_THREAD
+            async def build():
+                content = self.read_markdown_file(file_path)
+                # Diagrams first, on the document as written - see the ordering
+                # rule on render_mermaid_server_side. Use PNG for DOCX (better
+                # Word compatibility).
+                content, unrendered = self.replace_mermaid_with_images(
+                    content, mermaid_diagrams, use_png=True)
+                content, export_warnings = await self.render_mermaid_server_side(
+                    content, color_scheme=svg_color_scheme,
+                    png_width=svg_pixel_width, diagram_indices=unrendered)
+                content = self.preprocess_task_lists(content)
+                content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
+                # Use OMML markers for DOCX (native Word equations)
+                content, inline_math, display_math = self.replace_math_with_markers(content)
+                not_embedded: list[str] = []
+                # In a thread: a remote image is a blocking download of up to
+                # 10 s, and on the event loop it froze every kernel and terminal
+                content = await asyncio.to_thread(
+                    self.embed_images_as_base64, content, file_path.parent,
+                    not_embedded)
+                # After every pass that rewrites the source and before the
+                # format's own code-block handling: the pass measures what the
+                # converter will render, so it must see the text the converter
+                # gets. Measured on the raw source, a display-math item that the
+                # math pass rewrites to a bare `- ` line was certified as a list
+                # and rendered as the setext underline of the item above it.
+                content = self.normalize_list_indentation(content)
+                # Highlight code blocks with inline styles for DOCX
+                content = self.highlight_code_blocks(content, use_inline_styles=True)
+                html = self.markdown_to_html(content, file_path.stem,
+                                             base_pt=base_pt)
 
-            from htmldocx import HtmlToDocx
-            from docx import Document
-            from docx.shared import Emu, Inches, Twips
+                from htmldocx import HtmlToDocx
+                from docx import Document
+                from docx.shared import Emu, Inches, Twips
 
-            # Extract just the body content for DOCX conversion
-            body_match = re.search(r'<body>(.*?)</body>', html, re.DOTALL)
-            body_html = body_match.group(1) if body_match else html
+                # Extract just the body content for DOCX conversion
+                body_match = re.search(r'<body>(.*?)</body>', html, re.DOTALL)
+                body_html = body_match.group(1) if body_match else html
 
-            # Fix loose-list bullets and tag blockquotes before htmldocx
-            body_html = self.restructure_html_for_docx(body_html)
+                # Fix loose-list bullets and tag blockquotes before htmldocx
+                body_html = self.restructure_html_for_docx(body_html)
 
-            # Inject bookmark sentinels for every id="..." anchor so Word
-            # internal links (#anchor) resolve after htmldocx strips them.
-            body_html = self.inject_anchor_markers(body_html)
-            body_html = self.drop_unembedded_images(body_html, not_embedded)
+                # Inject bookmark sentinels for every id="..." anchor so Word
+                # internal links (#anchor) resolve after htmldocx strips them.
+                body_html = self.inject_anchor_markers(body_html)
+                body_html = self.drop_unembedded_images(body_html, not_embedded)
 
-            # Use temp directory for images (htmldocx can't handle data URIs)
-            with tempfile.TemporaryDirectory() as temp_dir:
-                body_html = await self.extract_data_uri_images(
-                    body_html, temp_dir,
-                    convert_svg=True,
-                    svg_pixel_width=svg_pixel_width,
-                    color_scheme=svg_color_scheme,
-                )
-
-                document = Document()
-
-                # Set document margins (0.5 inch)
-                for section in document.sections:
-                    section.top_margin = Inches(0.5)
-                    section.bottom_margin = Inches(0.5)
-                    section.left_margin = Inches(0.5)
-                    section.right_margin = Inches(0.5)
-
-                parser = HtmlToDocx()
-                parser.add_html_to_document(body_html, document)
-
-                # Insert native OMML equations replacing markers
-                self.merge_inline_math_omml(document, inline_math, display_math)
-
-                # Convert anchor markers to bookmarks and rewrite hash-prefix
-                # hyperlinks from external to internal links.
-                self.apply_anchor_bookmarks(document)
-                # One numbering instance per ordered list, mark removed
-                self.restart_docx_list_numbering(document)
-
-                # Style blockquotes (left bar, indent, shading) and strip marker
-                self.style_docx_blockquotes(document)
-                # Apply true run shading to coloured pills (background spans)
-                self.style_docx_color_runs(document)
-
-                # Style GitHub alert boxes with colored borders and shading
-                alert_tables = self.style_docx_alert_boxes(
-                    document, show_labels=show_alert_labels)
-
-                # Rebuild colspan/rowspan merges before the table passes
-                # measure the grid, and before the symbol pass can split a
-                # run the marker sits in
-                self.merge_docx_table_spans(document)
-
-                # Name a font on every glyph the body face cannot draw. After
-                # the marker passes above, which read a sentinel out of a run's
-                # text and would miss it once the run is split; before the
-                # strip below, which is the other half of the font decision.
-                self.style_docx_symbol_runs(document)
-
-                # Drop Courier from runs holding a character it has no glyph
-                # for. It runs after the split, so a symbol now sits in its own
-                # run and its pure-ASCII neighbours keep their monospace -
-                # inline code holding one star used to lose Courier entirely.
-                self.strip_monospace_from_unicode_runs(document)
-
-                # Style tables: banded rows (pale blue), no first column emphasis
-                # Usable page area - one source for both the table grid below
-                # and the image scaling further down
-                section = document.sections[0]
-                page_width = Emu(section.page_width - section.left_margin
-                                 - section.right_margin)
-                page_height = Emu(section.page_height - section.top_margin
-                                  - section.bottom_margin)
-                self.apply_docx_font_size(document, base_pt)
-                for table in document.tables:
-                    if table._tbl in alert_tables:
-                        continue
-                    self.style_docx_table(table)
-                    self.fit_docx_table_to_page(table, page_width.twips, base_pt)
-
-                # Remove empty paragraphs at the beginning
-                while document.paragraphs and not document.paragraphs[0].text.strip():
-                    p_elem = document.paragraphs[0]._element
-                    # Keep paragraphs that contain images (drawings or VML)
-                    from docx.oxml.ns import qn as _qn
-                    has_image = bool(
-                        p_elem.findall('.//' + _qn('w:drawing')) or
-                        p_elem.findall('.//{urn:schemas-microsoft-com:vml}imagedata')
+                # Use temp directory for images (htmldocx can't handle data URIs)
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    body_html = await self.extract_data_uri_images(
+                        body_html, temp_dir,
+                        convert_svg=True,
+                        svg_pixel_width=svg_pixel_width,
+                        color_scheme=svg_color_scheme,
                     )
-                    if has_image:
-                        break
-                    p_elem.getparent().remove(p_elem)
 
-                # Remove empty paragraphs before images
-                self.remove_empty_paragraphs_before_images(document)
+                    document = Document()
 
-                from docx.oxml.ns import qn as _qn
+                    # Set document margins (0.5 inch)
+                    for section in document.sections:
+                        section.top_margin = Inches(0.5)
+                        section.bottom_margin = Inches(0.5)
+                        section.left_margin = Inches(0.5)
+                        section.right_margin = Inches(0.5)
 
-                def container_width(inline_el):
-                    """Usable width for an inline shape - its table cell width
-                    if nested in a table, otherwise the full page width.
+                    parser = HtmlToDocx()
+                    parser.add_html_to_document(body_html, document)
 
-                    Images in a multi-column table cell must be scaled to the
-                    cell, not the page; a page-width image overflows its cell
-                    and Word clips it at the cell boundary.
-                    """
-                    node = inline_el.getparent()
-                    tc = None
-                    while node is not None:
-                        if node.tag == _qn('w:tc'):
-                            tc = node
+                    # Insert native OMML equations replacing markers
+                    self.merge_inline_math_omml(document, inline_math, display_math)
+
+                    # Convert anchor markers to bookmarks and rewrite hash-prefix
+                    # hyperlinks from external to internal links.
+                    self.apply_anchor_bookmarks(document)
+                    # One numbering instance per ordered list, mark removed
+                    self.restart_docx_list_numbering(document)
+
+                    # Style blockquotes (left bar, indent, shading) and strip marker
+                    self.style_docx_blockquotes(document)
+                    # Apply true run shading to coloured pills (background spans)
+                    self.style_docx_color_runs(document)
+
+                    # Style GitHub alert boxes with colored borders and shading
+                    alert_tables = self.style_docx_alert_boxes(
+                        document, show_labels=show_alert_labels)
+
+                    # Rebuild colspan/rowspan merges before the table passes
+                    # measure the grid, and before the symbol pass can split a
+                    # run the marker sits in
+                    self.merge_docx_table_spans(document)
+
+                    # Name a font on every glyph the body face cannot draw. After
+                    # the marker passes above, which read a sentinel out of a run's
+                    # text and would miss it once the run is split; before the
+                    # strip below, which is the other half of the font decision.
+                    self.style_docx_symbol_runs(document)
+
+                    # Drop Courier from runs holding a character it has no glyph
+                    # for. It runs after the split, so a symbol now sits in its own
+                    # run and its pure-ASCII neighbours keep their monospace -
+                    # inline code holding one star used to lose Courier entirely.
+                    self.strip_monospace_from_unicode_runs(document)
+
+                    # Style tables: banded rows (pale blue), no first column emphasis
+                    # Usable page area - one source for both the table grid below
+                    # and the image scaling further down
+                    section = document.sections[0]
+                    page_width = Emu(section.page_width - section.left_margin
+                                     - section.right_margin)
+                    page_height = Emu(section.page_height - section.top_margin
+                                      - section.bottom_margin)
+                    self.apply_docx_font_size(document, base_pt)
+                    for table in document.tables:
+                        if table._tbl in alert_tables:
+                            continue
+                        self.style_docx_table(table)
+                        self.fit_docx_table_to_page(table, page_width.twips, base_pt)
+
+                    # Remove empty paragraphs at the beginning
+                    while document.paragraphs and not document.paragraphs[0].text.strip():
+                        p_elem = document.paragraphs[0]._element
+                        # Keep paragraphs that contain images (drawings or VML)
+                        from docx.oxml.ns import qn as _qn
+                        has_image = bool(
+                            p_elem.findall('.//' + _qn('w:drawing')) or
+                            p_elem.findall('.//{urn:schemas-microsoft-com:vml}imagedata')
+                        )
+                        if has_image:
                             break
-                        node = node.getparent()
-                    if tc is None:
-                        return page_width
-                    tbl = tc.getparent()
-                    while tbl is not None and tbl.tag != _qn('w:tbl'):
-                        tbl = tbl.getparent()
-                    cell_width = None
-                    if tbl is not None:
-                        grid = tbl.find(_qn('w:tblGrid'))
-                        cols = grid.findall(_qn('w:gridCol')) if grid is not None else []
-                        # Only a fitted table's grid states the real column
-                        # widths. Elsewhere (the alert boxes, whose single
-                        # gridCol is decorative next to their 100% tblW) the
-                        # grid is fiction, so fall back to an equal share.
-                        tbl_pr = tbl.find(_qn('w:tblPr'))
-                        fitted = (tbl_pr is not None
-                                  and tbl_pr.find(_qn('w:tblLayout')) is not None)
-                        row = tc.getparent()
-                        index = list(row.findall(_qn('w:tc'))).index(tc)
-                        if fitted and index < len(cols):
-                            # A fitted grid width is an outer width, so the
-                            # allowance due is exactly the cell margin baked
-                            # into it. No lower bound here: the column really
-                            # is that narrow, and an image wider than its cell
-                            # would push the fixed grid past the margin
-                            outer = int(cols[index].get(_qn('w:w')) or 0)
-                            return Twips(max(
-                                1, outer - self.DOCX_CELL_MARGIN_TWIPS))
-                        elif cols:
-                            cell_width = int(page_width / len(cols))
-                    if cell_width is None:
-                        cell_width = page_width
-                    # Per-cell content width, less the cell margin allowance
-                    return max(Inches(0.5),
-                               cell_width - Twips(self.DOCX_CELL_MARGIN_TWIPS))
+                        p_elem.getparent().remove(p_elem)
 
-                # Process images: scale every image down to fit its container
-                # (page width, or table cell width when nested in a table).
-                for shape in document.inline_shapes:
-                    orig_width = shape.width
-                    orig_height = shape.height
-                    max_width = container_width(shape._inline)
+                    # Remove empty paragraphs before images
+                    self.remove_empty_paragraphs_before_images(document)
 
-                    ratio = 1.0
-                    if orig_width > max_width:
-                        ratio = min(ratio, max_width / orig_width)
-                    if orig_height > page_height:
-                        ratio = min(ratio, page_height / orig_height)
+                    from docx.oxml.ns import qn as _qn
 
-                    if ratio < 1.0:
-                        # A column no wider than its own cell margin scales the
-                        # image to a fraction of an EMU; truncating either side
-                        # to zero writes a degenerate wp:extent
-                        shape.width = max(1, int(orig_width * ratio))
-                        shape.height = max(1, int(orig_height * ratio))
+                    def container_width(inline_el):
+                        """Usable width for an inline shape - its table cell width
+                        if nested in a table, otherwise the full page width.
 
-                docx_buffer = io.BytesIO()
-                document.save(docx_buffer)
-                docx_content = docx_buffer.getvalue()
+                        Images in a multi-column table cell must be scaled to the
+                        cell, not the page; a page-width image overflows its cell
+                        and Word clips it at the cell boundary.
+                        """
+                        node = inline_el.getparent()
+                        tc = None
+                        while node is not None:
+                            if node.tag == _qn('w:tc'):
+                                tc = node
+                                break
+                            node = node.getparent()
+                        if tc is None:
+                            return page_width
+                        tbl = tc.getparent()
+                        while tbl is not None and tbl.tag != _qn('w:tbl'):
+                            tbl = tbl.getparent()
+                        cell_width = None
+                        if tbl is not None:
+                            grid = tbl.find(_qn('w:tblGrid'))
+                            cols = grid.findall(_qn('w:gridCol')) if grid is not None else []
+                            # Only a fitted table's grid states the real column
+                            # widths. Elsewhere (the alert boxes, whose single
+                            # gridCol is decorative next to their 100% tblW) the
+                            # grid is fiction, so fall back to an equal share.
+                            tbl_pr = tbl.find(_qn('w:tblPr'))
+                            fitted = (tbl_pr is not None
+                                      and tbl_pr.find(_qn('w:tblLayout')) is not None)
+                            row = tc.getparent()
+                            index = list(row.findall(_qn('w:tc'))).index(tc)
+                            if fitted and index < len(cols):
+                                # A fitted grid width is an outer width, so the
+                                # allowance due is exactly the cell margin baked
+                                # into it. No lower bound here: the column really
+                                # is that narrow, and an image wider than its cell
+                                # would push the fixed grid past the margin
+                                outer = int(cols[index].get(_qn('w:w')) or 0)
+                                return Twips(max(
+                                    1, outer - self.DOCX_CELL_MARGIN_TWIPS))
+                            elif cols:
+                                cell_width = int(page_width / len(cols))
+                        if cell_width is None:
+                            cell_width = page_width
+                        # Per-cell content width, less the cell margin allowance
+                        return max(Inches(0.5),
+                                   cell_width - Twips(self.DOCX_CELL_MARGIN_TWIPS))
 
-            self.set_export_warnings(
-                export_warnings + self.image_warnings(not_embedded))
+                    # Process images: scale every image down to fit its container
+                    # (page width, or table cell width when nested in a table).
+                    for shape in document.inline_shapes:
+                        orig_width = shape.width
+                        orig_height = shape.height
+                        max_width = container_width(shape._inline)
+
+                        ratio = 1.0
+                        if orig_width > max_width:
+                            ratio = min(ratio, max_width / orig_width)
+                        if orig_height > page_height:
+                            ratio = min(ratio, page_height / orig_height)
+
+                        if ratio < 1.0:
+                            # A column no wider than its own cell margin scales the
+                            # image to a fraction of an EMU; truncating either side
+                            # to zero writes a degenerate wp:extent
+                            shape.width = max(1, int(orig_width * ratio))
+                            shape.height = max(1, int(orig_height * ratio))
+
+                    docx_buffer = io.BytesIO()
+                    document.save(docx_buffer)
+                    docx_content = docx_buffer.getvalue()
+                return docx_content, export_warnings + self.image_warnings(not_embedded)
+
+            docx_content, warnings = await self.build_off_loop(build)
+            self.set_export_warnings(warnings)
             self.set_header('Content-Type',
                           'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
             self.set_attachment_filename(f'{file_path.stem}.docx')
@@ -7161,44 +7183,47 @@ class ExportHtmlHandler(ExportHandlerBase):
                 self.finish(json.dumps({'error': 'File not found'}))
                 return
 
-            content = self.read_markdown_file(file_path)
-            # Diagrams first, on the document as written - see the ordering
-            # rule on render_mermaid_server_side.
-            content, unrendered = self.replace_mermaid_with_images(
-                content, mermaid_diagrams)
-            content, export_warnings = await self.render_mermaid_server_side(
-                content, color_scheme=mermaid_color_scheme,
-                png_width=None, diagram_indices=unrendered)
-            content = self.preprocess_task_lists(content)
-            content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
-            not_embedded: list[str] = []
-            # In a thread: a remote image is a blocking download of up to
-            # 10 s, and on the event loop it froze every kernel and terminal
-            content = await asyncio.to_thread(
-                self.embed_images_as_base64, content, file_path.parent,
-                not_embedded)
-            # After every pass that rewrites the source and before the
-            # format's own code-block handling: the pass measures what the
-            # converter will render, so it must see the text the converter
-            # gets. Measured on the raw source, a display-math item that the
-            # math pass rewrites to a bare `- ` line was certified as a list
-            # and rendered as the setext underline of the item above it.
-            content = self.normalize_list_indentation(content)
-            html = self.markdown_to_html(
-                content, file_path.stem, math_support=True,
-                theme=html_theme,
-                dark_background=dark_background,
-                light_background=light_background,
-                base_pt=base_pt
-            )
+            # Off the event loop, one build at a time - see _BUILD_THREAD
+            async def build():
+                content = self.read_markdown_file(file_path)
+                # Diagrams first, on the document as written - see the ordering
+                # rule on render_mermaid_server_side.
+                content, unrendered = self.replace_mermaid_with_images(
+                    content, mermaid_diagrams)
+                content, export_warnings = await self.render_mermaid_server_side(
+                    content, color_scheme=mermaid_color_scheme,
+                    png_width=None, diagram_indices=unrendered)
+                content = self.preprocess_task_lists(content)
+                content = self.preprocess_github_alerts(content, show_labels=show_alert_labels)
+                not_embedded: list[str] = []
+                # In a thread: a remote image is a blocking download of up to
+                # 10 s, and on the event loop it froze every kernel and terminal
+                content = await asyncio.to_thread(
+                    self.embed_images_as_base64, content, file_path.parent,
+                    not_embedded)
+                # After every pass that rewrites the source and before the
+                # format's own code-block handling: the pass measures what the
+                # converter will render, so it must see the text the converter
+                # gets. Measured on the raw source, a display-math item that the
+                # math pass rewrites to a bare `- ` line was certified as a list
+                # and rendered as the setext underline of the item above it.
+                content = self.normalize_list_indentation(content)
+                html = self.markdown_to_html(
+                    content, file_path.stem, math_support=True,
+                    theme=html_theme,
+                    dark_background=dark_background,
+                    light_background=light_background,
+                    base_pt=base_pt
+                )
 
-            # Style GitHub alert boxes with colored borders and shading
-            html = self.style_html_alert_boxes(html, show_labels=show_alert_labels)
-            html = self.drop_empty_table_headers(html)
-            html = self.wrap_html_tables(html)
+                # Style GitHub alert boxes with colored borders and shading
+                html = self.style_html_alert_boxes(html, show_labels=show_alert_labels)
+                html = self.drop_empty_table_headers(html)
+                html = self.wrap_html_tables(html)
+                return html, export_warnings + self.image_warnings(not_embedded)
 
-            self.set_export_warnings(
-                export_warnings + self.image_warnings(not_embedded))
+            html, warnings = await self.build_off_loop(build)
+            self.set_export_warnings(warnings)
             self.set_header('Content-Type', 'text/html; charset=utf-8')
             self.set_attachment_filename(f'{file_path.stem}.html')
             self.finish(html.encode('utf-8'))

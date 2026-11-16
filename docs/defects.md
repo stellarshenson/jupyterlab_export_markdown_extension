@@ -786,10 +786,13 @@
   - test-tags: INTEGRATION
   - log: 2026-11-13T18:09:58Z @kj added
   - log: 2026-11-13T18:10:43Z @kj closed
-- [ ] `DEF-EXPO-124-SYNC-CONVERT` **the conversion itself runs on the event loop** - MINOR; markdown, DOCX and PDF building are synchronous code inside the three async handlers, so a long document stalls kernels and terminals for the seconds its export takes; moving it to a thread re-indents each handler body and needs reportlab and matplotlib checked for concurrent use; `routes.py`
+- [x] `DEF-EXPO-124-SYNC-CONVERT` **the conversion itself runs on the event loop** - MINOR; markdown, DOCX and PDF building are synchronous code inside the three async handlers, so a long document stalls kernels and terminals for the seconds its export takes; moving it to a thread re-indents each handler body and needs reportlab and matplotlib checked for concurrent use; `routes.py`
+  - root-cause: 2026-11-16T08:02:00Z @kj the three post handlers ran the whole build (Markdown, htmldocx, python-docx, matplotlib math, reportlab) as synchronous calls on the server's event loop; only the image pass ran in a thread. build_off_loop now runs each build in the one-worker executor _BUILD_THREAD
+  - evidence: test_hardening.py::test_the_build_runs_off_the_event_loop_one_at_a_time passes and fails at 854a84a (all 3 builds on the main thread); an 80 KB document (79490 bytes) stalled the server loop 8.64 s for DOCX and 11.12 s for PDF at 854a84a, 0.12 s and 0.15 s after the change
   - repro: export an 80 KB document to PDF; kernel output stops until the download starts
   - test-tags: MANUAL
   - log: 2026-11-13T18:09:58Z @kj added
+  - log: 2026-11-16T08:01:52Z @kj closed
 
 ## Documentation `DOCS`
 

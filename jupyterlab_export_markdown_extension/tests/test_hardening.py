@@ -1,11 +1,13 @@
 """Server root containment, event-loop blocking, SVG network access and the
 small rendering defects closed with them."""
 
+import asyncio
 import http.server
 import io
 import json
 import re
 import threading
+import time
 import zipfile
 
 from jupyterlab_export_markdown_extension.routes import ExportHandlerBase
@@ -61,6 +63,35 @@ async def test_images_are_embedded_off_the_event_loop(
     (jp_root_dir / "plain.md").write_text("# plain\n", encoding="utf-8")
     assert (await _post(jp_fetch, "html", "plain.md")).code == 200
     assert seen == [False], "the image pass ran on the event loop thread"
+
+
+async def test_the_build_runs_off_the_event_loop_one_at_a_time(
+        jp_fetch, jp_root_dir, monkeypatch):
+    """DEF-EXPO-124: markdown, DOCX and PDF were built on the server's event
+    loop, so a long document stopped kernels and terminals for the seconds
+    its export took. Two builds never overlap: matplotlib and reportlab's
+    font registry are not safe for that."""
+    threads, running, at_once = [], [], []
+    original = ExportHandlerBase.markdown_to_html
+
+    def record(self, *args, **kwargs):
+        threads.append(threading.current_thread())
+        running.append(1)
+        at_once.append(len(running))
+        time.sleep(0.05)
+        try:
+            return original(self, *args, **kwargs)
+        finally:
+            running.pop()
+
+    monkeypatch.setattr(ExportHandlerBase, "markdown_to_html", record)
+    (jp_root_dir / "plain.md").write_text("# plain\n\n$x^2$\n", encoding="utf-8")
+    responses = await asyncio.gather(
+        *(_post(jp_fetch, fmt, "plain.md") for fmt in ("html", "docx", "pdf")))
+    assert [r.code for r in responses] == [200, 200, 200]
+    assert at_once == [1, 1, 1], "two builds ran at the same time"
+    assert threading.main_thread() not in threads, \
+        "a build ran on the event loop thread"
 
 
 async def test_user_svg_cannot_make_the_server_fetch_a_private_address(
